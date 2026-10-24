@@ -154,7 +154,7 @@ The visit-client answers `ready` (or closes: 4401 bad token, 4400 bad `proto`):
 {"type": "ready", "version": "0.1.0", "office": {"id": "o1a2b3c4", "name": "Magic Room"},
  "online": true, "status": "available", "max_visitors": 3,
  "visits": [{"id": "v…", "channel": 1, "role": "host", "peer": {"id": "o…", "name": "Ada", "sim": {…}}}],
- "limits": {"max_width": 1280, "max_height": 720, "fps": 15}}
+ "limits": {"max_width": 1280, "max_height": 720, "fps": 30}}
 ```
 
 followed by a `lobby` snapshot and any pending `knock`s.
@@ -341,9 +341,9 @@ dropped.
 ### 7.5 Bitrate
 
 The host's visit-client measures each link (QUIC's round-trip time and loss) and once a second tells its
-page the bitrate to encode that visit at (`bitrate`): start at 1.2 Mbit/s; if more than 2% of packets were
+page the bitrate to encode that visit at (`bitrate`): start at 1.5 Mbit/s; if more than 2% of packets were
 lost or the round-trip time rose more than 50% above the link's lowest, multiply by 0.7; otherwise add
-150 kbit/s; never below 300 kbit/s or above 3 Mbit/s.
+150 kbit/s; never below 300 kbit/s or above 4 Mbit/s.
 
 ### 7.6 Blips
 
@@ -360,7 +360,9 @@ ticket, for a **grace period of 15 s**; the visit carries on if it comes back, a
   baseline, Annex B: SPS and PPS travel with each keyframe, so no decoder description is needed), `vp8`,
   `vp09.00.10.08`.
 - **Size.** The visitor's `viewport`, scaled down to fit 1280×720 if larger, rounded down to even numbers.
-- **Rate.** 15 frames a second per visit (`limits.fps`), staggered across visits.
+- **Rate.** Up to 30 frames a second per visit (`limits.fps`): the host's `fps` (10–30, default 30), which
+  the library lowers while rendering for visitors takes more than a quarter of the page's time over the
+  last second (never below 10) and raises again when it fits. Renders are staggered across visits.
 - **Encoder.** `latencyMode: "realtime"`, the bitrate from section 7.5, a keyframe every 2 s and whenever a
   visitor asks (`keyframe`), and as the first frame after `video_config` changes or the page reconnects.
 
@@ -408,6 +410,7 @@ v.host({
   spawn(visitor) { return pose; },            // where a new visitor appears
   move(pose, input, dt) { return pose; },     // where it may go: the library has already set pose.yaw and pose.pitch
   render(pose, width, height) { return canvas; },   // your room from pose, into a canvas of that size
+  fps: 30,                                          // optional: the most frames a second per visitor (10–30)
 });
 
 // visiting: where to show the room you are in; the library draws it there and captures input
@@ -425,7 +428,7 @@ looking up (three.js's camera, Euler order `"YXZ"`). It moves at `speed` units a
 visitor slides along walls.
 
 **Calling the hooks.** `spawn` once per visitor. `move` 30 times a second per visitor, with the latest
-input and `dt` in seconds. `render` 15 times a second per visitor, one visitor at a time: the library makes
+input and `dt` in seconds. `render` at the visit's frame rate (8.1: up to 30 a second per visitor), one visitor at a time: the library makes
 its `VideoFrame` from the returned canvas before the next call, so one canvas MAY serve every visitor. A
 hook that throws is logged and skipped for that tick; three throws in a row end that visit (`"kicked"`).
 
@@ -438,8 +441,8 @@ hook that throws is logged and skipped for that tick; three throws in a row end 
 | page hello timeout | 5 s |
 | max visitors | 3 by default, 0–8 |
 | view size | the visitor's, at most 1280×720 |
-| frame rate | 15 per visit |
-| bitrate | 1.2 Mbit/s to start, 0.3–3 Mbit/s |
+| frame rate | up to 30 per visit: the host's `fps` (10–30, default 30), lowered while it does not fit |
+| bitrate | 1.5 Mbit/s to start, 0.3–4 Mbit/s |
 | keyframe interval | 2 s, and on request |
 | input rate | about 30 a second; at most 60 accepted |
 | input staleness | 300 ms |

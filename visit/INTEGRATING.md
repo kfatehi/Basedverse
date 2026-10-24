@@ -203,10 +203,13 @@ visible canvas.
 
 ### Rules for `render`
 
-- It is called 15 times a second **per visitor**, one visitor at a time. Visit captures the canvas right
+- It is called up to 30 times a second **per visitor** (pass `fps: 15` to `visit.host` to ask for less),
+  one visitor at a time. Visit captures the canvas right
   after each call, so you may reuse one canvas for all of them.
 - It must not change what your own window shows, or your own camera.
-- Keep it fast: aim for under 10 ms at 1280×720. If your room is heavy, render visitors with fewer effects
+- Keep it fast: aim for under 5 ms at 1280×720. Visit lowers a visitor's frame rate (to no less than 10)
+  when rendering for visitors takes more than a quarter of your page's time, so a slow `render` makes
+  choppy visits rather than a frozen room. If your room is heavy, render visitors with fewer effects
   (no shadows, lower detail) than your own view.
 - Everything it draws is seen by the visitor. If your room shows things your user would not show a guest,
   leave them out of `render`.
@@ -288,7 +291,7 @@ Then, in order:
       read it, and it never appears in a URL query or a log.
 - [ ] Your sim works as before when visit-client is not running.
 - [ ] `spawn` puts visitors somewhere sensible; `move` keeps them out of walls and furniture.
-- [ ] `render` draws your room from the pose without touching your own view, fast enough for 15 fps per
+- [ ] `render` draws your room from the pose without touching your own view, fast enough for 30 fps per
       visitor, and leaves out anything your user would not show a guest.
 - [ ] Your hooks are registered on every page load.
 - [ ] Visiting: the host's room fills your element; WASD, Shift and the mouse work; Esc frees the pointer;
