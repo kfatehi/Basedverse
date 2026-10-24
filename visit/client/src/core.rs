@@ -69,6 +69,9 @@ struct Visit {
     inputs: (Instant, u32),
     /// A frame for the page was dropped (visitor side): ask the host for a keyframe, once.
     want_key: bool,
+    /// What the visitor decodes and how big its view is (host side), for a page that connects later.
+    peer_decoders: Option<Value>,
+    peer_viewport: Option<Value>,
 }
 
 pub struct Core {
@@ -230,6 +233,12 @@ impl Core {
             self.to_page(k);
         }
         self.tell_hosted(json!({ "paused": false }));
+        // A visit to this office: what its visitor decodes and how big its view is, to encode for.
+        let hosted: Vec<Value> = self.visits.values().filter(|v| v.up && v.role == Role::Host)
+            .flat_map(|v| [v.peer_decoders.clone(), v.peer_viewport.clone()]).flatten().collect();
+        for m in hosted {
+            self.to_page(m);
+        }
         // A visit this page is on: the host's encoder settings, and a keyframe to start decoding from.
         let mine: Vec<(u16, Option<Value>, mpsc::Sender<LinkCmd>)> =
             self.visits.values().filter(|v| v.up && v.role == Role::Visitor).map(|v| (v.channel, v.video_config.clone(), v.cmd.clone())).collect();
@@ -255,6 +264,11 @@ impl Core {
                 if t == "max_visitors" {
                     if let Some(n) = m.get("n").and_then(Value::as_u64) {
                         self.max_visitors = n.min(8) as u8;
+                    }
+                }
+                if t == "answer" {   // answered: no longer waiting, so not shown again to a page that reconnects
+                    if let Some(k) = m.get("knock").and_then(Value::as_str) {
+                        self.knocks.remove(k);
                     }
                 }
                 self.to_lobby(m);
@@ -443,7 +457,7 @@ impl Core {
                 info!(visit = id, ?role, channel, "visit agreed");
                 self.visits.insert(id.to_string(), Visit {
                     id: id.to_string(), channel, role, peer: m.get("peer").cloned().unwrap_or(Value::Null), up: false, cmd,
-                    video_config: None, last_seq: 0, inputs: (Instant::now(), 0), want_key: false,
+                    video_config: None, last_seq: 0, inputs: (Instant::now(), 0), want_key: false, peer_decoders: None, peer_viewport: None,
                 });
             }
             Err(e) => {
@@ -531,11 +545,14 @@ impl Core {
             // From the visitor.
             Role::Host => {
                 if let Some(codecs) = m.get("decoders") {
-                    let codecs = codecs.clone();
-                    self.to_page(json!({ "type": "decoders", "channel": ch, "codecs": codecs }));
+                    let msg = json!({ "type": "decoders", "channel": ch, "codecs": codecs });
+                    v.peer_decoders = Some(msg.clone());
+                    self.to_page(msg);
                 } else if let Some(vp) = m.get("viewport") {
                     let (w, h) = (vp.get("width").and_then(Value::as_u64).unwrap_or(0), vp.get("height").and_then(Value::as_u64).unwrap_or(0));
-                    self.to_page(json!({ "type": "viewport", "channel": ch, "width": w.min(8192), "height": h.min(8192) }));
+                    let msg = json!({ "type": "viewport", "channel": ch, "width": w.min(8192), "height": h.min(8192) });
+                    v.peer_viewport = Some(msg.clone());
+                    self.to_page(msg);
                 } else if m.get("keyframe").is_some() {
                     self.to_page(json!({ "type": "keyframe", "channel": ch }));
                 }

@@ -189,6 +189,8 @@ async def main():
         a = await Page(7411, ta).open()
         ra = await a.expect("ready")
         check("A's page back: ready lists the visit", [(v["id"], v["role"], v["channel"]) for v in ra["visits"]], [(vid, "host", cha)])
+        d2, vp2 = await a.expect("decoders"), await a.expect("viewport")
+        check("and what B decodes and its view size again, to encode for", (d2["codecs"], vp2["width"]), (["avc1.42E01F", "vp8"], 1600))
         check("and B hears its host resumed", (await b.expect("host_resumed"))["channel"], chb)
         await a.ws.send(frame(cha, True, 99_000, b"after the reload"))
         check("frames flow again", unframe(await asyncio.wait_for(b.frames.get(), 5))[3], b"after the reload")
