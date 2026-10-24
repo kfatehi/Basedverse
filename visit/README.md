@@ -37,6 +37,7 @@ visit/
     cargo            cargo in Docker, for working on visit-client
     web/visit.js     the library
     tests/           the end-to-end and browser tests, and room.html, a small workroom to try it with
+                     (the tests run this repository's lobby, ../lobby/, so they need the whole of it)
 ```
 
 ## The pieces
