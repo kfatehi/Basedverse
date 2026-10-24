@@ -1,0 +1,68 @@
+# The lobby on one server: the lobby itself, Caddy in front of it for TLS (a free Let's Encrypt
+# certificate for the server's IP address or name), and coturn, the TURN relay for the networks that
+# block peer to peer video. setup.sh writes .env beside this file and starts it all; by hand:
+#   docker compose up -d --build        docker compose logs -f        docker compose down
+# Open to the internet (an EC2 security group): TCP 80 and 443 (Caddy), TCP+UDP 3478 (TURN),
+# UDP 49160-49200 (TURN's relayed media).
+services:
+  lobby:
+    build: ../server
+    restart: unless-stopped
+    environment:
+      TRUST_PROXY: "1"   # Caddy is in front: the client's address comes in X-Forwarded-For
+      STUN_URLS: "stun:${LOBBY_HOST}:3478"
+      TURN_URLS: "turn:${LOBBY_HOST}:3478?transport=udp,turn:${LOBBY_HOST}:3478?transport=tcp"
+      TURN_SECRET: ${TURN_SECRET:?run setup.sh, or set TURN_SECRET in .env}
+    expose:
+      - "8765"
+
+  caddy:
+    # 2.11 or later: earlier releases refuse Let's Encrypt certificates for IP addresses.
+    image: caddy:2.11.7
+    restart: unless-stopped
+    environment:
+      LOBBY_HOST: ${LOBBY_HOST:?run setup.sh, or set LOBBY_HOST in .env}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data        # the certificate and the ACME account: kept across restarts
+      - caddy_config:/config
+    depends_on:
+      - lobby
+
+  turn:
+    # The host's network: TURN hands out relay ports from a range, and the instance's public address
+    # is not its own (EC2 maps it), so coturn is told both.
+    image: coturn/coturn:4.7.0
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - -n                                   # no config file: everything is here
+      - --log-file=stdout
+      - --listening-port=3478
+      - --min-port=49160
+      - --max-port=49200
+      - --external-ip=${LOBBY_PUBLIC_IP:?run setup.sh}/${LOBBY_PRIVATE_IP:?run setup.sh}
+      - --realm=basedverse-lobby
+      - --use-auth-secret                    # credentials the lobby mints per office, never a fixed password
+      - --static-auth-secret=${TURN_SECRET}
+      - --fingerprint
+      - --no-cli
+      - --no-tls
+      - --no-dtls
+      - --no-multicast-peers
+      - --stale-nonce=600
+      # never relay into private networks (this host's VPC included)
+      - --denied-peer-ip=0.0.0.0-0.255.255.255
+      - --denied-peer-ip=10.0.0.0-10.255.255.255
+      - --denied-peer-ip=100.64.0.0-100.127.255.255
+      - --denied-peer-ip=127.0.0.0-127.255.255.255
+      - --denied-peer-ip=169.254.0.0-169.254.255.255
+      - --denied-peer-ip=172.16.0.0-172.31.255.255
+      - --denied-peer-ip=192.168.0.0-192.168.255.255
+
+volumes:
+  caddy_data:
+  caddy_config:
