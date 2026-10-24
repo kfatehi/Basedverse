@@ -66,7 +66,8 @@ sequenceDiagram
 - **Name**: 1–24 characters from `A–Z a–z 0–9`, space, `_`, `.`, `-`, starting and ending with a letter
   or digit (regex `^[A-Za-z0-9](?:[A-Za-z0-9 _.-]{0,22}[A-Za-z0-9])?$`). Unique in the lobby,
   case-insensitively. Self-asserted: nobody signs in. A name is free again once its office disconnects.
-- **Status**: `available` (others may knock) or `busy` (they may not). The default is `available`.
+- **Status**: `available` (others may knock) or `busy` (they may not, and nobody new joins its group).
+  The default is `available`.
 - **Sim**: an optional object `{name, version}` (strings, up to 40 characters each) describing the
   software, shown to others. Other keys are dropped.
 
@@ -118,7 +119,7 @@ Examples:
 | `knock` | `id` (knock id), `from` {`id`, `name`, `sim`}, `message`, `expires_in` (seconds) | someone knocked on you |
 | `knock_sent` | `id` (knock id), `to` | your knock reached the door |
 | `knock_cancelled` | `id`, `reason`: `"timeout"` \| `"gone"` | a knock on you was withdrawn: unanswered in time, or its knocker left |
-| `answered` | `knock`, `accept` (boolean), `reason`? , `message`? | the answer to your knock; `reason` when `accept` is false: `"declined"`, `"timeout"`, `"gone"` (the door left), `"group_full"` |
+| `answered` | `knock`, `accept` (boolean), `reason`? , `message`? | the answer to your knock; `reason` when `accept` is false: `"declined"`, `"timeout"`, `"gone"` (the door left), `"group_full"`, `"busy"` (an office in the door's group is busy) |
 | `group` | `id` (group id or `null`), `members`: [{`id`, `name`}] in the order they joined, **you included** | your group formed or changed; `id: null` and `members: []` when you are in none |
 | `signal` | `from` (office id), `data` | WebRTC data from an office in your group |
 | `error` | `code`, `message` (for people), `ref`? (the `type` you sent that failed) | a refusal (section 9) |
@@ -141,6 +142,7 @@ Example `welcome`:
 
 - the door is not online (`not_found`), is the knocker itself (`self_knock`), or is `busy` (`not_available`);
 - the knocker is already in the door's group (`already_together`);
+- another office in the door's group is `busy` (`not_available`);
 - the knocker's earlier knock on the same door is still waiting (`knock_pending`);
 - the door's group is full (`group_full`; at most `limits.group` offices, 6 today);
 - the knocker has knocked `limits.knocks_per_minute` times (6) in the last 60 s (`rate_limited`).
@@ -154,6 +156,8 @@ Example `welcome`:
 - if the door is in no group, a new group forms: the door, then the knocker;
 - if the door is in a group, the knocker joins it. **Any member may let a knocker in**, and the newcomer
   then sees every member's room;
+- unless another office in the group has become `busy` since the knock came: then nobody is let in,
+  the knocker gets `answered` with `reason: "busy"` and the door an `error` (`not_available`);
 - a knocker already in another group leaves it first;
 - every member of the group (and of any group the knocker left) gets a fresh `group`, and everyone gets
   a fresh `lobby`.
@@ -161,8 +165,9 @@ Example `welcome`:
 **Leaving.** `leave`, or disconnecting, takes an office out of its group. A group left with a single
 office ends: that office gets `group` with `id: null`.
 
-**Status and groups are independent.** Being in a group does not make you `busy`; set it yourself if
-you want no more knocks.
+**A busy office closes its group.** Being in a group does not make you `busy`; set it yourself if you
+want no more knocks. While you are, nobody new joins your group, whoever they knock on. You may still
+let in a knock on your own door that came before you went busy.
 
 ## 8. WebRTC: every member streams to every other
 
@@ -217,7 +222,7 @@ noted.
 | `already_hello` | a second `hello` on a connection that is in |
 | `not_found` | no office (or knock) with that id |
 | `self_knock` | knocking on yourself |
-| `not_available` | the door is `busy` |
+| `not_available` | the door, or another office in its group, is `busy`; or (to an `answer`) an office in your group is |
 | `already_together` | you are already in the door's group |
 | `knock_pending` | your knock on that door is still waiting |
 | `group_full` | the group has `limits.group` offices |
@@ -234,8 +239,8 @@ noted.
   visible until it lets someone in.
 - Video goes only between members of a group, over WebRTC (always encrypted, DTLS-SRTP). The lobby never
   sees it; a TURN relay, when used, carries it but cannot decrypt it.
-- **Anyone in your group can let others in, and they will see your room.** Leave the group, or stay
-  `busy`, if that is not what you want.
+- **Anyone in your group can let others in, and they will see your room.** Stay `busy` (nobody new
+  joins while you are) or leave the group if that is not what you want.
 - The lobby keeps nothing on disk.
 
 ## 11. Implementing a client: a checklist
@@ -246,9 +251,10 @@ A client is conformant when it does all of this:
 - [ ] On `error` before `welcome` (`name_taken`, `name_invalid`), lets the user pick another name and
       sends `hello` again on the same connection.
 - [ ] Keeps `lobby.offices` as the list of who is online (minus itself); enables **Knock** only for
-      `available` offices that are not in its group and have no knock of its own pending.
+      `available` offices that are not in its group, whose group has no `busy` office, and that have no
+      knock of its own pending.
 - [ ] Sends `knock` with an optional message (≤ 280 characters); shows `knock_sent`, then the
-      `answered` result (`declined` / `timeout` / `gone` / `group_full`, or let in).
+      `answered` result (`declined` / `timeout` / `gone` / `group_full` / `busy`, or let in).
 - [ ] Shows each incoming `knock` (who, message, time left) with **Let in** / **Not now**, sends
       `answer`, and drops the knock on `knock_cancelled`.
 - [ ] Lets the user switch `available` / `busy` (`status`) and `leave` a group.

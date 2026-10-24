@@ -117,6 +117,12 @@ def ice_servers(office_id):
 
 
 # ---------- groups ----------
+def busy_member(gid, but=None):
+    """An office in group `gid` (other than `but`) that is busy, or None. A busy member is a veto: nobody
+    joins its group."""
+    return next((OFFICES[i] for i in GROUPS.get(gid, []) if OFFICES[i] is not but and OFFICES[i].status == "busy"), None)
+
+
 def join(knocker, host):
     """`knocker` joins the group `host` is in (or a new one with `host`), leaving its own first."""
     if knocker.group:
@@ -208,6 +214,9 @@ def on_knock(me, m):
         return error(me, "not_available", "%s is not available" % target.name, "knock")
     if me.group and me.group == target.group:
         return error(me, "already_together", "you are already in a group with %s" % target.name, "knock")
+    busy = target.group and busy_member(target.group)
+    if busy:
+        return error(me, "not_available", "%s is in a group with %s, who is busy" % (target.name, busy.name), "knock")
     if any(k["from"] == me.id and k["to"] == target.id for k in KNOCKS.values()):
         return error(me, "knock_pending", "your knock on %s is still waiting" % target.name, "knock")
     if target.group and len(GROUPS[target.group]) >= LIMITS["group"]:
@@ -244,6 +253,10 @@ def on_answer(me, m):
         return tell(knocker, {"type": "answered", "knock": k["id"], "accept": True, "message": msg})
     if not m["accept"]:
         return tell(knocker, {"type": "answered", "knock": k["id"], "accept": False, "reason": "declined", "message": msg})
+    busy = me.group and busy_member(me.group, but=me)   # went busy after the knock came
+    if busy:
+        tell(knocker, {"type": "answered", "knock": k["id"], "accept": False, "reason": "busy", "message": msg})
+        return error(me, "not_available", "%s is busy: nobody joins your group until they are available" % busy.name, "answer")
     if me.group and len(GROUPS[me.group]) >= LIMITS["group"]:
         tell(knocker, {"type": "answered", "knock": k["id"], "accept": False, "reason": "group_full", "message": msg})
         return error(me, "group_full", "your group is full", "answer")

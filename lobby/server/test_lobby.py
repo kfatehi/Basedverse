@@ -201,6 +201,35 @@ async def t_knock_accept_signal():
     await c.close()
 
 
+async def t_busy_group():
+    a, b, c, d = await join("A6"), await join("B6"), await join("C6"), await join("D6")
+    await together(b, a)
+    await c.send(type="knock", to=b.id, message="before")   # waits on B while everyone is available
+    await c.expect("knock_sent")
+    early = await b.expect("knock")
+    await d.send(type="knock", to=a.id)                      # and one on A's own door
+    await d.expect("knock_sent")
+    own = await a.expect("knock")
+    await a.send(type="status", status="busy")
+    await a.quiet()
+    await c.quiet()
+    await c.send(type="knock", to=b.id)
+    err = await c.expect("error")
+    check("an office in a group with a busy one cannot be knocked on", (err["code"], "A6" in err["message"]), ("not_available", True))
+    await b.send(type="answer", knock=early["id"], accept=True)
+    check("nor can a knock from before be let in", (await b.expect("error"))["code"], "not_available")
+    ans = await c.expect("answered")
+    check("the knocker hears no, because of a busy office", (ans["accept"], ans["reason"]), (False, "busy"))
+    check("the group stays as it was", (lobby.OFFICES[c.id].group, len(lobby.GROUPS[lobby.OFFICES[a.id].group])), (None, 2))
+    await d.quiet()
+    await a.send(type="answer", knock=own["id"], accept=True)
+    await d.expect("answered")
+    check("the busy office itself may still let in a knock on its own door",
+          [m["name"] for m in (await d.expect("group"))["members"]], ["A6", "B6", "D6"])
+    for x in (a, b, c, d):
+        await x.close()
+
+
 async def t_decline_timeout_gone():
     a, b = await join("A3"), await join("B3")
     await a.send(type="knock", to=b.id, message="hello?")
@@ -297,8 +326,8 @@ async def main():
     global URL
     async with serve(lobby.handler, "127.0.0.1", 0, max_size=lobby.LIMITS["frame"], process_request=lobby.health) as server:
         URL = "ws://127.0.0.1:%d" % server.sockets[0].getsockname()[1]
-        for t in (t_hello, t_hello_rules, t_status_and_knock_refusals, t_knock_accept_signal, t_decline_timeout_gone,
-                  t_limits, t_turn_and_health):
+        for t in (t_hello, t_hello_rules, t_status_and_knock_refusals, t_knock_accept_signal, t_busy_group,
+                  t_decline_timeout_gone, t_limits, t_turn_and_health):
             print("\n" + t.__name__[2:])
             try:
                 await t()
