@@ -12,7 +12,10 @@ output in Docker volumes.
 ./cargo build --release        # the binary is target/release/visit-client in the visit-target volume
 ./cargo test                   # unit tests
 tests/run-e2e.sh               # end to end: the real lobby, two visit-clients, two stand-in pages, in a container
+tests/run-browser.sh           # visit.js in two headless Chromes: knock, walk with WASD, reload, leave
 ```
+
+`tests/room.html` is a small workroom to try it with: its room is a floor plan, each visitor an arrow.
 
 | file | what |
 |---|---|
@@ -22,3 +25,4 @@ tests/run-e2e.sh               # end to end: the real lobby, two visit-clients, 
 | `src/lobby.rs` | the lobby session (`basedverse-lobby/2`): reconnecting and resuming |
 | `src/link.rs` | the links: dialling, admitting, video, inputs, bitrate, the grace period |
 | `src/frames.rs` | framing for control messages and video |
+| `web/visit.js` | the library: the lobby's state and actions, the host hooks, WebCodecs, input, `Visit.walk`, `Visit.panel` |

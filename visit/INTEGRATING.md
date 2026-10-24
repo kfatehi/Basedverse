@@ -115,8 +115,9 @@ fits your sim:
 - **Your page is static files**: have the launcher write `visit.json` (`{"port", "token"}`) beside the
   page, mode 0600, and fetch it from the page. Do not commit it.
 - **Your launcher opens the browser**: put it in the URL fragment,
-  `http://localhost:3000/#visit=7401:<token>`. The fragment is never sent to any server; read it and
-  remove it with `history.replaceState`.
+  `http://localhost:3000/#visit=7401:<token>`. The fragment is never sent to any server. Read it, keep it
+  in `sessionStorage` (it survives reloads of that tab, and no other site can read it), and remove it from
+  the address bar with `history.replaceState`; on later loads, read it from `sessionStorage`.
 
 Never put the token in a URL query, a log line, or any response another origin can read.
 

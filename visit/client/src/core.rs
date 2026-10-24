@@ -72,6 +72,8 @@ struct Visit {
     /// What the visitor decodes and how big its view is (host side), for a page that connects later.
     peer_decoders: Option<Value>,
     peer_viewport: Option<Value>,
+    /// The host page's state for this visitor (where it stands), kept for a page that reloads.
+    host_state: Option<Value>,
 }
 
 pub struct Core {
@@ -311,6 +313,15 @@ impl Core {
                     let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "decoders": codecs })));
                 }
             }
+            "pose" => {
+                let ch = m.get("channel").and_then(Value::as_u64).unwrap_or(0) as u16;
+                let state = m.get("state").cloned().unwrap_or(Value::Null);
+                match self.visits.values_mut().find(|v| v.channel == ch && v.role == Role::Host) {
+                    Some(v) if state.to_string().len() <= 2048 => v.host_state = Some(state),
+                    Some(_) => self.page_error("bad_message", "a visitor's state is at most 2 KiB", Some("pose")),
+                    None => self.page_error("no_such_visit", "no visit to you on that channel", Some("pose")),
+                }
+            }
             "keyframe" | "video_config" => {
                 let ch = m.get("channel").and_then(Value::as_u64).unwrap_or(0) as u16;
                 let Some(v) = self.visits.values().find(|v| v.channel == ch && v.up) else {
@@ -457,7 +468,7 @@ impl Core {
                 info!(visit = id, ?role, channel, "visit agreed");
                 self.visits.insert(id.to_string(), Visit {
                     id: id.to_string(), channel, role, peer: m.get("peer").cloned().unwrap_or(Value::Null), up: false, cmd,
-                    video_config: None, last_seq: 0, inputs: (Instant::now(), 0), want_key: false, peer_decoders: None, peer_viewport: None,
+                    video_config: None, last_seq: 0, inputs: (Instant::now(), 0), want_key: false, peer_decoders: None, peer_viewport: None, host_state: None,
                 });
             }
             Err(e) => {
@@ -612,7 +623,11 @@ impl Core {
 }
 
 fn started(v: &Visit) -> Value {
-    json!({ "type": "visit_started", "id": v.id, "channel": v.channel, "role": if v.role == Role::Host { "host" } else { "visitor" }, "peer": v.peer })
+    let mut m = json!({ "type": "visit_started", "id": v.id, "channel": v.channel, "role": if v.role == Role::Host { "host" } else { "visitor" }, "peer": v.peer });
+    if let Some(state) = &v.host_state {
+        m["state"] = state.clone();
+    }
+    m
 }
 
 fn with_channel(kind: &str, channel: u16, cfg: &Value) -> Value {

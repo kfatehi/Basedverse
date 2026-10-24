@@ -174,6 +174,7 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `video_config` | `channel`, `codec`, `width`, `height` | the host's encoder settings for a visit, before its first frame and whenever they change |
 | `decoders` | `codecs`: [string] | the codecs this page can decode, best first (sent once after `ready`) |
 | `keyframe` | `channel` | the visitor's page asks for a keyframe (its decoder lost its place) |
+| `pose` | `channel`, `state` (≤ 2 KiB) | the host page's state for a visitor (where it stands), about 5 a second; kept by the visit-client and handed back in `ready` to a page that reloads |
 | binary | section 5.4 | an encoded frame (host) |
 
 ### 5.3 Visit-client → page
@@ -185,7 +186,7 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `lobby` | `offices`: [{`id`, `name`, `status`, `sim`, `max_visitors`, `visitors`, `visiting`, `ready`}] | every change (6.3) |
 | `knock` | `id`, `from` {`id`, `name`, `sim`}, `message`, `expires_in` | someone wants to visit you |
 | `knock_sent` / `knock_cancelled` / `answered` | as in section 6 | your knock's fate; a knock on you withdrawn |
-| `visit_started` | `id`, `channel`, `role` (`"host"` \| `"visitor"`), `peer` {`id`, `name`, `sim`} | a visit began (its link is up) |
+| `visit_started` | `id`, `channel`, `role` (`"host"` \| `"visitor"`), `peer` {`id`, `name`, `sim`}, `state`? | a visit began (its link is up); in `ready`, a host's visit carries the last `state` its page sent |
 | `visit_ended` | `id`, `channel`, `reason` (6.5) | a visit ended |
 | `host_paused` / `host_resumed` | `channel` | the host's page went away / came back (visitor side) |
 | `input` | `channel`, `seq`, `forward`, `strafe`, `run`, `yaw`, `pitch` | a visitor's latest input (host side) |

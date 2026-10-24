@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Visit test room</title>
+<style>
+/* A workroom to test visit.js with: its room is a floor plan (walls, a desk), drawn from above, with
+   each visitor an arrow where it stands and looks. The page gets its visit-client's port and token from
+   the URL fragment (#port=7401&token=...), one of INTEGRATING.md's ways. */
+html, body { height: 100%; margin: 0; background: #0d1117; color: #e6edf3; font: 13px system-ui, sans-serif; }
+#own { position: fixed; inset: 0; width: 100%; height: 100%; }
+#panel { position: fixed; top: 12px; right: 12px; width: 320px; }
+#stage { position: fixed; inset: 0; background: #000; }
+#stage button { position: fixed; top: 12px; left: 12px; }
+</style>
+</head>
+<body>
+<canvas id="own"></canvas>
+<div id="panel"></div>
+<div id="stage" hidden><button id="leave">Leave</button></div>
+<script>
+"use strict";
+// The room: 10 x 8 units, walls round it, a desk in the middle. x right, z down the page; a visitor's yaw 0
+// looks toward -z (up the page).
+const ROOM = { w: 10, d: 8, desk: { x: 4, z: 3, w: 2, d: 1.2 } };
+const blocked = (x, z) => x < 0.3 || x > ROOM.w - 0.3 || z < 0.3 || z > ROOM.d - 0.3
+  || (x > ROOM.desk.x - 0.3 && x < ROOM.desk.x + ROOM.desk.w + 0.3 && z > ROOM.desk.z - 0.3 && z < ROOM.desk.z + ROOM.desk.d + 0.3);
+const hue = s => [...String(s)].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
+
+function drawRoom(ctx, w, h, visitors, me) {
+  const k = Math.min(w / (ROOM.w + 1), h / (ROOM.d + 1)), ox = (w - ROOM.w * k) / 2, oz = (h - ROOM.d * k) / 2;
+  ctx.fillStyle = "#1d232b"; ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = "#2b3138"; ctx.fillRect(ox, oz, ROOM.w * k, ROOM.d * k);
+  ctx.strokeStyle = "#8b949e"; ctx.lineWidth = Math.max(2, k * 0.1); ctx.strokeRect(ox, oz, ROOM.w * k, ROOM.d * k);
+  ctx.fillStyle = "#b98b5e"; ctx.fillRect(ox + ROOM.desk.x * k, oz + ROOM.desk.z * k, ROOM.desk.w * k, ROOM.desk.d * k);
+  for (const v of visitors) {
+    if (!v.pose) continue;
+    const x = ox + v.pose.x * k, z = oz + v.pose.z * k, r = k * 0.3;
+    ctx.fillStyle = `hsl(${hue(v.name)}, 70%, 55%)`;
+    ctx.beginPath(); ctx.arc(x, z, r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "#fff"; ctx.beginPath(); ctx.moveTo(x, z); ctx.lineTo(x - Math.sin(v.pose.yaw) * r * 2.2, z - Math.cos(v.pose.yaw) * r * 2.2); ctx.stroke();
+    ctx.fillStyle = "#e6edf3"; ctx.font = `${Math.round(k * 0.35)}px system-ui`; ctx.fillText(v.name, x + r * 1.2, z - r);
+  }
+  ctx.fillStyle = "#e6edf3"; ctx.font = `${Math.round(Math.max(12, k * 0.4))}px system-ui`;
+  ctx.fillText(me, 12, Math.max(20, k * 0.6));
+}
+
+const own = document.getElementById("own"), ownCtx = own.getContext("2d");
+const visitCanvas = document.createElement("canvas"), visitCtx = visitCanvas.getContext("2d");
+window.renders = 0;
+
+(async () => {
+  // The fragment hands over the port and token once; sessionStorage keeps them for this tab's reloads (no
+  // other site can read it), and the address bar loses them.
+  const p = new URLSearchParams(location.hash.slice(1));
+  if (p.get("token")) {
+    sessionStorage.setItem("visit", JSON.stringify({ port: Number(p.get("port")), token: p.get("token") }));
+    history.replaceState(null, "", location.pathname + location.search);
+  }
+  const { port, token } = JSON.parse(sessionStorage.getItem("visit") || "{}");
+  await new Promise((ok, fail) => { const s = document.createElement("script"); s.src = `http://127.0.0.1:${port}/visit.js`; s.onload = ok;
+    s.onerror = () => fail(new Error(`visit-client is not running on 127.0.0.1:${port}`)); document.head.appendChild(s); });
+  const v = window.v = await Visit.connect({ port, token, sim: { name: "test-room", version: "1" } });
+  v.host({
+    spawn: () => ({ x: 2, y: 1.6, z: 6, yaw: 0, pitch: 0 }),
+    move: (pose, input, dt) => Visit.walk(pose, input, dt, { speed: 2.5, blocked }),
+    render(pose, width, height) {
+      visitCanvas.width = width; visitCanvas.height = height;
+      drawRoom(visitCtx, width, height, v.visitors.map(x => ({ name: x.visitor.name, pose: x.pose })), `${v.office ? v.office.name : "?"}'s room`);
+      window.renders++;
+      return visitCanvas;
+    },
+  });
+  Visit.panel(document.getElementById("panel"), v);
+  const stage = document.getElementById("stage");
+  let view = null;
+  document.getElementById("leave").onclick = () => v.leave();
+  v.on("change", () => {
+    if (v.visiting && !view) { stage.hidden = false; view = v.view(stage); }
+    if (!v.visiting && view) { view.release(); view = null; stage.hidden = true; }
+  });
+  (function paint() {
+    own.width = innerWidth; own.height = innerHeight;
+    drawRoom(ownCtx, own.width, own.height, v.visitors.map(x => ({ name: x.visitor.name, pose: x.pose })), `${v.office ? v.office.name : "?"}'s room (yours)`);
+    requestAnimationFrame(paint);
+  })();
+})().catch(e => { document.body.insertAdjacentHTML("beforeend", `<p style="position:fixed;bottom:8px;left:8px">${e.message}</p>`); console.error(e); });
+</script>
+</body>
+</html>
