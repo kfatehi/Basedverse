@@ -37,27 +37,35 @@ Tests: `python3 lobby/server/test_lobby.py` (the server, every message and refus
    | 3478 | TCP and UDP | TURN / STUN |
    | 49160–49200 | UDP | TURN's relayed media |
 
-4. **Copy the lobby there and run the setup:**
+4. **Deploy it from your machine:**
 
    ```sh
-   scp -r lobby ubuntu@<elastic-ip>:~/
-   ssh ubuntu@<elastic-ip> ~/lobby/deploy/setup.sh
+   bin/deploy-lobby ubuntu@<elastic-ip>                  # add -i ~/.ssh/your-key.pem if ssh needs it
+   bin/deploy-lobby ubuntu@<elastic-ip> --host lobby.example.com     # a DNS name for the certificate instead
    ```
 
-   It installs Docker, writes `deploy/.env` (the instance's public and private addresses from the EC2
-   metadata, and a fresh TURN secret), starts the lobby, Caddy and coturn, waits for the certificate,
-   and prints the line for your `.env`:
+   It copies `lobby/` to `~/basedverse-lobby/` on the server (a tar stream over ssh: nothing to install
+   there first) and runs `lobby/deploy/setup.sh` there. That installs Docker, writes the server's
+   `deploy/.env` (its public and private addresses from the EC2 metadata, and a fresh TURN secret),
+   starts the lobby, Caddy and coturn, waits for the certificate, and prints the address:
 
    ```
    LOBBY_URL=wss://<elastic-ip>/
    ```
 
-   With a DNS name pointing at the instance, run `LOBBY_HOST=lobby.example.com ./setup.sh` instead.
 5. **Point the sims at it**: each gives `wss://<elastic-ip>/` as its lobby.
 
-**Running it.** `cd ~/lobby/deploy && docker compose logs -f` (all three), `docker compose restart`,
-`docker compose down`. After copying a new `lobby/`, run `./setup.sh` again: it keeps its `.env` and
-rebuilds. A restart empties the lobby; the sims reconnect by themselves.
+**Running it**, from your machine. The server is remembered (`LOBBY_DEPLOY` in `.env`), so:
+
+| command | what it does |
+|---|---|
+| `bin/deploy-lobby` | update it: copy the current `lobby/` and rebuild. Its `.env` and TURN secret are kept |
+| `bin/deploy-lobby --status` | its containers, and whether `wss://…/health` answers from here |
+| `bin/deploy-lobby --logs` | the lobby's, Caddy's and coturn's logs, followed (Ctrl-C stops) |
+| `bin/deploy-lobby --down` | stop it |
+
+On the server itself it is `docker compose …` in `~/basedverse-lobby/lobby/deploy`. A restart empties the
+lobby; the sims reconnect by themselves.
 
 **What it costs.** The instance (a `t4g.small` is about $12 a month) and its traffic. Video goes
 straight between the sims whenever their networks allow, at no cost to the server. Only when one blocks

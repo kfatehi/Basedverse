@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Set up and start the lobby on this server: an EC2 instance (or any Linux box with a public IPv4).
 #
-#   git clone <this repo> && cd <it>/lobby/deploy && ./setup.sh
+#   bin/deploy-lobby user@server     from your machine: copies lobby/ there and runs this (the usual way)
+#   ./setup.sh                        on the server itself
 #   LOBBY_HOST=lobby.example.com ./setup.sh     a DNS name instead of the bare IP
+#   LOBBY_PUBLIC_IP=... LOBBY_PRIVATE_IP=...     the addresses, when this is not EC2 and they cannot be told
 #
 # 1. Installs Docker (with its compose plugin) if it is missing: Ubuntu/Debian or Amazon Linux.
 # 2. Writes .env beside this script, once: this machine's public and private addresses (from the EC2
@@ -43,11 +45,10 @@ if [ ! -f .env ]; then
   say "writing .env"
   tok=$(curl -fsS -m 2 -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null || true)
   md() { curl -fsS -m 2 -H "X-aws-ec2-metadata-token: $tok" "http://169.254.169.254/latest/meta-data/$1" 2>/dev/null || true; }
-  public=$(md public-ipv4); private=$(md local-ipv4)
+  public=${LOBBY_PUBLIC_IP:-$(md public-ipv4)}; private=${LOBBY_PRIVATE_IP:-$(md local-ipv4)}
   [ -n "$public" ] || public=$(curl -fsS -m 5 https://checkip.amazonaws.com | tr -d '[:space:]' || true)
   [ -n "$private" ] || private=$(hostname -I | awk '{print $1}')
   [ -n "$public" ] || die "could not tell this machine's public address: set LOBBY_PUBLIC_IP and run again"
-  public=${LOBBY_PUBLIC_IP:-$public}
   host=${LOBBY_HOST:-$public}
   secret=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
   umask 077
@@ -70,7 +71,7 @@ say "building and starting the lobby, Caddy and coturn"
 $DOCKER compose up -d --build
 
 say "waiting for the certificate and the lobby (Caddy asks Let's Encrypt; ports 80 and 443 must be open)"
-for i in $(seq 1 45); do
+for _ in $(seq 1 $(( ${LOBBY_WAIT_S:-180} / 4 + 1 ))); do
   if out=$(curl -fsS -m 5 "https://$LOBBY_HOST/health" 2>/dev/null); then
     printf 'up: %s' "$out"
     say "done. In each sim's .env:"
@@ -81,4 +82,4 @@ for i in $(seq 1 45); do
 done
 $DOCKER compose ps
 $DOCKER compose logs --tail 30 caddy
-die "https://$LOBBY_HOST/health did not answer in 3 minutes: see Caddy's log above (are ports 80 and 443 open?)"
+die "https://$LOBBY_HOST/health did not answer in ${LOBBY_WAIT_S:-180} s: see Caddy's log above (are ports 80 and 443 open?)"
