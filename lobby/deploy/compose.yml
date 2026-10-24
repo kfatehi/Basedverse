@@ -54,6 +54,13 @@ services:
       - --no-dtls
       - --no-multicast-peers
       - --stale-nonce=600
+      # Anyone who says hello to the lobby gets credentials, so the relay is kept to what a group needs:
+      # UDP only (browsers never ask for a TCP relay; it would make this an open TCP proxy), 12 relays per
+      # office's credentials (a group of 6 takes 2 per peer), and about 2 Mbit/s each way per relay
+      # (a stream is at most 1.5 Mbit/s).
+      - --no-tcp-relay
+      - --user-quota=12
+      - --max-bps=250000
       # never relay into private networks (this host's VPC included)
       - --denied-peer-ip=0.0.0.0-0.255.255.255
       - --denied-peer-ip=10.0.0.0-10.255.255.255

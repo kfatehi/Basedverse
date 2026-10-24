@@ -70,7 +70,10 @@ lobby; the sims reconnect by themselves.
 **What it costs.** The instance (a `t4g.small` is about $12 a month) and its traffic. Video goes
 straight between the sims whenever their networks allow, at no cost to the server. Only when one blocks
 that does TURN relay it: about 0.7 GB per hour per relayed stream at 1.5 Mbit/s, which is roughly 6¢ an
-hour at AWS's internet egress price.
+hour at AWS's internet egress price. Anyone who connects to the lobby gets TURN credentials, so coturn
+relays UDP only, at most 12 relays per office and about 2 Mbit/s each way per relay (`compose.yml`): at
+worst its 41 relay ports run flat out at a few dollars an hour. An AWS budget alert on the account is
+cheap insurance.
 
 **The certificate.** Let's Encrypt issues IP-address certificates only under its short-lived profile, so
 they last 6 days. Caddy renews them by itself, which is why ports 80 and 443 stay open. If `wss://` stops
