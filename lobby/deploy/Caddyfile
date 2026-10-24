@@ -1,6 +1,12 @@
 # TLS in front of the lobby: a free Let's Encrypt certificate for LOBBY_HOST, which may be a bare IPv4
 # address. Let's Encrypt issues IP certificates only under its `shortlived` profile (6 days); Caddy renews
 # them by itself. Needs ports 80 and 443 open to the internet for the ACME challenges.
+{
+	# Browsers and curl send no server name (SNI) when they connect to an IP address (RFC 6066 forbids
+	# it). Without this Caddy has no certificate to pick for them and aborts the handshake.
+	default_sni {$LOBBY_HOST}
+}
+
 {$LOBBY_HOST} {
 	tls {
 		issuer acme {

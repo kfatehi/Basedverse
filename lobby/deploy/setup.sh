@@ -69,6 +69,9 @@ printf 'lobby host: %s (public %s, private %s)\n' "$LOBBY_HOST" "$LOBBY_PUBLIC_I
 # -- 3. up
 say "building and starting the lobby, Caddy and coturn"
 $DOCKER compose up -d --build
+# Caddy reads its Caddyfile only at start, and a redeploy replaces the file under its single-file mount:
+# a restart takes the new one (the certificate is kept in its volume).
+$DOCKER compose restart caddy
 
 say "waiting for the certificate and the lobby (Caddy asks Let's Encrypt; ports 80 and 443 must be open)"
 for _ in $(seq 1 $(( ${LOBBY_WAIT_S:-180} / 4 + 1 ))); do
