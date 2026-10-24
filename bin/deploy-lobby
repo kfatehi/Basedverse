@@ -12,15 +12,14 @@
 #                                           (follows it; Ctrl-C to stop), or stop it
 #
 # The server: Linux with a public IPv4, which you can ssh into and sudo on (an EC2 instance: lobby/README.md
-# says which ports to open). The copy goes to ~/basedverse-lobby/ there, as a tar stream over ssh, so the
-# server needs nothing installed first. Its deploy/.env (its addresses and the TURN secret) is never
-# overwritten. The server and key are remembered in this repository's .env (made if there is none; see
-# .env.example).
+# says which ports to open). The copy goes to ~/basedverse-lobby/ there (or the directory LOBBY_DEPLOY_DIR
+# in .env names), as a tar stream over ssh, so the server needs nothing installed first. Its deploy/.env
+# (its addresses and the TURN secret) is never overwritten. The server and key are remembered in this
+# repository's .env (made if there is none; see .env.example).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV="${BASEDVERSE_ENV:-$ROOT/.env}"
-REMOTE_DIR="${LOBBY_DEPLOY_DIR:-basedverse-lobby}"   # LOBBY_DEPLOY_DIR: a server set up under another name
 SSH_BIN="${DEPLOY_SSH:-ssh}"   # tests stand in a fake
 die() { echo "deploy-lobby: $*" >&2; exit 1; }
 usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit "${1:-0}"; }
@@ -69,6 +68,9 @@ while [ $# -gt 0 ]; do
 done
 target="${target:-$(envval LOBBY_DEPLOY)}"
 key="${key:-$(envval LOBBY_DEPLOY_KEY)}"
+REMOTE_DIR="$(envval LOBBY_DEPLOY_DIR)"   # a server set up under another name
+REMOTE_DIR="${REMOTE_DIR:-basedverse-lobby}"
+case "$REMOTE_DIR" in *[!A-Za-z0-9._-]*) die "LOBBY_DEPLOY_DIR $REMOTE_DIR is not a directory name" ;; esac
 [ -n "$target" ] || { echo "deploy-lobby: which server? e.g. bin/deploy-lobby ubuntu@203.0.113.5" >&2; usage 2; }
 case "$target" in *[!A-Za-z0-9@._:-]*) die "$target does not look like user@host" ;; esac
 case "$host" in *[!A-Za-z0-9.-]*) die "--host $host is not a DNS name or an IPv4 address" ;; esac
