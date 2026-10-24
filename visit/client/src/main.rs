@@ -72,8 +72,18 @@ fn bad_flags(msg: &str) -> ExitCode {
     ExitCode::from(2)
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    // A blank setting (`VISIT_PORT=` in a .env, ../../.env.example) means its default, as .env files have it;
+    // clap would take it as an empty value. Done before the runtime starts any thread.
+    for (k, v) in std::env::vars_os() {
+        if v.is_empty() && k.to_string_lossy().starts_with("VISIT_") {
+            std::env::remove_var(&k);
+        }
+    }
+    tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("the tokio runtime").block_on(run())
+}
+
+async fn run() -> ExitCode {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "visit_client=info,iroh=warn".into()))

@@ -1,16 +1,25 @@
 # The lobby — knock on other sims' offices
 
 A meeting place for agent-office sims of any make. Each sim joins under a name, sees who else is online
-and whether they are `available`, knocks on an available office with a message, and once let in, every
-office in the group sees every other office's room as live video. The video goes peer to peer over
-WebRTC; the lobby only introduces the sims.
+and whether they are `available`, and knocks on an available office with a message. It speaks two
+versions side by side, each its own lobby (a client's first hello decides):
 
-- **[PROTOCOL.md](PROTOCOL.md)** — the contract, complete: hand it to anyone (or any LLM) building a
-  compatible sim.
-- **[server/](server/)** — the lobby: `lobby.py` (Python, `websockets`), `test_lobby.py`, a Dockerfile.
+- **version 1** ([PROTOCOL.md](PROTOCOL.md)): once let in, every office in the group sees every other
+  office's room as live video, peer to peer over WebRTC between the browsers;
+- **version 2** ([../visit/SPEC.md](../visit/SPEC.md), section 6): visit-clients, for Visit, walking
+  around each other's rooms.
+
+Either way the lobby only introduces the sims: the video never passes through it.
+
+- **[PROTOCOL.md](PROTOCOL.md)** — version 1's contract, complete: hand it to anyone (or any LLM)
+  building a compatible sim.
+- **[server/](server/)** — the lobby: `lobby.py` (Python, `websockets`), `test_lobby.py` and
+  `test_lobby2.py`, a Dockerfile.
 - **[deploy/](deploy/)** — one server on the internet: the lobby, Caddy (TLS with a free Let's Encrypt
   certificate, for a bare IP address too) and coturn (a TURN relay for networks that block peer to
   peer), started by `setup.sh`.
+- **Clients**: for version 2, visit-client ([../visit/](../visit/)); for version 1, your sim's own,
+  from PROTOCOL.md.
 
 ## Try it locally (no server needed)
 
@@ -19,11 +28,15 @@ python3 -m venv /tmp/lobby-venv && /tmp/lobby-venv/bin/pip install -r lobby/serv
 STUN_URLS= LOBBY_HOST=127.0.0.1 /tmp/lobby-venv/bin/python lobby/server/lobby.py      # ws://127.0.0.1:8765
 ```
 
-Then point two sims at `ws://127.0.0.1:8765`, knock from one, and let it in from the other.
+Then point two workrooms at `ws://127.0.0.1:8765` (two visit-clients, as
+[../visit/INTEGRATING.md](../visit/INTEGRATING.md) step 8 runs them), knock from one, and let it in from
+the other.
 
-Tests: `python3 lobby/server/test_lobby.py` (the server, every message and refusal).
+Tests: `python3 lobby/server/test_lobby.py` and `python3 lobby/server/test_lobby2.py` (the server, every
+message and refusal of each version), and `visit/client/tests/run-e2e.sh` (the server with two real
+visit-clients).
 
-## Put it on AWS
+## Put it on a server (AWS, say)
 
 1. **Launch an EC2 instance**: Ubuntu 24.04 (or Amazon Linux 2023), `t3.small` or `t4g.small`, 8 GB disk.
 2. **Give it an Elastic IP** (EC2 → Elastic IPs → Allocate → Associate), so the address in everyone's
@@ -37,7 +50,7 @@ Tests: `python3 lobby/server/test_lobby.py` (the server, every message and refus
    | 3478 | TCP and UDP | TURN / STUN |
    | 49160-49200 | UDP | TURN's relayed media |
 
-4. **Deploy it from your machine:**
+4. **Deploy it from your machine**, from this repository:
 
    ```sh
    bin/deploy-lobby ubuntu@<elastic-ip>                  # add -i ~/.ssh/your-key.pem if ssh needs it
@@ -53,9 +66,11 @@ Tests: `python3 lobby/server/test_lobby.py` (the server, every message and refus
    LOBBY_URL=wss://<elastic-ip>/
    ```
 
-5. **Point the sims at it**: each gives `wss://<elastic-ip>/` as its lobby.
+5. **Point the workrooms at it**: each gives `wss://<elastic-ip>/` as its lobby (`VISIT_LOBBY` for a
+   visit-client, [../.env.example](../.env.example)).
 
-**Running it**, from your machine. The server is remembered (`LOBBY_DEPLOY` in `.env`), so:
+**Running it**, from your machine. The server is remembered (`LOBBY_DEPLOY` in this repository's `.env`,
+made on the first deploy), so:
 
 | command | what it does |
 |---|---|
@@ -65,7 +80,7 @@ Tests: `python3 lobby/server/test_lobby.py` (the server, every message and refus
 | `bin/deploy-lobby --down` | stop it |
 
 On the server itself it is `docker compose …` in `~/basedverse-lobby/lobby/deploy`. A restart empties the
-lobby; the sims reconnect by themselves.
+lobby; the workrooms reconnect by themselves.
 
 **What it costs.** The instance (a `t4g.small` is about $12 a month) and its traffic. Video goes
 straight between the sims whenever their networks allow, at no cost to the server. Only when one blocks
@@ -82,6 +97,8 @@ working, read `docker compose logs caddy`.
 ## Trust
 
 Nobody signs in: anyone who reaches the server can join under a free name, see who is online, and knock.
-Nothing of your room is visible until you let someone in. Then **everyone in your group sees your room,
-and anyone in the group can let more people in**: leave the group, or set yourself `busy`, to stop that.
-Whatever your room shows, they see: if it shows your work, so does the video.
+Nothing of your room is visible until you let someone in. Then, in version 1, **everyone in your group
+sees your room, and anyone in the group can let more people in**: leave the group, or set yourself
+`busy`, to stop that. In version 2 each visitor is let in by you, and sees what your sim renders for
+them. Whatever your room shows, they see: if it shows your work (issue titles, what your agents are
+doing), so does the video.

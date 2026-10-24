@@ -102,11 +102,14 @@ visit-client --lobby wss://lobby.example/ --name "Magic Room" --sim my-sim/1.0 \
 | `--name` | `VISIT_NAME` | — (required) | the office's name: 1–24 letters, digits, space, `_ . -`, starting and ending with a letter or digit |
 | `--sim` | `VISIT_SIM` | `unknown/0` | `name/version` of the sim, shown to others |
 | `--port` | `VISIT_PORT` | 7401 | the 127.0.0.1 port for the page |
-| `--token` / `--token-file` | `VISIT_TOKEN` | — (required) | the page token (section 3). `--token-file` keeps it off the process list and SHOULD be preferred |
+| `--token` / `--token-file` | `VISIT_TOKEN` / `VISIT_TOKEN_FILE` | — (required) | the page token (section 3). `--token-file` keeps it off the process list and SHOULD be preferred |
 | `--max-visitors` | `VISIT_MAX_VISITORS` | 3 | 0–8; 0 takes no visitors |
 | `--idle-exit` | `VISIT_IDLE_EXIT` | 0 | exit after this many seconds with no page connected (0: never) |
 | `--origins` | `VISIT_ORIGINS` | none | the page origins allowed to connect (`http://localhost:3000`, comma-separated); none: any page with the token (section 3, point 4) |
 | `--relays` | `VISIT_RELAYS` | the lobby's | the relays for links: `none`, `default` (iroh's own), or URLs, comma-separated |
+
+A flag wins over its environment variable, and a variable set but blank counts as unset (its default), as a
+`.env` file has it. [`../.env.example`](../.env.example) is the template of them all.
 
 On start it prints **one JSON line** to stdout once it listens, then logs to stderr:
 

@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# Deploy the lobby (lobby/) to a server over ssh, and update it later the same way.
+#
+#   bin/deploy-lobby ubuntu@203.0.113.5     copy lobby/ there and run its setup: Docker, the lobby, Caddy
+#                                           (TLS) and coturn (lobby/deploy/setup.sh). Run again to update.
+#   bin/deploy-lobby                        the same, to the server it last deployed to, with the same key
+#                                           (LOBBY_DEPLOY and LOBBY_DEPLOY_KEY in .env)
+#   --host lobby.example.com                a DNS name for the certificate instead of the server's IP
+#                                           (first deploy only: the server keeps what it was set up with)
+#   -i ~/.ssh/key.pem                       the ssh key (else your ssh config and agent decide)
+#   --status | --logs | --down              the server's stack: its containers and health, its log
+#                                           (follows it; Ctrl-C to stop), or stop it
+#
+# The server: Linux with a public IPv4, which you can ssh into and sudo on (an EC2 instance: lobby/README.md
+# says which ports to open). The copy goes to ~/basedverse-lobby/ there, as a tar stream over ssh, so the
+# server needs nothing installed first. Its deploy/.env (its addresses and the TURN secret) is never
+# overwritten. The server and key are remembered in this repository's .env (made if there is none; see
+# .env.example).
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENV="${BASEDVERSE_ENV:-$ROOT/.env}"
+REMOTE_DIR="${LOBBY_DEPLOY_DIR:-basedverse-lobby}"   # LOBBY_DEPLOY_DIR: a server set up under another name
+SSH_BIN="${DEPLOY_SSH:-ssh}"   # tests stand in a fake
+die() { echo "deploy-lobby: $*" >&2; exit 1; }
+usage() { sed -n '2,/^set -euo/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit "${1:-0}"; }
+
+command -v python3 >/dev/null 2>&1 || die "python3 is not installed"
+[ -f "$ENV" ] || (umask 077; : > "$ENV")
+
+# KEY -> its value in .env ('' when blank or missing): the last such line, quotes and trailing space off.
+envval() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$ENV" | tail -n 1 | sed 's/[[:space:]]*$//' | tr -d '"'"'"; }
+# KEY VALUE: rewrite KEY's line in .env (or add one), every other line as it was.
+setenv() {
+  python3 - "$ENV" "$1" "$2" <<'PY'
+import re, sys
+path, key, val = sys.argv[1:]
+lines = open(path, encoding="utf-8").read().splitlines(True)
+hit = [i for i, l in enumerate(lines) if re.match(r"\s*%s\s*=" % key, l)]
+if hit:
+    lines[hit[-1]] = "%s=%s\n" % (key, val)
+else:
+    lines.append(("" if not lines or lines[-1].endswith("\n") else "\n") + "%s=%s\n" % (key, val))
+open(path, "w", encoding="utf-8").writelines(lines)
+PY
+}
+# A lobby URL (ws:// or wss://) -> its /health answer ("ok 2 online"), or nothing.
+lobby_health() {
+  python3 - "$1" <<'PY' 2>/dev/null || true
+import sys, urllib.request
+u = sys.argv[1].replace("wss://", "https://", 1).replace("ws://", "http://", 1).rstrip("/") + "/health"
+print(urllib.request.urlopen(u, timeout=5).read().decode().strip())
+PY
+}
+
+target="" host="" key="" action="deploy"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -h|--help) usage ;;
+    --host) host="${2:?--host needs a name}"; shift ;;
+    -i) key="${2:?-i needs a key file}"; shift ;;
+    --status) action=status ;;
+    --logs) action=logs ;;
+    --down) action=down ;;
+    -*) echo "deploy-lobby: unknown option $1" >&2; usage 2 ;;
+    *) [ -z "$target" ] || die "one server at a time"; target="$1" ;;
+  esac
+  shift
+done
+target="${target:-$(envval LOBBY_DEPLOY)}"
+key="${key:-$(envval LOBBY_DEPLOY_KEY)}"
+[ -n "$target" ] || { echo "deploy-lobby: which server? e.g. bin/deploy-lobby ubuntu@203.0.113.5" >&2; usage 2; }
+case "$target" in *[!A-Za-z0-9@._:-]*) die "$target does not look like user@host" ;; esac
+case "$host" in *[!A-Za-z0-9.-]*) die "--host $host is not a DNS name or an IPv4 address" ;; esac
+
+ssh_opts=(-o StrictHostKeyChecking=accept-new -o ConnectTimeout=15)
+[ -n "$key" ] && ssh_opts+=(-i "$key")
+tty=(); [ -t 0 ] && [ -t 1 ] && tty=(-t)
+on_server() { "$SSH_BIN" "${ssh_opts[@]}" "$@"; }
+# The remote stack's `docker compose`, with sudo when the login user is not in the docker group.
+COMPOSE='cd ~/'"$REMOTE_DIR"'/lobby/deploy 2>/dev/null || { echo "no lobby deployed there yet" >&2; exit 1; }; D=docker; docker info >/dev/null 2>&1 || D="sudo docker"; $D compose'
+
+case "$action" in
+  status)
+    on_server "$target" "$COMPOSE ps"
+    lobby_host="$(on_server "$target" "sed -n 's/^LOBBY_HOST=//p' ~/$REMOTE_DIR/lobby/deploy/.env" 2>/dev/null || true)"
+    if [ -n "$lobby_host" ]; then
+      up="$(lobby_health "wss://$lobby_host/")"
+      echo "wss://$lobby_host/: ${up:-did not answer from here}"
+    fi
+    exit 0 ;;
+  logs) exec "$SSH_BIN" "${ssh_opts[@]}" "${tty[@]}" "$target" "$COMPOSE logs --tail 100 -f" ;;
+  down) on_server "$target" "$COMPOSE down"; exit 0 ;;
+esac
+
+# -- deploy: copy, then the server's own setup ----------------------------------------------------
+echo "copying lobby/ to $target:~/$REMOTE_DIR/"
+tar -C "$ROOT" --exclude='lobby/deploy/.env' --exclude='__pycache__' --exclude='*.pyc' -czf - lobby \
+  | on_server "$target" "mkdir -p ~/$REMOTE_DIR && tar -xzf - -C ~/$REMOTE_DIR" \
+  || die "could not copy to $target (can you ssh to it? add -i KEY for a key file)"
+setenv LOBBY_DEPLOY "$target"
+setenv LOBBY_DEPLOY_KEY "$key"
+
+echo "running its setup (Docker, the lobby, Caddy, coturn; the first time takes a few minutes)"
+log="$(mktemp)"; trap 'rm -f "$log"' EXIT
+set +e
+on_server "${tty[@]}" "$target" "${host:+LOBBY_HOST=$host }~/$REMOTE_DIR/lobby/deploy/setup.sh" | tee "$log"
+status=${PIPESTATUS[0]}
+set -e
+[ "$status" = 0 ] || die "the setup on $target failed (above). bin/deploy-lobby --logs shows the stack's log"
+
+url="$(tr -d '\r' < "$log" | sed -n 's/^[[:space:]]*LOBBY_URL=//p' | tail -n 1)"
+[ -n "$url" ] && printf '\nthe lobby: %s\neach workroom gives that as its lobby (VISIT_LOBBY for a visit-client)\n' "$url"
+exit 0

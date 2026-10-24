@@ -4,8 +4,9 @@
 through the steps in order; each ends with how to check it. The contract behind it is
 [SPEC.md](SPEC.md): look things up there, but you should not need to.
 
-This guide lives in the `visit/` directory, beside `client/` (visit-client's source and visit.js) and
-[SPEC.md](SPEC.md). Paths below are relative to it.
+This guide lives in basedverse's `visit/` directory, beside `client/` (visit-client's source and
+visit.js) and [SPEC.md](SPEC.md); basedverse's settings template, `.env.example`, is one level up. Paths
+below are relative to `visit/`.
 
 ## What you are building
 
@@ -42,12 +43,19 @@ Check these about the sim you are integrating; if one is not true, stop and tell
 5. **Its page is served from the same machine** (`http://localhost:…` or `http://127.0.0.1:…`). A page
    served from a public `https://` site can be stopped by some browsers from reaching 127.0.0.1.
 
-Then gather:
+Then gather the settings. **[`../.env.example`](../.env.example) is their template**: copy its first
+section (the `VISIT_*` lines, with their comments) into your workroom's own settings, its `.env` if it
+has one (make one from that section if not, and keep it out of version control), and fill in:
 
-- the **lobby URL** (`wss://…`), from whoever runs your lobby;
-- the **office name** your user wants (1–24 letters, digits, space, `_ . -`, starting and ending with a
-  letter or digit);
-- your sim's **name and version**, e.g. `my-workroom/1.0`.
+- `VISIT_LOBBY`: the **lobby URL** (`wss://…`), from whoever runs your lobby;
+- `VISIT_NAME`: the **office name** your user wants (1–24 letters, digits, space, `_ . -`, starting and
+  ending with a letter or digit; in quotes if it has a space, so a shell can read the file too);
+- `VISIT_SIM`: your sim's **name and version**, e.g. `my-workroom/1.0`;
+- `VISIT_ORIGINS`: your page's **origin**, e.g. `http://localhost:3000` (step 2 says why).
+
+The rest can stay blank, meaning their defaults (port 7401, 3 visitors at once). `VISIT_TOKEN_FILE` is
+for your launcher to set (step 2). Never put real values in `.env.example` itself: it is basedverse's
+template, and it is committed.
 
 ## Step 1 — Get visit-client
 
@@ -72,41 +80,45 @@ Every time your sim starts:
 4. **Wait for its ready line** on stdout (`{"ready": true, …}`) before opening your page.
 5. **Stop it** when your sim stops.
 
+visit-client reads its settings from its environment, under the names in `.env.example`, so a launcher
+loads your `.env` and passes its environment on, adding only the token file:
+
 ```sh
-# a shell launcher
+# a shell launcher; its settings in the workroom's .env (the VISIT_* lines of ../.env.example)
+set -a; . ./.env; set +a
 umask 077
-TOKEN_FILE="${XDG_RUNTIME_DIR:-/tmp}/my-workroom-visit.token"
-head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$TOKEN_FILE"
-visit-client --lobby "wss://lobby.example/" --name "Magic Room" --sim my-workroom/1.0 \
-             --port 7401 --token-file "$TOKEN_FILE" --origins "http://localhost:3000" &
+export VISIT_TOKEN_FILE="${XDG_RUNTIME_DIR:-/tmp}/my-workroom-visit.token"
+head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$VISIT_TOKEN_FILE"
+visit-client &
 VISIT_PID=$!
 trap 'kill $VISIT_PID' EXIT
 ```
 
 ```js
-// a Node launcher
+// a Node launcher; its settings in the workroom's .env (the VISIT_* lines of ../.env.example)
+require("dotenv").config();   // or your own .env reader
 const { randomBytes } = require("crypto"), fs = require("fs"), { spawn } = require("child_process");
-const token = randomBytes(32).toString("hex"), tokenFile = `${process.env.XDG_RUNTIME_DIR || "/tmp"}/my-workroom-visit.token`;
-fs.writeFileSync(tokenFile, token, { mode: 0o600 });
-const visit = spawn("visit-client", ["--lobby", LOBBY_URL, "--name", OFFICE_NAME, "--sim", "my-workroom/1.0",
-                                     "--port", "7401", "--token-file", tokenFile, "--origins", "http://localhost:3000"],
-                    { stdio: ["ignore", "pipe", "inherit"] });
+const tokenFile = `${process.env.XDG_RUNTIME_DIR || "/tmp"}/my-workroom-visit.token`;
+fs.writeFileSync(tokenFile, randomBytes(32).toString("hex"), { mode: 0o600 });
+const visit = spawn("visit-client", [], { env: { ...process.env, VISIT_TOKEN_FILE: tokenFile },
+                                          stdio: ["ignore", "pipe", "inherit"] });
 process.on("exit", () => visit.kill());
 ```
 
 ```python
-# a Python launcher
+# a Python launcher; its settings in the workroom's .env (the VISIT_* lines of ../.env.example)
 import secrets, os, subprocess, atexit
-token = secrets.token_hex(32)
+from dotenv import load_dotenv; load_dotenv()   # or your own .env reader
 token_file = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "my-workroom-visit.token")
-fd = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, token.encode()); os.close(fd)
-visit = subprocess.Popen(["visit-client", "--lobby", LOBBY_URL, "--name", OFFICE_NAME, "--sim", "my-workroom/1.0",
-                          "--port", "7401", "--token-file", token_file, "--origins", "http://localhost:3000"],
-                         stdout=subprocess.PIPE)
+fd = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, secrets.token_hex(32).encode()); os.close(fd)
+visit = subprocess.Popen(["visit-client"], env=dict(os.environ, VISIT_TOKEN_FILE=token_file), stdout=subprocess.PIPE)
 atexit.register(visit.terminate)
 ```
 
-`--origins` is your page's origin (scheme, host and port, as the address bar shows them; list
+Every setting is a flag too (`VISIT_LOBBY` is `--lobby`, `VISIT_ORIGINS` is `--origins`; `visit-client
+--help` lists them), for a launcher that would rather pass them that way; a flag wins over the environment.
+
+`VISIT_ORIGINS` is your page's origin (scheme, host and port, as the address bar shows them; list
 `http://127.0.0.1:…` too if your page is ever opened that way). visit-client then refuses any other site's
 page, even one that got hold of the token.
 
@@ -307,9 +319,11 @@ Then, in order:
 
 ## Checklist
 
+- [ ] Your settings live in your workroom's own `.env` (or config), started from `../.env.example`; that
+      `.env` is not committed, and `.env.example` keeps no real values.
 - [ ] visit-client starts with your launcher, with a new token each run, and stops with your sim.
-- [ ] It listens on 127.0.0.1 only; the token is in a 0600 file, not on the command line; `--origins` names
-      your page's origin.
+- [ ] It listens on 127.0.0.1 only; the token is in a 0600 file, not on the command line or in `.env`;
+      `VISIT_ORIGINS` names your page's origin.
 - [ ] Your page gets the token by a same-origin route (answering only `Host: localhost` or `127.0.0.1`), a
       fragment kept in `sessionStorage`, or a local file; no other origin can read it, and it never appears
       in a URL query or a log.
@@ -329,10 +343,11 @@ Then, in order:
 | symptom | cause |
 |---|---|
 | `visit.js` fails to load | visit-client is not running, or on another port; check `curl http://127.0.0.1:<port>/health` |
-| connect fails before it opens (HTTP 403) | your page's origin is not in `--origins`: compare the address bar's scheme, host and port with it |
+| connect fails before it opens (HTTP 403) | your page's origin is not in `VISIT_ORIGINS` (`--origins`): compare the address bar's scheme, host and port with it |
+| visit-client exits at once (exit code 2) | a setting it cannot use; its stderr names it. Check your `.env` against `.env.example` (and a value with a space needs quotes for a shell to load it) |
 | connect closes with 4401 | the token your page sent is not the one visit-client was started with: a stale `visit.json`, two launchers, or visit-client restarted while the page kept its old token (hand `connect` a token function, step 4) |
 | connect closes with 4409 | another page of yours connected after this one; only the newest page is live |
-| `state` stays `"offline"` | visit-client cannot reach the lobby: wrong `--lobby` URL, or no network; its stderr says why |
+| `state` stays `"offline"` | visit-client cannot reach the lobby: a wrong `VISIT_LOBBY`, or no network; its stderr says why |
 | you never become `ready` in the lobby | visit-client could not start its connection endpoint; its stderr says why |
 | knocks refused `not_ready` | you or the door have not published a link yet; wait a few seconds |
 | a visit ends `link_failed` | the two machines could not connect, even through the relay; check the relay is up |

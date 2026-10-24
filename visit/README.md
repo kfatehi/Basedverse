@@ -1,6 +1,6 @@
 # Visit — walk around each other's workrooms
 
-**Status: built and tested on one machine (visit-client, visit.js, the lobby's version 2); a first workroom runs it. Not yet between two machines over the internet.**
+**Status: built and tested on one machine (visit-client, visit.js, the lobby's version 2), and the live lobby speaks version 2. Not yet between two machines over the internet.**
 
 Everyone builds their own workroom, in their own engine, and Visit lets you walk around each other's
 with WASD and the mouse. Your inputs go to the host's sim; the host's sim renders its room from where you
@@ -15,17 +15,9 @@ pieces everyone drops in unchanged.
 
 ## Giving it to someone
 
-Visit travels as this directory. Your friend, to add it to their workroom:
-
-1. **Copies `visit/`** into their project (or clones this repository). Nothing else is needed:
-   the lobby is shared.
-2. **Gets visit-client for their machine.** On Linux, `client/build` makes a static `client/bin/visit-client`
-   in Docker (nothing to install); the one you built works too, on the same CPU architecture. On macOS or
-   Windows, `cargo build --release` in `client/`, with Rust from https://rustup.rs (a container cannot
-   listen on the machine's own 127.0.0.1 there).
-3. **Tells their coding agent:** *"Integrate Visit into my workroom, following visit/INTEGRATING.md. The
-   lobby is wss://&lt;the lobby's address&gt;/."* The guide takes the agent through the launcher, the token,
-   the three hooks, the UI, and a test on one machine.
+Visit travels with the rest of basedverse: [../README.md](../README.md) says how to add it to a workroom
+(get the repository, get visit-client, hand the guide to a coding agent). The settings a workroom gives
+visit-client are in [../.env.example](../.env.example).
 
 ```
 visit/
@@ -36,8 +28,8 @@ visit/
     build            a static binary into client/bin/ (Linux, in Docker)
     cargo            cargo in Docker, for working on visit-client
     web/visit.js     the library
-    tests/           the end-to-end and browser tests, and room.html, a small workroom to try it with
-                     (the tests run this repository's lobby, ../lobby/, so they need the whole of it)
+    tests/           the end-to-end and browser tests (with ../lobby/'s server), and room.html, a small
+                     workroom to try it with
 ```
 
 ## The pieces
@@ -60,9 +52,9 @@ visit/
 - [x] The spec, and the guide for integrators.
 - [x] visit-client, tested end to end with the real lobby and two clients (`client/tests/run-e2e.sh`).
 - [x] visit.js, tested in two real browsers: knocking, walking, reloads (`client/tests/run-browser.sh`).
-- [x] The lobby's version 2 (`../lobby/server/`, `test_lobby2.py`).
+- [x] The lobby's version 2 (`../lobby/server/`, `test_lobby2.py`), live (`../bin/deploy-lobby`).
 - [x] A first workroom running it.
-- [ ] The live lobby running version 2 (`bin/deploy-lobby`), and a relay of our own beside it. Until there is
-      one, links that cannot go direct use iroh's public relays (still encrypted end to end).
+- [ ] A relay of our own beside the lobby. Until there is one, links that cannot go direct use iroh's public
+      relays (still encrypted end to end).
 - [ ] A visit between two machines over the internet.
 - [ ] A second workroom.

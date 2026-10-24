@@ -1,0 +1,4 @@
+# Settings are local; .env.example is their template, and is committed.
+.env
+__pycache__/
+*.pyc
