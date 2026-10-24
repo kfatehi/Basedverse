@@ -38,3 +38,7 @@ open, then `bin/deploy-lobby user@server` sets it up, and later updates it.
 | `visit/client/cargo test` | visit-client's unit tests, in Docker |
 | `visit/client/tests/run-e2e.sh` | the lobby, two visit-clients and two stand-in pages, in Docker |
 | `visit/client/tests/run-browser.sh` | visit.js in two headless Chromes on this machine (it needs `google-chrome`) |
+
+## License
+
+MIT: see [LICENSE](LICENSE).
