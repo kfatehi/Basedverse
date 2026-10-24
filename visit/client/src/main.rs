@@ -46,6 +46,10 @@ struct Args {
     /// The relays for links, overriding the lobby's: "none", "default" (iroh's own), or comma-separated URLs.
     #[arg(long, env = "VISIT_RELAYS")]
     relays: Option<String>,
+    /// The origins (scheme://host:port) the workroom's page may connect from, comma-separated; none: any page
+    /// with the token. Naming the sim's own makes a token stolen somehow useless to another site.
+    #[arg(long, env = "VISIT_ORIGINS", default_value = "")]
+    origins: String,
 }
 
 /// Compares two secrets in time that does not depend on where they differ.
@@ -116,7 +120,8 @@ async fn main() -> ExitCode {
     let (lobby_tx, lobby_rx) = mpsc::unbounded_channel();
     let hello = lobby::Hello { name: a.name.clone(), sim, status: "available".into(), max_visitors: a.max_visitors };
     tokio::spawn(lobby::run(a.lobby.clone(), hello, lobby_rx, core_tx.clone()));
-    let state = page::PageState::new(token, core_tx.clone());
+    let origins: Vec<String> = a.origins.split(',').map(|o| o.trim().trim_end_matches('/').to_string()).filter(|o| !o.is_empty()).collect();
+    let state = page::PageState::new(token, origins, core_tx.clone());
     tokio::spawn(async move {
         if let Err(e) = page::serve(listener, state).await {
             error!("the page server stopped: {e}");

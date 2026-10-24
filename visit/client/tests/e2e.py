@@ -37,8 +37,8 @@ class Page:
     def __init__(self, port, token):
         self.port, self.token = port, token
 
-    async def open(self, token=None):
-        self.ws = await connect("ws://127.0.0.1:%d/ws" % self.port, max_size=4 << 20)
+    async def open(self, token=None, origin="http://room.test"):
+        self.ws = await connect("ws://127.0.0.1:%d/ws" % self.port, max_size=4 << 20, origin=origin)
         self.texts, self.frames = asyncio.Queue(), asyncio.Queue()
         await self.send(type="hello", proto="basedverse-visit-local/1", token=token or self.token, sim={"name": "e2e", "version": "1"})
         self.pump = asyncio.create_task(self._pump())
@@ -87,7 +87,7 @@ class Page:
         self.pump.cancel()
 
 
-async def start_client(name, port, url):
+async def start_client(name, port, url, *extra):
     token = secrets.token_hex(32)
     path = os.path.join(TMP, name + ".token")
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -95,7 +95,7 @@ async def start_client(name, port, url):
     os.close(fd)
     log = open(os.path.join(TMP, name + ".log"), "w")
     p = await asyncio.create_subprocess_exec(BIN, "--lobby", url, "--name", name, "--sim", "e2e/1", "--port", str(port),
-                                             "--token-file", path, "--relays", "none",
+                                             "--token-file", path, "--relays", "none", *extra,
                                              stdout=asyncio.subprocess.PIPE, stderr=log,
                                              env=dict(os.environ, RUST_LOG=os.environ.get("RUST_LOG", "visit_client=debug,iroh=warn")))
     ready = json.loads(await asyncio.wait_for(p.stdout.readline(), 10))
@@ -113,9 +113,11 @@ def unframe(b):
 
 
 async def main():
-    async with serve(lobby.handler, "127.0.0.1", 0, max_size=lobby.LIMITS["frame"], process_request=lobby.health) as server:
+    # Pings every second, dropping a connection that does not answer within one: the keepalive check below.
+    async with serve(lobby.handler, "127.0.0.1", 0, max_size=lobby.LIMITS["frame"], process_request=lobby.health,
+                     ping_interval=1, ping_timeout=1) as server:
         url = "ws://127.0.0.1:%d" % server.sockets[0].getsockname()[1]
-        (pa, ta), (pb, tb) = await start_client("A", 7411, url), await start_client("B", 7412, url)
+        (pa, ta), (pb, tb) = await start_client("A", 7411, url, "--origins", "http://room.test"), await start_client("B", 7412, url)
 
         print("\npage connection")
         bad = await Page(7411, ta).open(token="0" * 64)
@@ -124,6 +126,11 @@ async def main():
             check("a wrong token is refused", "ready", "closed 4401")
         except AssertionError:
             check("a wrong token is refused", bad.ws.close_code, 4401)
+        try:
+            await Page(7411, ta).open(origin="http://elsewhere.test")
+            check("A takes pages only from its --origins", "connected", "refused")
+        except Exception as e:
+            check("A takes pages only from its --origins", "403" in str(e), True)
         a, b = await Page(7411, ta).open(), await Page(7412, tb).open()
         ra, rb = await a.expect("ready"), await b.expect("ready")
         check("ready: the version, limits, no visits", (ra["version"], ra["limits"]["fps"], ra["visits"]), ("0.1.0", 30, []))
@@ -132,6 +139,24 @@ async def main():
         await b.until(both)
         ids = {o["name"]: o["id"] for o in lob["offices"]}
         check("both offices in the lobby, each with its link published", sorted(ids), ["A", "B"])
+        await a.drain()
+        await b.drain()
+        await asyncio.sleep(4)   # idle through four of the lobby's pings
+        seen = []
+        while not b.texts.empty():
+            seen.append(b.texts.get_nowait()["type"])
+        check("idle, the visit-clients answer the lobby's pings: B never goes offline", "offline" in seen, False)
+        await b.send(type="status", status="away")
+        check("a status other than available or busy is refused, there and then", (await b.expect("error"))["code"], "bad_message")
+        await b.send(type="rename", name="A")
+        check("renaming to a taken name: refused", (await b.expect("error"))["code"], "name_taken")
+        await b.send(type="rename", name="B2")
+        lob = await a.until(lambda m: m["type"] == "lobby" and any(o["name"] == "B2" for o in m["offices"]))
+        check("renaming to a free name: the same office, its new name for all", [o["id"] for o in lob["offices"] if o["name"] == "B2"], [ids["B"]])
+        await b.send(type="rename", name="B")
+        await a.until(lambda m: m["type"] == "lobby" and any(o["name"] == "B" for o in m["offices"]))
+        await a.drain()
+        await b.drain()
 
         print("\nknock, let in, link up")
         await b.send(type="knock", to=ids["A"], message="may I?")
@@ -224,6 +249,14 @@ async def main():
         await b.send(type="end", visit=vid)
         ea, eb = await a.until(lambda m: m["type"] == "visit_ended"), await b.until(lambda m: m["type"] == "visit_ended")
         check("B leaving: both pages hear visit_ended, `left`", (ea["reason"], eb["reason"], ea["channel"], eb["channel"]), ("left", "left", cha, chb))
+        await asyncio.sleep(1.5)
+        stray = []
+        for pg in (a, b):
+            while not pg.texts.empty():
+                m = pg.texts.get_nowait()
+                if m and m["type"] == "error":
+                    stray.append(m)
+        check("and no error after it (the link ended on purpose: no redialling, no link_failed)", stray, [])
         await a.drain()
         pb.terminate()
         await asyncio.wait_for(pb.wait(), 5)

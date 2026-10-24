@@ -4,7 +4,8 @@
 through the steps in order; each ends with how to check it. The contract behind it is
 [SPEC.md](SPEC.md): look things up there, but you should not need to.
 
-**Status: draft.** visit-client and visit.js are not built yet; this is how integrating them will go.
+This guide lives in the `visit/` directory, beside `client/` (visit-client's source and visit.js) and
+[SPEC.md](SPEC.md). Paths below are relative to it.
 
 ## What you are building
 
@@ -50,9 +51,15 @@ Then gather:
 
 ## Step 1 — Get visit-client
 
-Put the `visit-client` binary for your platform somewhere your launcher can run it (a release download,
-or `cargo build --release` in this repository's `visit/client/`). Check: `visit-client --help` prints its
-flags. You do not need visit.js separately: visit-client serves it.
+Put the `visit-client` binary for your machine somewhere your launcher can run it:
+
+- **Linux:** `client/build` makes a static `client/bin/visit-client` in Docker (nothing to install); a
+  binary someone built that way on the same CPU architecture works too.
+- **macOS or Windows:** with Rust installed (https://rustup.rs), `cargo build --release` in `client/` gives
+  `client/target/release/visit-client`. It has to run natively there: a container cannot listen on the
+  machine's own 127.0.0.1.
+
+Check: `visit-client --help` prints its flags. You do not need visit.js separately: visit-client serves it.
 
 ## Step 2 — Start visit-client from your launcher
 
@@ -71,7 +78,7 @@ umask 077
 TOKEN_FILE="${XDG_RUNTIME_DIR:-/tmp}/my-workroom-visit.token"
 head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$TOKEN_FILE"
 visit-client --lobby "wss://lobby.example/" --name "Magic Room" --sim my-workroom/1.0 \
-             --port 7401 --token-file "$TOKEN_FILE" &
+             --port 7401 --token-file "$TOKEN_FILE" --origins "http://localhost:3000" &
 VISIT_PID=$!
 trap 'kill $VISIT_PID' EXIT
 ```
@@ -82,7 +89,8 @@ const { randomBytes } = require("crypto"), fs = require("fs"), { spawn } = requi
 const token = randomBytes(32).toString("hex"), tokenFile = `${process.env.XDG_RUNTIME_DIR || "/tmp"}/my-workroom-visit.token`;
 fs.writeFileSync(tokenFile, token, { mode: 0o600 });
 const visit = spawn("visit-client", ["--lobby", LOBBY_URL, "--name", OFFICE_NAME, "--sim", "my-workroom/1.0",
-                                     "--port", "7401", "--token-file", tokenFile], { stdio: ["ignore", "pipe", "inherit"] });
+                                     "--port", "7401", "--token-file", tokenFile, "--origins", "http://localhost:3000"],
+                    { stdio: ["ignore", "pipe", "inherit"] });
 process.on("exit", () => visit.kill());
 ```
 
@@ -93,9 +101,14 @@ token = secrets.token_hex(32)
 token_file = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "my-workroom-visit.token")
 fd = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, token.encode()); os.close(fd)
 visit = subprocess.Popen(["visit-client", "--lobby", LOBBY_URL, "--name", OFFICE_NAME, "--sim", "my-workroom/1.0",
-                          "--port", "7401", "--token-file", token_file], stdout=subprocess.PIPE)
+                          "--port", "7401", "--token-file", token_file, "--origins", "http://localhost:3000"],
+                         stdout=subprocess.PIPE)
 atexit.register(visit.terminate)
 ```
+
+`--origins` is your page's origin (scheme, host and port, as the address bar shows them; list
+`http://127.0.0.1:…` too if your page is ever opened that way). visit-client then refuses any other site's
+page, even one that got hold of the token.
 
 If your sim runs in a container, run visit-client on the host machine (or in the same network namespace
 as the browser): it must be reachable at `127.0.0.1:<port>` **from the browser**, and must not be
@@ -111,7 +124,9 @@ fits your sim:
 
 - **Your sim has a server** (the page is served by it): add a route that answers a same-origin request,
   e.g. `GET /api/visit` → `{"port": 7401, "token": "…"}`, read from the token file. Send no CORS headers
-  on it: that is what keeps other sites from reading it.
+  on it: that keeps other sites' pages from reading it. And answer it only when the request's `Host` header
+  is `localhost` or `127.0.0.1` (any port): that turns away DNS-rebinding sites, and anyone on your network
+  asking your server by its LAN address.
 - **Your page is static files**: have the launcher write `visit.json` (`{"port", "token"}`) beside the
   page, mode 0600, and fetch it from the page. Do not commit it.
 - **Your launcher opens the browser**: put it in the URL fragment,
@@ -134,14 +149,18 @@ async function startVisit() {
     s.src = `http://127.0.0.1:${port}/visit.js`; s.onload = ok; s.onerror = () => fail(new Error("visit-client is not running"));
     document.head.appendChild(s);
   });
-  const visit = await Visit.connect({ port, token, sim: { name: "my-workroom", version: "1.0" } });
+  // The token as a function: asked again whenever the library reconnects, so a visit-client restarted with a
+  // new token (your launcher run again) is found again without reloading the page.
+  const fresh = async () => (await (await fetch("/api/visit", { cache: "no-store" })).json()).token;
+  const visit = await Visit.connect({ port, token: fresh, sim: { name: "my-workroom", version: "1.0" } });
   visit.on("error", e => console.warn("visit:", e.code, e.message));
   return visit;
 }
 ```
 
 If visit-client is not running, your sim must still work: catch the failure, log it, and carry on
-without Visit.
+without Visit. (Handing it the token as a plain string works too, but then a restarted visit-client means
+reloading the page.)
 
 **Check:** `visit.state` becomes `"online"`, `visit.office.name` is your office name, and `visit.offices`
 lists you (and anyone else in the lobby).
@@ -225,10 +244,12 @@ the keyboard and mouse while it is shown:
 
 ```js
 let view = null;
-visit.on("change", () => {
+function showVisit() {
   if (visit.visiting && !view) { stage.hidden = false; view = visit.view(stage); }       // stage: a full-window element
   if (!visit.visiting && view) { view.release(); view = null; stage.hidden = true; }
-});
+}
+visit.on("change", showVisit);
+showVisit();   // now too: after a reload mid-visit, you are already visiting
 ```
 
 Inside the element Visit creates a canvas that fills it. Click it to look around (it takes the pointer);
@@ -287,9 +308,11 @@ Then, in order:
 ## Checklist
 
 - [ ] visit-client starts with your launcher, with a new token each run, and stops with your sim.
-- [ ] It listens on 127.0.0.1 only; the token is in a 0600 file, not on the command line.
-- [ ] Your page gets the token by a same-origin route, a fragment, or a local file; no other origin can
-      read it, and it never appears in a URL query or a log.
+- [ ] It listens on 127.0.0.1 only; the token is in a 0600 file, not on the command line; `--origins` names
+      your page's origin.
+- [ ] Your page gets the token by a same-origin route (answering only `Host: localhost` or `127.0.0.1`), a
+      fragment kept in `sessionStorage`, or a local file; no other origin can read it, and it never appears
+      in a URL query or a log.
 - [ ] Your sim works as before when visit-client is not running.
 - [ ] `spawn` puts visitors somewhere sensible; `move` keeps them out of walls and furniture.
 - [ ] `render` draws your room from the pose without touching your own view, fast enough for 30 fps per
@@ -306,7 +329,8 @@ Then, in order:
 | symptom | cause |
 |---|---|
 | `visit.js` fails to load | visit-client is not running, or on another port; check `curl http://127.0.0.1:<port>/health` |
-| connect closes with 4401 | the token your page sent is not the one visit-client was started with (a stale `visit.json`, or two launchers) |
+| connect fails before it opens (HTTP 403) | your page's origin is not in `--origins`: compare the address bar's scheme, host and port with it |
+| connect closes with 4401 | the token your page sent is not the one visit-client was started with: a stale `visit.json`, two launchers, or visit-client restarted while the page kept its old token (hand `connect` a token function, step 4) |
 | connect closes with 4409 | another page of yours connected after this one; only the newest page is live |
 | `state` stays `"offline"` | visit-client cannot reach the lobby: wrong `--lobby` URL, or no network; its stderr says why |
 | you never become `ready` in the lobby | visit-client could not start its connection endpoint; its stderr says why |
@@ -314,6 +338,7 @@ Then, in order:
 | a visit ends `link_failed` | the two machines could not connect, even through the relay; check the relay is up |
 | the visitor sees a black or frozen view | `render` returned a canvas that was not drawn (cleared, or a different canvas), or threw (see the console) |
 | visitors walk through walls | your `blocked` does not cover them, or your `move` ignores it |
+| visitors' view slows to a crawl while your tab is in the background | your page's Content-Security-Policy forbids `blob:` workers, so the library's timer is the page's own (slowed in the background): allow `worker-src blob:` |
 
 ## Don't
 

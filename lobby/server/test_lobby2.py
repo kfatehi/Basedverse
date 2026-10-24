@@ -285,6 +285,44 @@ async def t_resume():
         await y.close()
 
 
+async def t_resume_replays_visits():
+    a, b = await join("A8"), await join("B8")
+    await b.send(type="knock", to=a.id)
+    await b.expect("knock_sent")
+    k = await a.expect("knock")
+    secret = b.welcome["resume"]
+    await b.ws.close()   # away just as its knock is answered
+    await asyncio.sleep(0.2)
+    await a.send(type="answer", knock=k["id"], accept=True)
+    va = await a.expect("visit")
+    r = Client(await connect(URL))
+    await r.send(type="hello", proto=P2, resume=secret)
+    w = await r.expect("welcome")
+    check("a resumed welcome lists the session's visits", w["visits"], [va["id"]])
+    check("and its own knocks still waiting (none: this one was answered)", w["knocking"], [])
+    vb = await r.expect("visit")
+    check("and a visit agreed while it was away is told to it", (vb["id"], vb["role"], vb["ticket"] == va["ticket"], vb["peer_link"]), (va["id"], "visitor", True, a.link))
+    for x in (a, r):
+        await x.close()
+
+
+async def t_rename():
+    a, b = await join("A9"), await join("B9")
+    await a.send(type="rename", name="b9")
+    check("renaming to a taken name: refused", (await a.expect("error"))["code"], "name_taken")
+    await a.send(type="status", status="available")
+    check("and the office keeps its own name", office(await a.expect("lobby"), "A9")["id"], a.id)
+    await a.send(type="rename", name="-bad")
+    check("renaming to an invalid name: refused", (await a.expect("error"))["code"], "name_invalid")
+    await a.send(type="rename", name="A9 New")
+    lob = await b.last_lobby()
+    check("renaming to a free name: everyone sees it, the same office", (office(lob, "A9 New")["id"], [o["name"] for o in lob["offices"]]), (a.id, ["A9 New", "B9"]))
+    c = await join("A9")
+    check("and the old name is free again", c.welcome["name"], "A9")
+    for x in (a, b, c):
+        await x.close()
+
+
 async def t_resume_window_and_bye():
     saved = lobby.LIMITS2["resume"]
     lobby.LIMITS2["resume"] = 1
@@ -333,7 +371,7 @@ async def main():
     global URL
     async with serve(lobby.handler, "127.0.0.1", 0, max_size=lobby.LIMITS["frame"], process_request=lobby.health) as server:
         URL = "ws://127.0.0.1:%d" % server.sockets[0].getsockname()[1]
-        for t in (t_hello, t_hello_rules_and_separation, t_knock_refusals, t_visit, t_end_and_full, t_resume,
+        for t in (t_hello, t_hello_rules_and_separation, t_knock_refusals, t_visit, t_end_and_full, t_resume, t_resume_replays_visits, t_rename,
                   t_resume_window_and_bye, t_knock_timeout_and_health):
             print("\n" + t.__name__[2:])
             try:

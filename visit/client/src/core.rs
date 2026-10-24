@@ -20,7 +20,7 @@ use crate::{
 
 /// What the core hears about.
 pub enum Ev {
-    PageOpen { id: u64, tx: mpsc::Sender<PageOut> },
+    PageOpen { id: u64, text: mpsc::UnboundedSender<PageOut>, frames: mpsc::Sender<Bytes> },
     PageMsg { id: u64, msg: Value },
     PageBin { id: u64, data: Bytes },
     PageClosed { id: u64 },
@@ -42,16 +42,16 @@ pub enum Ev {
     Shutdown,
 }
 
-/// What goes to the page.
+/// What the page is told (frames go apart, on a queue that drops them when the page falls behind).
 pub enum PageOut {
     Text(String),
-    Binary(Bytes),
     Close(u16, &'static str),
 }
 
 struct Page {
     id: u64,
-    tx: mpsc::Sender<PageOut>,
+    text: mpsc::UnboundedSender<PageOut>,
+    frames: mpsc::Sender<Bytes>,
 }
 
 struct Visit {
@@ -74,7 +74,13 @@ struct Visit {
     peer_viewport: Option<Value>,
     /// The host page's state for this visitor (where it stands), kept for a page that reloads.
     host_state: Option<Value>,
+    /// Control messages taken from the other side in the current second: at most CTL_PER_SECOND.
+    ctl: (Instant, u32),
 }
+
+/// The most control messages a link's other side may send a second; more are dropped (a peer flooding
+/// keyframe requests or encoder settings must not swamp this office's page).
+const CTL_PER_SECOND: u32 = 20;
 
 pub struct Core {
     lobby: mpsc::UnboundedSender<LobbyOut>,
@@ -90,7 +96,8 @@ pub struct Core {
     status: String,
     max_visitors: u8,
     lobby_view: Option<Value>,
-    knocks: BTreeMap<String, Value>,
+    /// Knocks on this office's door still waiting, and when each came, for a page that connects later.
+    knocks: BTreeMap<String, (Value, Instant)>,
     visits: HashMap<String, Visit>,
     next_channel: u16,
     /// What this office's page decodes and how big its view is, to tell the rooms it visits.
@@ -161,7 +168,7 @@ impl Core {
 
     async fn handle(&mut self, ev: Ev) {
         match ev {
-            Ev::PageOpen { id, tx } => self.page_open(id, tx),
+            Ev::PageOpen { id, text, frames } => self.page_open(id, text, frames),
             Ev::PageClosed { id } => {
                 if self.page.as_ref().map(|p| p.id) == Some(id) {
                     self.page = None;
@@ -218,11 +225,11 @@ impl Core {
 
     // ---------- the page ----------
 
-    fn page_open(&mut self, id: u64, tx: mpsc::Sender<PageOut>) {
+    fn page_open(&mut self, id: u64, text: mpsc::UnboundedSender<PageOut>, frames: mpsc::Sender<Bytes>) {
         if let Some(old) = self.page.take() {
-            let _ = old.tx.try_send(PageOut::Close(4409, "replaced"));
+            let _ = old.text.send(PageOut::Close(4409, "replaced"));
         }
-        self.page = Some(Page { id, tx });
+        self.page = Some(Page { id, text, frames });
         let visits: Vec<Value> = self.visits.values().filter(|v| v.up).map(started).collect();
         self.to_page(json!({
             "type": "ready", "version": VERSION, "office": self.office, "online": self.online, "status": self.status,
@@ -231,7 +238,11 @@ impl Core {
         if let Some(view) = self.lobby_view.clone() {
             self.to_page(view);
         }
-        for k in self.knocks.values().cloned().collect::<Vec<_>>() {
+        // Knocks still waiting, each with the time it has left.
+        for (k, at) in self.knocks.values().cloned().collect::<Vec<_>>() {
+            let left = k.get("expires_in").and_then(Value::as_u64).unwrap_or(60).saturating_sub(at.elapsed().as_secs());
+            let mut k = k;
+            k["expires_in"] = json!(left);
             self.to_page(k);
         }
         self.tell_hosted(json!({ "paused": false }));
@@ -257,17 +268,21 @@ impl Core {
         match t.as_str() {
             "" => self.page_error("bad_message", "a message is a JSON object with a string `type`", None),
             "hello" => self.page_error("already_hello", "this connection has said hello", Some("hello")),
-            "status" | "max_visitors" | "knock" | "answer" => {
-                if t == "status" {
-                    if let Some(s) = m.get("status").and_then(Value::as_str) {
-                        self.status = s.to_string();
-                    }
+            "status" => match m.get("status").and_then(Value::as_str) {
+                Some(s @ ("available" | "busy")) => {
+                    self.status = s.to_string();
+                    self.to_lobby(json!({ "type": "status", "status": s }));
                 }
-                if t == "max_visitors" {
-                    if let Some(n) = m.get("n").and_then(Value::as_u64) {
-                        self.max_visitors = n.min(8) as u8;
-                    }
+                _ => self.page_error("bad_message", "status must be available or busy", Some("status")),
+            },
+            "max_visitors" => match m.get("n").and_then(Value::as_u64).filter(|n| *n <= 8) {
+                Some(n) => {
+                    self.max_visitors = n as u8;
+                    self.to_lobby(json!({ "type": "max_visitors", "n": n }));
                 }
+                None => self.page_error("bad_message", "n must be 0 to 8", Some("max_visitors")),
+            },
+            "knock" | "answer" => {
                 if t == "answer" {   // answered: no longer waiting, so not shown again to a page that reconnects
                     if let Some(k) = m.get("knock").and_then(Value::as_str) {
                         self.knocks.remove(k);
@@ -275,9 +290,11 @@ impl Core {
                 }
                 self.to_lobby(m);
             }
+            // The lobby renames the office if the name is free; if not, it stays as it was (and says why).
             "rename" => match m.get("name").and_then(Value::as_str) {
                 Some(n) if crate::name_ok(n) => {
-                    let _ = self.lobby.send(LobbyOut::Rename(n.to_string()));
+                    let n = n.to_string();
+                    self.to_lobby(json!({ "type": "rename", "name": n }));
                 }
                 _ => self.page_error("name_invalid", "a name is 1-24 letters, digits, spaces, _ . -, starting and ending with a letter or digit", Some("rename")),
             },
@@ -355,14 +372,8 @@ impl Core {
     }
 
     fn to_page(&mut self, v: Value) {
-        let full = match &self.page {
-            Some(p) => p.tx.try_send(PageOut::Text(v.to_string())).is_err(),
-            None => false,
-        };
-        if full {
-            warn!("the page is not keeping up: dropping it");
-            self.page = None;
-            self.page_gone = Instant::now();
+        if let Some(p) = &self.page {
+            let _ = p.text.send(PageOut::Text(v.to_string()));   // gone: PageClosed follows
         }
     }
 
@@ -396,9 +407,18 @@ impl Core {
         match t.as_str() {
             "welcome" => {
                 let resumed = m.get("resumed").and_then(Value::as_bool).unwrap_or(false);
+                // The knocks still waiting on this office come again after the welcome.
+                self.knocks.clear();
                 if !resumed {
                     self.end_all("gone");
-                    self.knocks.clear();
+                } else if let Some(live) = m.get("visits").and_then(Value::as_array) {
+                    // Back after a drop: a visit that ended while this office was away is over (the lobby
+                    // lists those it still has; one agreed meanwhile follows as a `visit`).
+                    let live: Vec<&str> = live.iter().filter_map(Value::as_str).collect();
+                    let over: Vec<String> = self.visits.keys().filter(|id| !live.contains(&id.as_str())).cloned().collect();
+                    for id in over {
+                        self.end_visit(&id, "gone");
+                    }
                 }
                 self.office = json!({ "id": m.get("id"), "name": m.get("name") });
                 self.online = true;
@@ -414,8 +434,8 @@ impl Core {
                 }
                 info!(office = %self.office, resumed, "in the lobby");
                 self.publish_link();
-                let office = self.office.clone();
-                self.to_page(json!({ "type": "online", "office": office }));
+                let (office, knocking) = (self.office.clone(), m.get("knocking").cloned().unwrap_or(json!([])));
+                self.to_page(json!({ "type": "online", "office": office, "knocking": knocking }));
             }
             "lobby" => {
                 self.lobby_view = Some(m.clone());
@@ -423,7 +443,7 @@ impl Core {
             }
             "knock" => {
                 if let Some(id) = m.get("id").and_then(Value::as_str) {
-                    self.knocks.insert(id.to_string(), m.clone());
+                    self.knocks.insert(id.to_string(), (m.clone(), Instant::now()));
                 }
                 self.to_page(m);
             }
@@ -453,6 +473,9 @@ impl Core {
         ) else {
             return warn!("a visit without an id, ticket or role");
         };
+        if self.visits.contains_key(id) {
+            return;   // told again after a resume: it is already under way
+        }
         let Some(links) = self.links.clone() else {
             return self.to_lobby(json!({ "type": "end", "visit": id, "reason": "link_failed" }));
         };
@@ -468,7 +491,7 @@ impl Core {
                 info!(visit = id, ?role, channel, "visit agreed");
                 self.visits.insert(id.to_string(), Visit {
                     id: id.to_string(), channel, role, peer: m.get("peer").cloned().unwrap_or(Value::Null), up: false, cmd,
-                    video_config: None, last_seq: 0, inputs: (Instant::now(), 0), want_key: false, peer_decoders: None, peer_viewport: None, host_state: None,
+                    video_config: None, last_seq: 0, inputs: (Instant::now(), 0), want_key: false, peer_decoders: None, peer_viewport: None, host_state: None, ctl: (Instant::now(), 0),
                 });
             }
             Err(e) => {
@@ -551,6 +574,16 @@ impl Core {
 
     fn link_ctl(&mut self, id: &str, m: Value) {
         let Some(v) = self.visits.get_mut(id) else { return };
+        if v.ctl.0.elapsed() >= Duration::from_secs(1) {
+            v.ctl = (Instant::now(), 0);
+        }
+        v.ctl.1 += 1;
+        if v.ctl.1 > CTL_PER_SECOND {
+            if v.ctl.1 == CTL_PER_SECOND + 1 {
+                warn!(visit = id, "the other side sends too many control messages: dropping some");
+            }
+            return;
+        }
         let ch = v.channel;
         match v.role {
             // From the visitor.
@@ -611,7 +644,8 @@ impl Core {
             return;
         }
         trace!(id, key = frame.key, ts = frame.ts, "frame to the page");
-        if page.tx.try_send(PageOut::Binary(frame.to_page(v.channel))).is_err() {
+        // A page falling behind loses frames (its own queue: never its messages), then waits for a keyframe.
+        if page.frames.try_send(frame.to_page(v.channel)).is_err() {
             if !v.want_key {
                 v.want_key = true;
                 let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "keyframe": true })));

@@ -10,6 +10,20 @@
   const VERSION = "0.1.0", PROTO = "basedverse-visit-local/1";
   const CODECS = ["avc1.42E01F", "vp8", "vp09.00.10.08"];   // the order a host prefers, among what a visitor decodes
   const MOVE_MS = 1000 / 30, INPUT_MS = 1000 / 30, STALE_MS = 300, KEY_EVERY_MS = 2000, LOOK = 0.0025;
+  // What the host hears many times a second: none of it changes what the page shows, so none fires "change".
+  const QUIET = new Set(["input", "bitrate", "keyframe", "decoders", "viewport", "video_config"]);
+  // A timer from a Worker: a page's own timers slow to once a second (or less) while its tab is in the
+  // background, and a host must go on rendering for its visitors.
+  function ticker(ms, fn) {
+    try {
+      const w = new Worker(URL.createObjectURL(new Blob([`setInterval(() => postMessage(0), ${ms});`], { type: "text/javascript" })));
+      w.onmessage = fn;
+      return { stop: () => w.terminate() };
+    } catch (e) {   // workers forbidden (a strict CSP): the page's own timer, slow in the background
+      const t = setInterval(fn, ms);
+      return { stop: () => clearInterval(t) };
+    }
+  }
   const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
   const even = n => Math.max(2, Math.floor(n / 2) * 2);
 
@@ -40,46 +54,64 @@
       this._viewer = null;        // the visit this office is on: { channel, decoder, waitKey, config }
       this._view = null;          // where it is shown: { element, canvas, ... }
       this._closed = false;
-      this._loop = setInterval(() => this._tick(), MOVE_MS);
+      this._fails = 0;
+      this._loop = ticker(MOVE_MS, () => this._tick());
     }
 
     // ---------- events ----------
     on(event, fn) { (this._on[event] = this._on[event] || []).push(fn); return this; }
+    off(event, fn) { this._on[event] = (this._on[event] || []).filter(f => f !== fn); return this; }
     _emit(event, arg) { for (const fn of this._on[event] || []) { try { fn(arg); } catch (e) { console.error("visit: a", event, "handler threw", e); } } }
     _changed() { this._emit("change", this); }
 
     // ---------- the connection ----------
-    _open() {
+    // `token` is the token, or a function giving it (fresh each time: a visit-client restarted with a new
+    // one is then found again by itself).
+    async _open() {
+      const token = typeof this.token === "function" ? await this.token() : this.token;
       return new Promise((resolve, reject) => {
         const ws = this._ws = new WebSocket(`ws://127.0.0.1:${this.port}/ws`);
         ws.binaryType = "arraybuffer";
         let ready = false;
-        ws.onopen = () => ws.send(JSON.stringify({ type: "hello", proto: PROTO, token: this.token, sim: this.sim }));
+        ws.onopen = () => ws.send(JSON.stringify({ type: "hello", proto: PROTO, token, sim: this.sim }));
         ws.onmessage = e => {
           if (typeof e.data !== "string") return this._frame(e.data);
           let m;
           try { m = JSON.parse(e.data); } catch (err) { return; }
-          if (m.type === "ready" && !ready) { ready = true; this._ready(m); resolve(); return; }
+          if (m.type === "ready" && !ready) { ready = true; this._fails = 0; this._ready(m); resolve(); return; }
           this._message(m);
-          this._changed();
+          if (!QUIET.has(m.type)) this._changed();
         };
         ws.onclose = e => {
           if (ws !== this._ws) return;
           this._dropAll();
-          if (!ready) return reject(new Error(e.code === 4401 ? "visit-client refused the token" : `visit-client is not running on 127.0.0.1:${this.port}`));
+          if (!ready) {
+            const err = new Error(e.code === 4401 ? "visit-client refused the token" : `visit-client is not running on 127.0.0.1:${this.port}, or refused this page`);
+            err.code = e.code;
+            return reject(err);
+          }
           this.state = "offline";
           this._changed();
-          if (this._closed || e.code === 4401 || e.code === 4409 || e.code === 4429) {
-            const why = { 4401: "the token was refused", 4409: "another page took over", 4429: "too many wrong tokens" }[e.code] || "closed";
-            return this._emit("error", { code: "closed", message: `visit-client: ${why}` });
+          if (this._closed || e.code === 4409) {
+            return this._emit("error", { code: "closed", message: e.code === 4409 ? "visit-client: another page of this workroom took over" : "visit-client: closed" });
           }
           setTimeout(() => this._reopen(), 2000);   // visit-client restarting: try again
         };
       });
     }
-    _reopen() { if (!this._closed) this._open().catch(() => setTimeout(() => this._reopen(), 2000)); }
+    // Again every 2 s while visit-client is away. A wrong token is final unless `token` is a function (then
+    // a few more tries, each with what it gives): a stale token tried forever only keeps failing.
+    _reopen() {
+      if (this._closed) return;
+      this._open().catch(e => {
+        if (e.code === 4401 && (typeof this.token !== "function" || ++this._fails >= 3)) {
+          return this._emit("error", { code: "token", message: "visit-client refused the token: reload the page" });
+        }
+        setTimeout(() => this._reopen(), 2000);
+      });
+    }
     _send(m) { if (this._ws && this._ws.readyState === 1) this._ws.send(JSON.stringify(m)); }
-    close() { this._closed = true; clearInterval(this._loop); this._dropAll(); if (this._ws) this._ws.close(); }
+    close() { this._closed = true; this._loop.stop(); this._dropAll(); if (this._ws) this._ws.close(); }
 
     _ready(m) {
       this.state = m.online ? "online" : "offline";
@@ -103,11 +135,14 @@
 
     _message(m) {
       switch (m.type) {
-        case "online": this.state = "online"; this.office = m.office; break;
+        case "online":   // (again, after a drop): its own knocks still waiting are these
+          this.state = "online"; this.office = m.office;
+          if (Array.isArray(m.knocking)) this.knocking = m.knocking.map(k => ({ id: k.id, to: k.to }));
+          break;
         case "offline": this.state = "offline"; break;
         case "lobby":
-          this.offices = (m.offices || []).map(o => ({ id: o.id, name: o.name, status: o.status, sim: o.sim || {},
-            maxVisitors: o.max_visitors, visitors: o.visitors, visiting: o.visiting, ready: o.ready }));
+          this.offices = (m.offices || []).map(o => ({ id: String(o.id), name: String(o.name), status: String(o.status), sim: o.sim || {},
+            maxVisitors: Number(o.max_visitors) || 0, visitors: Number(o.visitors) || 0, visiting: o.visiting || null, ready: o.ready === true }));
           { const me = this.offices.find(o => this.office && o.id === this.office.id); if (me) { this.status = me.status; this.maxVisitors = me.maxVisitors; } }
           break;
         case "knock":
@@ -215,7 +250,8 @@
     // A codec this visitor decodes and this page encodes, at the visitor's view size; then its settings
     // to the visitor, and a keyframe first.
     async _configureEncoder(h) {
-      if (h.configuring || typeof VideoEncoder === "undefined") return;
+      if (typeof VideoEncoder === "undefined") return;
+      if (h.configuring) { h.again = true; return; }   // new settings arrived meanwhile: once this is done, again
       h.configuring = true;
       try {
         const [width, height] = fit(...(h.viewport || [0, 0]), this._limits.max_width, this._limits.max_height);
@@ -226,18 +262,26 @@
           if (c.startsWith("avc1")) probe.avc = { format: "annexb" };
           try { if ((await VideoEncoder.isConfigSupported(probe)).supported) { codec = c; break; } } catch (e) { /* next */ }
         }
+        if (this._hosted.get(h.channel) !== h) return;   // the visit ended meanwhile
         if (!codec) return console.warn("visit: no codec both sides support for", h.visitor.name);
         if (h.encoder && h.codec === codec && h.width === width && h.height === height) return;
         if (h.encoder) { try { h.encoder.close(); } catch (e) { /* already closed */ } }
         Object.assign(h, { codec, width, height });
         h.encoder = new VideoEncoder({
           output: chunk => this._sendChunk(h, chunk),
-          error: e => { console.warn("visit: encoder error", e); h.encoder = null; h.codec = null; setTimeout(() => this._configureEncoder(h), 500); },
+          error: e => {
+            console.warn("visit: encoder error", e);
+            h.encoder = null; h.codec = null;
+            setTimeout(() => { if (this._hosted.get(h.channel) === h) this._configureEncoder(h); }, 500);
+          },
         });
         h.encoder.configure(this._encoderConfig(h));
         h.keyNext = true;
         this._send({ type: "video_config", channel: h.channel, codec, width, height });
-      } finally { h.configuring = false; }
+      } finally {
+        h.configuring = false;
+        if (h.again && this._hosted.get(h.channel) === h) { h.again = false; this._configureEncoder(h); }
+      }
     }
 
     _sendChunk(h, chunk) {
@@ -379,6 +423,8 @@
     _configureDecoder(m) {
       const w = this._viewer;
       if (!w || w.channel !== m.channel || typeof VideoDecoder === "undefined") return;
+      const same = w.config && w.config.codec === m.codec && w.config.codedWidth === m.width && w.config.codedHeight === m.height;
+      if (same && w.decoder && w.decoder.state === "configured") return;   // told again: nothing to change
       if (w.decoder) { try { w.decoder.close(); } catch (e) { /* closed */ } }
       w.config = { codec: m.codec, codedWidth: m.width, codedHeight: m.height, optimizeForLatency: true };
       w.decoder = new VideoDecoder({
@@ -474,7 +520,7 @@
     const root = document.createElement("div");
     root.className = "visit-panel";
     element.appendChild(root);
-    let composing = null, timer = null;
+    let composing = null, timer = null, drawn = "";
     const knockable = o => o.ready && o.status === "available" && (!v.office || o.id !== v.office.id) && o.visitors < o.maxVisitors
       && !(v.visiting && v.visiting.host.id === o.id) && !v.knocking.some(k => k.to === o.id);
     function draw() {
@@ -501,7 +547,10 @@
         if (composing === o.id) rows.push(`<form class="row" data-o="${esc(o.id)}"><input maxlength="280" placeholder="a message for ${esc(o.name)}"><button class="go">Knock</button></form>`);
       }
       if (v.state === "online" && v.offices.length < 2) rows.push(`<div class="row muted">nobody else is here yet</div>`);
-      root.innerHTML = rows.join("");
+      const html = rows.join("");
+      if (html === drawn) return;   // nothing new: an open menu stays open, a click lands
+      drawn = html;
+      root.innerHTML = html;
       const input = root.querySelector("form input");
       if (input) input.focus();
     }
@@ -530,7 +579,7 @@
     v.on("change", draw);
     timer = setInterval(() => { if (v.knocks.length) draw(); }, 1000);   // the knocks' countdown
     draw();
-    return { element: root, release() { clearInterval(timer); root.remove(); } };
+    return { element: root, release() { clearInterval(timer); v.off("change", draw); root.remove(); } };
   }
 
   window.Visit = {

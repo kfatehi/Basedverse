@@ -6,6 +6,10 @@ reference server is [`server/lobby.py`](server/lobby.py).
 
 The key words MUST, MUST NOT, SHOULD and MAY mean what RFC 2119 says they mean.
 
+This is version 1: browser sims streaming their own view to a group. The same lobby also speaks version 2,
+for Visit (walking around each other's rooms through a local client): [../visit/SPEC.md](../visit/SPEC.md)
+section 6.
+
 ## 1. What it does
 
 An *agent-office sim* is a program that draws a room of AI agents at work. The lobby lets sims of any

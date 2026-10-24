@@ -142,6 +142,7 @@ async def main():
         await b.shot("b_visiting.png")
 
         print("\nwalking")
+        await a.js("window.panelChanges = 0; new MutationObserver(() => window.panelChanges++).observe(document.querySelector('.visit-panel'), { childList: true, subtree: true, characterData: true })")
         p0 = await a.js("v.visitors[0].pose")
         await b.call("Runtime.evaluate", expression="document.getElementById('stage').querySelector('canvas').focus()")
         await b.key("KeyW", "w", 87, True)
@@ -150,6 +151,7 @@ async def main():
         await asyncio.sleep(0.3)
         p1 = await a.js("v.visitors[0].pose")
         check("holding W walks B forward (toward -z) in A's room", (round(p1["x"], 1) == round(p0["x"], 1), 1.5 < p0["z"] - p1["z"] < 3.5), (True, True))
+        check("A's panel stays as it is while B walks (its menus stay open, its buttons take clicks)", await a.js("window.panelChanges"), 0)
         await b.js("v._view.yaw = Math.PI / 2")
         await asyncio.sleep(0.3)
         check("turning B's view turns B in A's room", round(await a.js("v.visitors[0].pose.yaw"), 2), round(3.14159 / 2, 2))

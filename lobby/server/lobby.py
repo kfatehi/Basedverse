@@ -420,9 +420,8 @@ def start_visit(host, visitor):
     VISITS2[vid] = {"id": vid, "host": host.id, "visitor": visitor.id, "ticket": ticket}
     host.hosting.add(vid)
     visitor.visiting = vid
-    for me, peer, role in ((host, visitor, "host"), (visitor, host, "visitor")):
-        tell2(me, {"type": "visit", "id": vid, "role": role, "peer": {"id": peer.id, "name": peer.name, "sim": peer.sim},
-                   "ticket": ticket, "peer_link": peer.link})
+    for me in (host, visitor):
+        tell2(me, visit_msg(VISITS2[vid], me))
     announce2()
 
 
@@ -559,17 +558,41 @@ def on2_end(me, m):
     end_visit(v["id"], reason)
 
 
+def on2_rename(me, m):
+    """A new name, if it is free; a taken or invalid one leaves the office as it was."""
+    name = m.get("name")
+    if not isinstance(name, str) or not NAME.match(name):
+        return error2(me, "name_invalid", "a name is 1-24 letters, digits, spaces, _ . -, starting and ending "
+                                          "with a letter or digit", "rename")
+    if name.casefold() in BY_NAME2 and BY_NAME2[name.casefold()] != me.id:
+        return error2(me, "name_taken", "%s is taken" % name, "rename")
+    BY_NAME2.pop(me.name.casefold(), None)
+    me.name = name
+    BY_NAME2[name.casefold()] = me.id
+    announce2()
+
+
 HANDLERS2 = {"link": on2_link, "status": on2_status, "max_visitors": on2_max_visitors, "knock": on2_knock,
-             "answer": on2_answer, "end": on2_end}
+             "answer": on2_answer, "end": on2_end, "rename": on2_rename}
 
 
 def welcome2(me, resumed):
-    """A fresh resume secret each time: the last one is spent."""
+    """A fresh resume secret each time: the last one is spent. The welcome lists the session's visits and its
+    own knocks still waiting, so a visit-client back from a drop can drop any that ended while it was away."""
     RESUMES2.pop(me.resume, None)
     me.resume = secrets.token_hex(16)
     RESUMES2[me.resume] = me.id
+    visits = [v["id"] for v in VISITS2.values() if me.id in (v["host"], v["visitor"])]
+    knocking = [{"id": k["id"], "to": k["to"]} for k in KNOCKS2.values() if k["from"] == me.id]
     tell2(me, {"type": "welcome", "proto": PROTO2, "id": me.id, "name": me.name, "relays": RELAY_URLS,
-               "resume": me.resume, "resumed": resumed, "limits": dict(LIMITS2)})
+               "resume": me.resume, "resumed": resumed, "visits": visits, "knocking": knocking, "limits": dict(LIMITS2)})
+
+
+def visit_msg(v, me):
+    """A visit as told to one of its two offices: its role, the other office, and the other's link."""
+    role, peer = ("host", OFFICES2[v["visitor"]]) if v["host"] == me.id else ("visitor", OFFICES2[v["host"]])
+    return {"type": "visit", "id": v["id"], "role": role, "peer": {"id": peer.id, "name": peer.name, "sim": peer.sim},
+            "ticket": v["ticket"], "peer_link": peer.link}
 
 
 def hello2(ws, m):
@@ -588,6 +611,9 @@ def hello2(ws, m):
         for kid, k in KNOCKS2.items():
             if k["to"] == old.id:
                 tell2(old, knock_msg(kid))
+        for v in VISITS2.values():   # again, in case one was agreed while it was away (a visit-client ignores repeats)
+            if old.id in (v["host"], v["visitor"]):
+                tell2(old, visit_msg(v, old))
         log.info("~ %s resumed", old.name)
         return old
     name, sim, max_visitors = m.get("name"), m.get("sim", {}), m.get("max_visitors", 3)

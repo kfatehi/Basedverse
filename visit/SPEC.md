@@ -1,7 +1,8 @@
 # Visit — the specification
 
-**Status: draft. Nothing here is built yet.** This is the contract the pieces will be built to. Where it
-says MUST, SHOULD or MAY, those words mean what RFC 2119 says they mean.
+**Status: built** (visit-client and visit.js in `client/`, the lobby's version 2 in `../lobby/server/`) and
+tested on one machine; not yet between two machines over the internet. This is the contract they are built
+to. Where it says MUST, SHOULD or MAY, those words mean what RFC 2119 says they mean.
 
 Visit lets the people running agent-office sims ("workrooms") walk around each other's rooms. A visitor
 moves with WASD and the mouse; the host's sim renders what the visitor sees, from where the visitor
@@ -61,21 +62,26 @@ program listening on their machine.
 2. **A token on the page connection.** The visit-client is started with a token (at least 32 hex
    characters, from a cryptographically secure source, new for every run). A page connection MUST send it
    in its first message (`hello`, section 5.1) within 5 s; the visit-client compares it in constant time
-   and closes the connection with code **4401** if it is missing or wrong. After 10 failed attempts in a
-   minute it refuses further connections for a minute.
+   and closes the connection with code **4401** if it is missing or wrong (after a quarter of a second:
+   guessing is hopeless anyway, at 256 bits). There is no lockout: any website could trigger one.
 3. **The token reaches only the sim's own page.** The launcher hands it to the sim's page by a route other
    sites cannot read: the sim's own server answering a same-origin request, a file served beside the page,
    or the page's URL fragment (INTEGRATING.md step 3). It is never written into a URL query, a log, or
-   anything served to another origin.
-4. **Public, harmless endpoints only.** Without the token, the visit-client serves only `/visit.js` (the
+   anything served to another origin. A server that hands it over SHOULD answer only requests naming this
+   machine (`Host: localhost` or `127.0.0.1`): that turns away DNS-rebinding sites, and requests to this
+   machine's LAN address.
+4. **The page's origin, too (SHOULD).** Given `--origins` (the sim's own page origins), the visit-client
+   refuses (HTTP 403) a page connection from any other. Browsers always send a WebSocket's origin and a page
+   cannot change it, so a token that leaked anyway is no use to another site's page.
+5. **Public, harmless endpoints only.** Without the token, the visit-client serves only `/visit.js` (the
    library, public code) and `/health` (a version string). Nothing else.
-5. **Links are authenticated twice.** A visitor's visit-client dials the host's with the visit's
+6. **Links are authenticated twice.** A visitor's visit-client dials the host's with the visit's
    **ticket** (a secret the lobby gives both sides, section 6.4), and the host's checks that the dialling
    endpoint's public key is the one the visitor published to the lobby (section 6.2). A link that fails
    either check is closed before anything else is read.
-6. **A host controls its room.** Visitors only send input. The host's sim decides where a visitor can go
+7. **A host controls its room.** Visitors only send input. The host's sim decides where a visitor can go
    (`move`) and what it sees (`render`). The host visit-client clamps every input field to its range and
-   drops inputs beyond 60 a second.
+   drops inputs beyond 60 a second, and control messages beyond 20 a second from either side of a link.
 
 Visitors see whatever the host renders, from wherever the host lets them stand: a sim that shows issue
 titles or agent activity shows them to its visitors. Letting someone in is the host's decision, one knock
@@ -99,6 +105,8 @@ visit-client --lobby wss://lobby.example/ --name "Magic Room" --sim my-sim/1.0 \
 | `--token` / `--token-file` | `VISIT_TOKEN` | — (required) | the page token (section 3). `--token-file` keeps it off the process list and SHOULD be preferred |
 | `--max-visitors` | `VISIT_MAX_VISITORS` | 3 | 0–8; 0 takes no visitors |
 | `--idle-exit` | `VISIT_IDLE_EXIT` | 0 | exit after this many seconds with no page connected (0: never) |
+| `--origins` | `VISIT_ORIGINS` | none | the page origins allowed to connect (`http://localhost:3000`, comma-separated); none: any page with the token (section 3, point 4) |
+| `--relays` | `VISIT_RELAYS` | the lobby's | the relays for links: `none`, `default` (iroh's own), or URLs, comma-separated |
 
 On start it prints **one JSON line** to stdout once it listens, then logs to stderr:
 
@@ -117,7 +125,9 @@ lobby refused it for good (`proto_unsupported`, `name_invalid`).
   rendering again, a keyframe first.
 - **One page at a time.** A new authenticated page connection takes over from the old one, which is
   closed with code **4409** (`replaced`). This is what a reload looks like from the visit-client.
-- **The lobby connection** reconnects by itself (1 s, 2 s, 4 s, … up to 30 s) and resumes its session
+- **The lobby connection** is given up when the lobby has been silent for a minute (it pings every 20 s:
+  silence means a connection that died without a word, after a laptop's sleep, say). It reconnects by
+  itself (1 s, 2 s, 4 s, … up to 30 s) and resumes its session
   (section 6.1): within 30 s the office comes back with the same id, knocks and visits, and visits whose
   links stayed up never notice. Later than that, the lobby has ended the session and its visits, and the
   visit-client starts a new one (a new office id) and ends those visits' links.
@@ -165,7 +175,7 @@ followed by a `lobby` snapshot and any pending `knock`s.
 |---|---|---|
 | `status` | `status`: `"available"` \| `"busy"` | set the office's status (busy: no new knocks, visits carry on) |
 | `max_visitors` | `n` (0–8) | change how many visitors the office takes; lower than the current count ends no visit |
-| `rename` | `name` | reconnect to the lobby under another name |
+| `rename` | `name` | ask the lobby for another name; taken (`name_taken`) or invalid, the office keeps its own |
 | `knock` | `to` (office id), `message`? (≤ 280) | ask to visit an office |
 | `answer` | `knock`, `accept` (bool), `message`? | let a knocker in, or not |
 | `end` | `visit` | end a visit: yours as a visitor (leave), or a visitor's to you (kick) |
@@ -182,7 +192,7 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | type | fields | when |
 |---|---|---|
 | `ready` | 5.1 | after `hello` |
-| `online` / `offline` | `office`? | the lobby session came up (new office id) / went down |
+| `online` / `offline` | `office`, `knocking` / — | the lobby session came up (after a drop: the same office if it resumed), with this office's own knocks still waiting ([{`id`, `to`}]) / went down |
 | `lobby` | `offices`: [{`id`, `name`, `status`, `sim`, `max_visitors`, `visitors`, `visiting`, `ready`}] | every change (6.3) |
 | `knock` | `id`, `from` {`id`, `name`, `sim`}, `message`, `expires_in` | someone wants to visit you |
 | `knock_sent` / `knock_cancelled` / `answered` | as in section 6 | your knock's fate; a knock on you withdrawn |
@@ -231,8 +241,10 @@ version 2 are visit-clients: browsers never connect to the lobby directly any mo
 **Resuming.** `welcome` carries a `resume` secret. When the connection drops, the lobby keeps the session
 for 30 s: the office stays listed (as it was), knocks on it wait, its visits stay agreed. A visit-client
 that reconnects in that time sends `hello` with the `resume` secret and gets `welcome` with
-`resumed: true`, the same office id, a new `resume` secret, then the `lobby` snapshot and any knocks still
-waiting; it sends `link` again. After 30 s the session ends for good: the office leaves the lobby, its
+`resumed: true`, the same office id, a new `resume` secret, the session's visits (`visits`, ids) and its own
+knocks still waiting (`knocking`); then the `lobby` snapshot, the knocks on it still waiting, and `visit`
+again for each of its visits (one agreed while it was away is news; a visit-client ignores the others). It
+ends any visit it has that `visits` does not list (it ended meanwhile), and sends `link` again. After 30 s the session ends for good: the office leaves the lobby, its
 knocks are answered and withdrawn `gone`, its visits end `gone`, and a `hello` with that `resume` secret
 starts a new session (`resumed: false`).
 
@@ -247,13 +259,14 @@ starts a new session (`resumed: false`).
 | `knock` | `to`, `message`? | ask to visit |
 | `answer` | `knock`, `accept`, `message`? | answer a knock on your door |
 | `end` | `visit`, `reason`? (`"left"`, `"kicked"`, `"link_failed"`) | end a visit you are in, either side |
+| `rename` | `name` | a new name, if it is free (`name_taken`, `name_invalid` otherwise; the office keeps its own) |
 | `bye` | — | leave the lobby now: the session ends at once, not held for resuming (a visit-client stopping) |
 
 ### 6.3 Lobby → visit-client
 
 | type | fields | when |
 |---|---|---|
-| `welcome` | `proto`, `id`, `name`, `relays`: [url], `resume` (32 hex), `resumed` (bool), `limits` | after a good `hello` |
+| `welcome` | `proto`, `id`, `name`, `relays`: [url], `resume` (32 hex), `resumed` (bool), `visits`: [id], `knocking`: [{`id`, `to`}], `limits` | after a good `hello` |
 | `lobby` | `offices`: [{`id`, `name`, `status`, `sim`, `max_visitors`, `visitors` (count), `visiting` (the host's office id, or `null`), `ready`}], you included | on any change |
 | `knock` | `id`, `from` {`id`, `name`, `sim`}, `message`, `expires_in` | someone knocked |
 | `knock_sent` | `id`, `to` | your knock reached the door |
@@ -337,8 +350,8 @@ on a stream is: length (u32 big-endian, the length of what follows), flags (u8, 
 
 The visitor's visit-client reads streams in order of their keyframes' timestamps. When a newer stream
 starts it stops reading older ones (QUIC `STOP_SENDING`): a stalled group is abandoned rather than
-waited for. Frames go to the page as they arrive (5.4). A frame older than the newest one delivered is
-dropped.
+waited for, and no frame of an older group follows a newer group's keyframe. Frames go to the page as they
+arrive (5.4).
 
 ### 7.5 Bitrate
 
@@ -351,7 +364,9 @@ lost or the round-trip time rose more than 50% above the link's lowest, multiply
 
 A link that drops (Wi-Fi switching, a laptop waking) is redialled by the visitor every 2 s, with the same
 ticket, for a **grace period of 15 s**; the visit carries on if it comes back, and ends with
-`"link_failed"` if not. During the gap the visitor's view holds its last frame.
+`"link_failed"` if not. During the gap the visitor's view holds its last frame. A link closed on purpose
+(application codes 0 bye, 1 refused, 3 visit over: section 11) is not redialled: the lobby ends its visit,
+and a visitor refused at the handshake ends it at once (`link_failed`).
 
 ## 8. Video and input
 
@@ -389,19 +404,23 @@ The normative surface; INTEGRATING.md shows it in use. Loaded with
 `<script src="http://127.0.0.1:<port>/visit.js"></script>`, which defines `window.Visit`.
 
 ```js
+// token: the token, or a function giving it (sync or async), asked again on each reconnect: a visit-client
+// restarted with a new token is then found again by itself. A wrong token is final for a string.
 const v = await Visit.connect({ port, token, sim: { name, version } });
 
-// state, always current; "change" fires whenever any of it changes
+// state, always current; "change" fires whenever any of it changes (never for the per-frame traffic)
 v.state        // "connecting" | "online" | "offline"
 v.office       // { id, name } while online
 v.status       // "available" | "busy"
 v.maxVisitors  // number
 v.offices      // [{ id, name, status, sim, maxVisitors, visitors, visiting, ready }], you included
 v.knocks       // knocks on your door: [{ id, from: { id, name, sim }, message, until (ms epoch) }]
+v.knocking     // your knocks still waiting: [{ id, to }]
 v.visiting     // your visit as a visitor: { id, host: { id, name, sim }, paused } or null
 v.visitors     // your visitors as a host: [{ id, visitor: { id, name, sim }, pose }]
 
-v.on(event, fn)   // "change" | "knock" | "answered" | "visit_started" | "visit_ended" | "error"
+v.on(event, fn); v.off(event, fn)   // "change" | "knock" | "answered" | "visit_started" | "visit_ended" | "error"
+v.close()          // disconnect for good
 v.setStatus(status); v.setMaxVisitors(n); v.rename(name)
 v.knock(officeId, message); v.answer(knockId, accept, message)
 v.leave()          // end your visit
@@ -416,11 +435,11 @@ v.host({
 });
 
 // visiting: where to show the room you are in; the library draws it there and captures input
-const view = v.view(element);   // view.release() stops it
+const view = v.view(element);   // { release(), canvas }
 
 // helpers
 Visit.walk(pose, input, dt, { speed, blocked })   // first-person walking with wall sliding, for move()
-Visit.panel(element, v)                          // an optional ready-made lobby panel
+Visit.panel(element, v)                          // an optional ready-made lobby panel: { element, release() }
 ```
 
 **Poses** are the host's own: the library only stores them and passes them back. `Visit.walk` uses
@@ -433,6 +452,11 @@ visitor slides along walls.
 input and `dt` in seconds. `render` at the visit's frame rate (8.1: up to 30 a second per visitor), one visitor at a time: the library makes
 its `VideoFrame` from the returned canvas before the next call, so one canvas MAY serve every visitor. A
 hook that throws is logged and skipped for that tick; three throws in a row end that visit (`"kicked"`).
+
+**Timing.** The library ticks from a Worker's timer: a page's own timers slow to once a second or less
+while its tab is in the background, and a host must go on rendering for its visitors. A page whose
+Content-Security-Policy forbids `blob:` workers falls back to its own timers, and its visitors then see it
+slowly while its tab is hidden.
 
 ## 10. Limits and defaults
 
@@ -447,6 +471,8 @@ hook that throws is logged and skipped for that tick; three throws in a row end 
 | bitrate | 1.5 Mbit/s to start, 0.3–4 Mbit/s |
 | keyframe interval | 2 s, and on request |
 | input rate | about 30 a second; at most 60 accepted |
+| control messages on a link | at most 20 a second from either side; more are dropped |
+| lobby silence | a minute: then the connection is made again |
 | input staleness | 300 ms |
 | link dial timeout | 20 s |
 | link grace period | 15 s |
@@ -456,8 +482,8 @@ hook that throws is logged and skipped for that tick; three throws in a row end 
 
 ## 11. Errors
 
-**Localhost close codes:** 4400 bad `hello`, 4401 bad or missing token, 4409 replaced by a newer page,
-4429 too many failed tokens.
+**Page connection refusals:** HTTP 403 before the WebSocket opens (an origin not in `--origins`); close
+codes 4400 bad `hello`, 4401 bad or missing token, 4409 replaced by a newer page.
 
 **`error` codes the page can get** (from the visit-client, or passed through from the lobby): those of
 section 6.4 (`not_found`, `self_knock`, `not_available`, `full`, `not_ready`, `already_visiting`,
@@ -475,7 +501,7 @@ Three names, each changed only by something an older peer could not handle (addi
 `basedverse-visit/1` (the link's ALPN). The library and the visit-client ship together, and the
 visit-client serves its own library, so a page always runs the library its visit-client speaks. Between
 machines, the lobby refuses an unknown `hello.proto` (`proto_unsupported`), and a link whose ALPN does not
-match never opens; the visit ends `"link_failed"` and both pages are told `error` `version_mismatch`.
+match never opens: the visit ends `"link_failed"`.
 
 ## 13. Open questions
 

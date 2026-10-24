@@ -15,12 +15,12 @@ use std::{
 use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
 use iroh::{
-    endpoint::{presets, Connection, Incoming, RecvStream, SendStream, VarInt},
+    endpoint::{presets, Connection, ConnectionError, Incoming, RecvStream, SendStream, VarInt},
     Endpoint, EndpointAddr, EndpointId, RelayMode, Watcher,
 };
 use serde_json::{json, Value};
 use tokio::{sync::mpsc, task::JoinHandle, time::Instant};
-use tracing::{debug, info, trace};
+use tracing::{debug, info, trace, warn};
 
 use crate::{
     core::Ev,
@@ -180,13 +180,28 @@ async fn admit(incoming: Incoming, expected: Ledger) -> Result<()> {
     tx.send(Established { conn, send, recv }).await.map_err(|_| anyhow!("visit {visit} is over"))
 }
 
+/// The host turned the link down (code 1): its visit, ticket or endpoint did not match. Redialling is no use.
+#[derive(Debug)]
+struct Refused;
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the host refused the link (its visit, ticket or endpoint did not match)")
+    }
+}
+
+impl std::error::Error for Refused {}
+
 async fn dial(ep: &Endpoint, addr: &EndpointAddr, visit: &str, ticket: &str) -> Result<Established> {
     let conn = ep.connect(addr.clone(), ALPN).await?;
     let (mut send, mut recv) = conn.open_bi().await?;
     frames::write_msg(&mut send, &json!({ "proto": "basedverse-visit/1", "visit": visit, "ticket": ticket })).await?;
-    let ok = tokio::time::timeout(HANDSHAKE, frames::read_msg(&mut recv)).await??;
+    let ok = tokio::time::timeout(HANDSHAKE, frames::read_msg(&mut recv)).await.ok().and_then(Result::ok).flatten();
     if ok.as_ref().and_then(|v| v.get("ok")).and_then(Value::as_bool) != Some(true) {
-        bail!("the host refused the link");
+        if matches!(conn.close_reason(), Some(ConnectionError::ApplicationClosed(c)) if c.error_code.into_inner() == 1) {
+            return Err(Refused.into());
+        }
+        bail!("the host did not answer the handshake");
     }
     Ok(Established { conn, send, recv })
 }
@@ -220,6 +235,11 @@ async fn visitor_task(ep: Endpoint, visit: String, ticket: String, addr: Endpoin
                         deadline = Instant::now() + GRACE;
                     }
                 }
+            }
+            Ok(Err(e)) if e.is::<Refused>() => {
+                warn!(%visit, "{e}");
+                let _ = core.send(Ev::LinkFailed { visit });
+                return;
             }
             Ok(Err(e)) => {
                 debug!(%visit, "dial failed: {e:#}");
@@ -269,12 +289,22 @@ async fn host_task(visit: String, mut arrivals: mpsc::Receiver<Established>, mut
 }
 
 enum Ended {
-    /// Ended on purpose, by either side.
+    /// Ended on purpose, by either side (no redialling).
     Closed,
     /// The connection went: redial (visitor) or wait for a redial (host), for the grace period.
     Lost,
     /// The visitor dialled again while this connection still looked alive: carry on with the new one.
     Replaced(Established),
+}
+
+/// How a connection that has gone ended, for the link: on purpose (closed here, or by the other side with
+/// 0 bye, 1 refused or 3 visit over), or lost (anything else: redial, or wait for a redial).
+fn ending(conn: &Connection) -> Ended {
+    match conn.close_reason() {
+        Some(ConnectionError::LocallyClosed) => Ended::Closed,
+        Some(ConnectionError::ApplicationClosed(c)) if matches!(c.error_code.into_inner(), 0 | 1 | 3) => Ended::Closed,
+        _ => Ended::Lost,
+    }
 }
 
 async fn next_arrival(arrivals: &mut Option<&mut mpsc::Receiver<Established>>) -> Established {
@@ -310,14 +340,15 @@ async fn run(role: Role, visit: &str, est: Established, cmds: &mut mpsc::Receive
             msg = ctl_rx.recv() => match msg {
                 Some(m) if m.get("bye").is_some() => break Ended::Closed,
                 Some(m) => { let _ = core.send(Ev::LinkCtl { visit: visit.to_string(), msg: m }); }
-                None => break Ended::Lost,
+                // The other side's control stream ended: its connection is closing (say how), or should be.
+                None => { let _ = tokio::time::timeout(Duration::from_secs(2), conn.closed()).await; break ending(&conn) }
             },
             d = conn.read_datagram(), if role == Role::Host => match d {
                 Ok(b) => if let Ok(v) = serde_json::from_slice::<Value>(&b) { let _ = core.send(Ev::LinkInput { visit: visit.to_string(), msg: v }); },
-                Err(_) => break Ended::Lost,
+                Err(_) => break ending(&conn),
             },
             cmd = cmds.recv() => match cmd {
-                Some(LinkCmd::Ctl(v)) => if frames::write_msg(&mut send, &v).await.is_err() { break Ended::Lost },
+                Some(LinkCmd::Ctl(v)) => if frames::write_msg(&mut send, &v).await.is_err() { break ending(&conn) },
                 Some(LinkCmd::Input(v)) => { let _ = conn.send_datagram(Bytes::from(serde_json::to_vec(&v).unwrap_or_default())); }
                 Some(LinkCmd::Frame(f)) => if let Some(tx) = &video {
                     // The writer cannot keep up: drop frames until the next keyframe, and ask for one.
@@ -337,7 +368,7 @@ async fn run(role: Role, visit: &str, est: Established, cmds: &mut mpsc::Receive
                 let _ = core.send(Ev::Bitrate { visit: visit.to_string(), bps: bitrate.update(&conn) });
             }
             est = next_arrival(&mut arrivals) => { conn.close(VarInt::from_u32(0), b"replaced"); break Ended::Replaced(est) }
-            _ = conn.closed() => break Ended::Lost,
+            _ = conn.closed() => break ending(&conn),
         }
     };
     for t in tasks {
