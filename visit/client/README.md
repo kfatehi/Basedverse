@@ -9,7 +9,8 @@ Nothing to install: `./cargo` runs cargo in the official Rust image, with the cr
 output in Docker volumes.
 
 ```sh
-./cargo build --release        # the binary is target/release/visit-client in the visit-target volume
+./build                        # a static binary to run or hand out: bin/visit-client (Linux)
+./cargo build --release        # for working on it: the binary is target/release/visit-client in the visit-target volume
 ./cargo test                   # unit tests
 tests/run-e2e.sh               # end to end: the real lobby, two visit-clients, two stand-in pages, in a container
 tests/run-browser.sh           # visit.js in two headless Chromes: knock, walk with WASD, reload, leave
