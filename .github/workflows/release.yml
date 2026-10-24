@@ -1,0 +1,106 @@
+# visit-client for each platform, built and tested on that platform. A tag v<version> (the version in
+# visit/client/Cargo.toml) publishes a release with the files; run by hand (Actions → release → Run
+# workflow), it only builds them, as the run's artifacts.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-musl, os: ubuntu-24.04, native: true }
+          - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm, native: true }
+          - { target: aarch64-apple-darwin, os: macos-15, native: true }
+          - { target: x86_64-apple-darwin, os: macos-15, native: false }
+          - { target: x86_64-pc-windows-msvc, os: windows-2025, native: true }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: visit/client
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust
+        run: |
+          rustup update stable --no-self-update
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+      - name: musl
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends musl-tools
+      - name: Test
+        if: matrix.native
+        run: cargo test --locked --target ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Runs
+        if: matrix.native
+        run: |
+          out=target/${{ matrix.target }}/release
+          "$out/visit-client" --version
+          "$out/visit-client" --help >/dev/null
+      - name: Package
+        run: |
+          out=target/${{ matrix.target }}/release name=visit-client-${{ matrix.target }}
+          mkdir -p ../../dist
+          if [[ ${{ matrix.target }} == *windows* ]]; then
+            cp "$out/visit-client.exe" ../../LICENSE ../../dist/
+            (cd ../../dist && 7z a -tzip -bso0 "$name.zip" visit-client.exe LICENSE && rm visit-client.exe LICENSE)
+          else
+            tar -czf "../../dist/$name.tar.gz" -C "$out" visit-client -C "$PWD/../.." LICENSE
+          fi
+          ls -l ../../dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: visit-client-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag is the crate's version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' visit/client/Cargo.toml | head -n 1)
+          [ "$GITHUB_REF_NAME" = "v$version" ] || { echo "tag $GITHUB_REF_NAME, but visit/client/Cargo.toml says $version"; exit 1; }
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          sha256sum * > SHA256SUMS
+          repo="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
+          cat > ../notes.md <<EOF
+          visit-client $GITHUB_REF_NAME, Visit's local client: one file for your machine, with visit.js built in.
+          [visit/INTEGRATING.md]($repo/blob/$GITHUB_REF_NAME/visit/INTEGRATING.md) says how to use it.
+
+          | file | for |
+          |---|---|
+          | \`visit-client-x86_64-unknown-linux-musl.tar.gz\` | Linux, x86_64 (static: any distribution) |
+          | \`visit-client-aarch64-unknown-linux-musl.tar.gz\` | Linux, ARM64 (static) |
+          | \`visit-client-aarch64-apple-darwin.tar.gz\` | macOS, Apple silicon |
+          | \`visit-client-x86_64-apple-darwin.tar.gz\` | macOS, Intel |
+          | \`visit-client-x86_64-pc-windows-msvc.zip\` | Windows, x86_64 |
+
+          \`SHA256SUMS\` has their checksums. The macOS builds are not notarized: one downloaded with a browser
+          needs \`xattr -d com.apple.quarantine visit-client\` before it runs (one fetched with curl does not).
+          EOF
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "visit-client $GITHUB_REF_NAME" --notes-file ../notes.md *

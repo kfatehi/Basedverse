@@ -148,15 +148,31 @@ async fn run() -> ExitCode {
     });
     let stopper = core_tx.clone();
     tokio::spawn(async move {
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = term.recv() => {}
-        }
+        asked_to_stop().await;
         let _ = stopper.send(core::Ev::Shutdown);
     });
 
     println!("{}", json!({ "ready": true, "port": a.port, "version": VERSION, "proto": page::PROTO }));
     let code = core::Core::new(lobby_tx, core_tx, relays, a.max_visitors, a.idle_exit).run(core_rx).await;
     ExitCode::from(code as u8)
+}
+
+/// Ctrl-C, or SIGTERM (what launchers send), on Unix.
+#[cfg(unix)]
+async fn asked_to_stop() {
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = term.recv() => {}
+    }
+}
+
+/// Ctrl-C, or its console closing, on Windows (where a launcher's kill ends a process without a word).
+#[cfg(windows)]
+async fn asked_to_stop() {
+    let mut close = tokio::signal::windows::ctrl_close().expect("console close handler");
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {}
+        _ = close.recv() => {}
+    }
 }
