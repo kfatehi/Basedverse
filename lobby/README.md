@@ -35,7 +35,7 @@ Tests: `python3 lobby/server/test_lobby.py` (the server, every message and refus
    | 22 | TCP | ssh (your address only) |
    | 80, 443 | TCP | Caddy: the certificate challenge, then `wss://` |
    | 3478 | TCP and UDP | TURN / STUN |
-   | 49160–49200 | UDP | TURN's relayed media |
+   | 49160-49200 | UDP | TURN's relayed media |
 
 4. **Deploy it from your machine:**
 
