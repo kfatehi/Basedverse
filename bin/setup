@@ -1,0 +1,398 @@
+#!/usr/bin/env python3
+"""Set up Visit for a workroom. It asks for the lobby (an address you have, or one deployed on your own
+server), the office's name, the sim, and the workroom page's address; gets visit-client for this machine;
+and writes it all into the workroom's .env, as the VISIT_* settings of .env.example. Run again, it offers
+what the .env already says. Given flags, it asks only for what they leave out; with --yes, nothing.
+
+  python3 bin/setup --env ../my-workroom/.env        (Windows: py bin\\setup --env ..\\my-workroom\\.env)
+
+Python 3.8 or later, nothing to install. Deploying a lobby needs bash and ssh (bin/deploy-lobby).
+"""
+import argparse
+import hashlib
+import io
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import urllib.request
+import zipfile
+from pathlib import Path
+from urllib.parse import urlsplit
+
+ROOT = Path(__file__).resolve().parent.parent
+RELEASES = "https://github.com/sarmiena/Basedverse/releases"
+NAME = re.compile(r"[A-Za-z0-9]([A-Za-z0-9 _.-]{0,22}[A-Za-z0-9])?")   # the lobby's rule for office names
+SIM = re.compile(r"[A-Za-z0-9._+-]{1,40}/[A-Za-z0-9._+-]{1,40}")
+TARGETS = {   # (system, machine) -> the release's build for it
+    ("linux", "x86_64"): "x86_64-unknown-linux-musl", ("linux", "amd64"): "x86_64-unknown-linux-musl",
+    ("linux", "aarch64"): "aarch64-unknown-linux-musl", ("linux", "arm64"): "aarch64-unknown-linux-musl",
+    ("darwin", "arm64"): "aarch64-apple-darwin", ("darwin", "x86_64"): "x86_64-apple-darwin",
+    ("windows", "amd64"): "x86_64-pc-windows-msvc", ("windows", "x86_64"): "x86_64-pc-windows-msvc",
+    ("windows", "arm64"): "x86_64-pc-windows-msvc",   # Windows on ARM runs it emulated
+}
+WINDOWS = os.name == "nt"
+EXE = "visit-client.exe" if WINDOWS else "visit-client"
+
+
+def die(msg):
+    sys.exit("setup: " + msg)
+
+
+def say(msg=""):
+    print(msg, flush=True)
+
+
+# -- .env files ------------------------------------------------------------------------------------
+def read_env(path):
+    """KEY -> value (the last line for it; quotes off), from a .env; {} when there is none."""
+    out = {}
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return out
+    for line in lines:
+        m = re.match(r"\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*?)\s*$", line)
+        if m:
+            v = m.group(2)
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+                v = v[1:-1]
+            out[m.group(1)] = v
+    return out
+
+
+def quoted(v):
+    return '"%s"' % v if re.search(r"[\s#'\"]", v) else v
+
+
+def write_env(path, values):
+    """Each KEY=value into the .env: its line rewritten where it has one, else added under a heading; every
+    other line as it was. Readable by its owner only."""
+    path = Path(path)
+    lines = path.read_text(encoding="utf-8").splitlines(True) if path.exists() else []
+    added = []
+    for k, v in values.items():
+        hit = [i for i, l in enumerate(lines) if re.match(r"\s*%s\s*=" % k, l)]
+        if hit:
+            lines[hit[-1]] = "%s=%s\n" % (k, quoted(v))
+        else:
+            added.append("%s=%s\n" % (k, quoted(v)))
+    if added:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        if lines and lines[-1].strip():
+            lines.append("\n")
+        lines.append("# Visit (basedverse's .env.example says what each is; its bin/setup wrote these)\n")
+        lines += added
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.writelines(lines)
+    if not WINDOWS:
+        os.chmod(path, 0o600)
+
+
+# -- asking ------------------------------------------------------------------------------------------
+class Asker:
+    def __init__(self, quiet):
+        self.on = not quiet and sys.stdin.isatty()
+
+    def ask(self, question, default="", check=None, flag=None):
+        """The answer to question (Enter: default), checked; without a terminal (or with --yes), default."""
+        if not self.on:
+            if check and (err := check(default)):
+                die("%s: %s%s" % (question, err, " (give %s)" % flag if flag else ""))
+            return default
+        while True:
+            try:
+                a = input("%s%s: " % (question, " [%s]" % default if default else "")).strip()
+            except EOFError:
+                die("no answer")
+            a = a or default
+            err = check(a) if check else None
+            if not err:
+                return a
+            say("  " + err)
+
+    def choose(self, question, options, default):
+        """One of options ({key: label}), by its key; default without a terminal."""
+        if not self.on:
+            return default
+        say(question)
+        for k, label in options.items():
+            say("  %s) %s" % (k, label))
+        return self.ask("Choose", default, lambda a: None if a in options else "one of: " + ", ".join(options))
+
+
+def check_given(value, check, flag):
+    if value is not None and check and (err := check(value)):
+        die("%s %s: %s" % (flag, value, err))
+    return value
+
+
+# -- the lobby ---------------------------------------------------------------------------------------
+def lobby_url(a):
+    a = a.strip()
+    if not a:
+        return ""
+    if "://" not in a:
+        a = "wss://" + a
+    p = urlsplit(a)
+    if p.scheme not in ("ws", "wss") or not p.hostname:
+        return a
+    return "%s://%s%s" % (p.scheme, p.netloc, p.path if p.path else "/")
+
+
+def lobby_check(a):
+    if not a:
+        return "the lobby's address is needed"
+    p = urlsplit(a)
+    if p.scheme not in ("ws", "wss") or not p.hostname:
+        return "a wss:// address (or ws://127.0.0.1:... to test)"
+    return None
+
+
+def health(url):
+    u = url.replace("wss://", "https://", 1).replace("ws://", "http://", 1).rstrip("/") + "/health"
+    try:
+        req = urllib.request.Request(u, headers={"User-Agent": "basedverse-setup"})
+        return urllib.request.urlopen(req, timeout=8).read().decode().strip(), None
+    except Exception as e:   # noqa: BLE001 -- any failure is "it did not answer"
+        return None, str(getattr(e, "reason", e))
+
+
+def deploy(target, key, host):
+    """bin/deploy-lobby to target; the address of the lobby it deployed (it keeps it in basedverse's .env)."""
+    if WINDOWS:
+        die("deploying a lobby needs bash and ssh: run setup inside WSL, or deploy from Linux or macOS and "
+            "give the lobby's address with --lobby")
+    bash = shutil.which("bash")
+    if not bash or not (shutil.which("ssh") or os.environ.get("DEPLOY_SSH")):
+        die("deploying a lobby needs bash and ssh")
+    cmd = [bash, str(ROOT / "bin" / "deploy-lobby"), target] + (["-i", key] if key else []) + (["--host", host] if host else [])
+    say("\nDeploying the lobby to %s (bin/deploy-lobby):" % target)
+    if subprocess.run(cmd).returncode != 0:   # its own terminal: ssh may ask for a password
+        die("the deploy did not finish (above)")
+    url = read_env(deploy_env()).get("LOBBY_DEPLOY_URL", "")
+    if not url:
+        die("the deploy finished, but printed no lobby address (above)")
+    return url
+
+
+def deploy_env():
+    return os.environ.get("BASEDVERSE_ENV") or str(ROOT / ".env")
+
+
+def choose_lobby(args, ask, env):
+    if args.lobby is not None and args.deploy:
+        die("--lobby or --deploy, not both")
+    if args.lobby is not None:
+        return check_given(lobby_url(args.lobby), lobby_check, "--lobby"), False
+    deployed = read_env(deploy_env())
+    if args.deploy:
+        return deploy(args.deploy, args.key or deployed.get("LOBBY_DEPLOY_KEY", ""), args.host), True
+    have = env.get("VISIT_LOBBY") or deployed.get("LOBBY_DEPLOY_URL", "")
+    options = {"a": "an address I have (a lobby someone runs, or one I deployed before)",
+               "b": "deploy one on my own server, over ssh (it installs Docker, the lobby, TLS and TURN there)"}
+    if ask.choose("\nThe lobby (where workrooms find each other):", options, "a") == "b":
+        target = ask.ask("Your server, as user@host (e.g. ubuntu@203.0.113.5)", deployed.get("LOBBY_DEPLOY", ""),
+                         lambda a: None if re.fullmatch(r"[A-Za-z0-9._-]+@[A-Za-z0-9.:-]+", a) else "user@host")
+        key = ask.ask("Its ssh key file (Enter: none, or your ssh config's)", deployed.get("LOBBY_DEPLOY_KEY", ""))
+        host = ask.ask("A DNS name for its certificate (Enter: its IP address)", "")
+        return deploy(target, key, host), True
+    return lobby_url(ask.ask("The lobby's address (wss://...)", have, lambda a: lobby_check(lobby_url(a)), "--lobby")), False
+
+
+# -- the page ----------------------------------------------------------------------------------------
+def page_check(a):
+    p = urlsplit(a if "://" in a else "http://" + a)
+    if p.scheme not in ("http", "https") or not p.hostname:
+        return "the page's address, as the browser shows it: http://localhost:3000, say"
+    return None
+
+
+def origins(page):
+    """The page's address -> VISIT_ORIGINS: its origin, and its twin (localhost <-> 127.0.0.1)."""
+    p = urlsplit(page if "://" in page else "http://" + page)
+    port = "" if p.port in (None, {"http": 80, "https": 443}[p.scheme]) else ":%d" % p.port
+    out = ["%s://%s%s" % (p.scheme, p.hostname, port)]
+    twin = {"localhost": "127.0.0.1", "127.0.0.1": "localhost"}.get(p.hostname)
+    if twin:
+        out.append("%s://%s%s" % (p.scheme, twin, port))
+    return ",".join(out), p.hostname in ("localhost", "127.0.0.1", "::1")
+
+
+# -- visit-client ------------------------------------------------------------------------------------
+def fetch(url):
+    req = urllib.request.Request(url, headers={"User-Agent": "basedverse-setup"})
+    try:
+        return urllib.request.urlopen(req, timeout=60).read()
+    except Exception as e:   # noqa: BLE001
+        die("could not download %s: %s%s" % (url, getattr(e, "reason", e),
+            " (on macOS, Python's \"Install Certificates\" may be needed)" if "CERTIFICATE" in str(e) else ""))
+
+
+def download(target, dest):
+    name = "visit-client-%s%s" % (target, ".zip" if "windows" in target else ".tar.gz")
+    say("Downloading %s from the newest release..." % name)
+    data = fetch("%s/latest/download/%s" % (RELEASES, name))
+    sums = dict((l.split()[1].lstrip("*"), l.split()[0]) for l in fetch("%s/latest/download/SHA256SUMS" % RELEASES)
+                .decode().splitlines() if len(l.split()) == 2)
+    if sums.get(name) != hashlib.sha256(data).hexdigest():
+        die("%s does not match the release's SHA256SUMS: not installed" % name)
+    if name.endswith(".zip"):
+        body = zipfile.ZipFile(io.BytesIO(data)).read(EXE)
+    else:
+        body = tarfile.open(fileobj=io.BytesIO(data), mode="r:gz").extractfile("visit-client").read()
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_suffix(".new")
+    tmp.write_bytes(body)
+    os.chmod(tmp, 0o755)
+    os.replace(tmp, dest)
+
+
+def build(dest):
+    client = ROOT / "visit" / "client"
+    if platform.system() == "Linux":
+        say("Building it in Docker (visit/client/build; the first time takes a few minutes)...")
+        if subprocess.run([str(client / "build")]).returncode != 0:
+            die("the build failed (above)")
+        return
+    if not shutil.which("cargo"):
+        die("building needs Rust: https://rustup.rs (or --client download)")
+    say("Building it with cargo (the first time takes a few minutes)...")
+    if subprocess.run(["cargo", "build", "--release", "--locked"], cwd=client).returncode != 0:
+        die("the build failed (above)")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(client / "target" / "release" / EXE, dest)
+
+
+def version_of(binary):
+    try:
+        r = subprocess.run([str(binary), "--version"], capture_output=True, text=True, timeout=20)
+        return r.stdout.strip().split()[-1] if r.returncode == 0 and r.stdout.strip() else None
+    except OSError:
+        return None
+
+
+def get_client(args, ask, env):
+    """visit-client for this machine -> its path ('' if skipped and there is none)."""
+    target = TARGETS.get((platform.system().lower(), platform.machine().lower()))
+    dest = ROOT / "visit" / "client" / "bin" / EXE
+    have = env.get("VISIT_CLIENT_PATH", "")
+    if have and not version_of(have):
+        have = ""
+    how = args.client
+    if how is None:
+        options = {"download": "download it from the newest release" if target else "(no release for this machine)",
+                   "build": "build it from this checkout",
+                   "skip": "keep %s" % have if have else "skip: I will get it myself"}
+        default = "skip" if have else ("download" if target else "build")
+        how = ask.choose("\nvisit-client for this machine (%s %s):" % (platform.system(), platform.machine()), options, default)
+    if how == "download":
+        if not target:
+            die("no release build for %s %s: --client build" % (platform.system(), platform.machine()))
+        download(target, dest)
+    elif how == "build":
+        build(dest)
+    else:
+        return have
+    v = version_of(dest)
+    if not v:
+        die("%s does not run" % dest)
+    mine = re.search(r'^version = "(.*)"', (ROOT / "visit" / "client" / "Cargo.toml").read_text(), re.M).group(1)
+    say("visit-client %s: %s" % (v, dest))
+    if v != mine:
+        say("  ⚠ this checkout is visit-client %s: its visit.js and protocols may differ from %s's" % (mine, v))
+    return dest.as_posix()
+
+
+# -- the rest ----------------------------------------------------------------------------------------
+def gitignored(env_path, ask):
+    """Warn (or, asked, fix) when the .env is in a git repository that does not ignore it."""
+    d = env_path.parent
+    r = subprocess.run(["git", "-C", str(d), "check-ignore", "-q", env_path.name], capture_output=True) \
+        if shutil.which("git") else None
+    if not r or r.returncode != 1:
+        return   # ignored (0), or not in a repository (128), or no git
+    top = subprocess.run(["git", "-C", str(d), "rev-parse", "--show-toplevel"], capture_output=True, text=True).stdout.strip()
+    rel = env_path.resolve().relative_to(Path(top).resolve()).as_posix() if top else env_path.name
+    if ask.on and ask.ask("\n%s is not ignored by git, so it could be committed. Add it to .gitignore? (y/n)" % rel, "y",
+                          lambda a: None if a.lower() in ("y", "n", "yes", "no") else "y or n").lower().startswith("y"):
+        gi = Path(top) / ".gitignore"
+        text = gi.read_text(encoding="utf-8") if gi.exists() else ""
+        gi.write_text(text + ("" if not text or text.endswith("\n") else "\n") + "/" + rel + "\n", encoding="utf-8")
+        say("  added /%s to %s" % (rel, gi))
+    else:
+        say("⚠ %s is not ignored by git: add it to .gitignore before you commit" % rel)
+
+
+def main():
+    p = argparse.ArgumentParser(prog="setup", description=__doc__.split("\n\n")[0],
+                                epilog="\n\n".join(__doc__.split("\n\n")[1:]), formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--env", default=".env", help="the workroom's settings file (made if there is none; default ./.env)")
+    p.add_argument("--lobby", help="a lobby's address (wss://...; a bare name or IP means wss://it/)")
+    p.add_argument("--deploy", metavar="USER@HOST", help="deploy a lobby on that server instead, and use it")
+    p.add_argument("--key", help="with --deploy: the ssh key file")
+    p.add_argument("--host", help="with --deploy: a DNS name for its certificate (else its IP)")
+    p.add_argument("--name", help="the office's name in the lobby")
+    p.add_argument("--sim", help="the sim, as name/version, shown to others (e.g. my-workroom/1.0)")
+    p.add_argument("--page", help="the workroom page's address, as the browser shows it (e.g. http://localhost:3000)")
+    p.add_argument("--port", type=int, help="visit-client's port on 127.0.0.1 (default 7401)")
+    p.add_argument("--max-visitors", type=int, help="visitors at once, 0-8 (default 3)")
+    p.add_argument("--client", choices=["download", "build", "skip"], help="visit-client for this machine")
+    p.add_argument("--yes", action="store_true", help="ask nothing: the flags, else what the .env has, else the defaults")
+    args = p.parse_args()
+
+    env_path = Path(args.env).expanduser()
+    env = read_env(env_path)
+    ask = Asker(args.yes)
+    say("basedverse setup: Visit for your workroom, into %s" % env_path.resolve())
+
+    lobby, deployed = choose_lobby(args, ask, env)
+    up, why = health(lobby)
+    if up:
+        say("  the lobby answers: %s" % up)
+    else:
+        say("  ⚠ %s did not answer (%s): kept anyway, visit-client keeps trying" % (lobby, why))
+
+    name_check = lambda a: None if NAME.fullmatch(a) else "1-24 letters, digits, space _ . -, starting and ending with a letter or digit"
+    name = check_given(args.name, name_check, "--name") or ask.ask("\nYour office's name in the lobby", env.get("VISIT_NAME", ""), name_check, "--name")
+    sim_check = lambda a: None if SIM.fullmatch(a) else "name/version, e.g. my-workroom/1.0"
+    sim = check_given(args.sim, sim_check, "--sim") or ask.ask("Your sim, as name/version (shown to others)", env.get("VISIT_SIM", "") or "my-workroom/1.0", sim_check, "--sim")
+    had_page = (env.get("VISIT_ORIGINS", "").split(",") or [""])[0]
+    page = check_given(args.page, page_check, "--page") or ask.ask("Your workroom page's address, as the browser shows it", had_page or "http://localhost:3000", page_check, "--page")
+    allowed, local = origins(page)
+    if not local:
+        say("  ⚠ the page should be served from this machine (localhost): visit-client listens on 127.0.0.1 only")
+    port_check = lambda a: None if str(a).isdigit() and 1 <= int(a) <= 65535 else "a port number"
+    port = str(check_given(args.port, port_check, "--port") or ask.ask("visit-client's port on 127.0.0.1", env.get("VISIT_PORT", "") or "7401", port_check, "--port"))
+    max_check = lambda a: None if str(a).isdigit() and 0 <= int(a) <= 8 else "0 to 8"
+    mv = args.max_visitors if args.max_visitors is not None else None
+    mv = str(check_given(mv, max_check, "--max-visitors") if mv is not None else ask.ask("Visitors at once (0-8)", env.get("VISIT_MAX_VISITORS", "") or "3", max_check, "--max-visitors"))
+
+    client = get_client(args, ask, env)
+
+    values = {"VISIT_LOBBY": lobby, "VISIT_NAME": name, "VISIT_SIM": sim, "VISIT_ORIGINS": allowed,
+              "VISIT_PORT": port, "VISIT_MAX_VISITORS": mv}
+    if client:
+        values["VISIT_CLIENT_PATH"] = client
+    write_env(env_path, values)
+    say("\nWrote %s:" % env_path.resolve())
+    for k, v in values.items():
+        say("  %s=%s" % (k, quoted(v)))
+    gitignored(env_path.resolve(), ask)
+    if deployed:
+        say("\nYour lobby is %s: give that address to the workrooms you want to meet there." % lobby)
+    say("\nNext: the workroom's launcher starts visit-client (VISIT_CLIENT_PATH) with these settings and a new token "
+        "each run: basedverse's visit/INTEGRATING.md, step 2.")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit("\nsetup: stopped; nothing written")

@@ -16,6 +16,9 @@ tests/run-e2e.sh               # end to end: the real lobby, two visit-clients, 
 tests/run-browser.sh           # visit.js in two headless Chromes: knock, walk with WASD, reload, leave
 ```
 
+Releases are built for every platform by `../../.github/workflows/release.yml`, on a tag (the top README,
+"Releasing visit-client").
+
 `tests/room.html` is a small workroom to try it with: its room is a floor plan, each visitor an arrow.
 
 | file | what |

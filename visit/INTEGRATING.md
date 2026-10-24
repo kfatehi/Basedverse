@@ -43,9 +43,27 @@ Check these about the sim you are integrating; if one is not true, stop and tell
 5. **Its page is served from the same machine** (`http://localhost:…` or `http://127.0.0.1:…`). A page
    served from a public `https://` site can be stopped by some browsers from reaching 127.0.0.1.
 
-Then gather the settings. **[`../.env.example`](../.env.example) is their template**: copy its first
-section (the `VISIT_*` lines, with their comments) into your workroom's own settings, its `.env` if it
-has one (make one from that section if not, and keep it out of version control), and fill in:
+Then the settings. **Have your user run basedverse's setup**, from your workroom's project, in a terminal
+of their own (it asks them questions, so a shell that cannot answer prompts will not do):
+
+```sh
+python3 ../Basedverse/bin/setup --env .env      # basedverse beside your project; Windows: py ..\Basedverse\bin\setup --env .env
+```
+
+It asks them for the lobby (an address they have, or their own server, where it deploys one), the office's
+name, the sim's name and version, and the page's address; gets visit-client for this machine (downloaded
+from the newest release, or built); and writes `VISIT_LOBBY`, `VISIT_NAME`, `VISIT_SIM`, `VISIT_ORIGINS`,
+`VISIT_PORT`, `VISIT_MAX_VISITORS` and `VISIT_CLIENT_PATH` into the `.env`, keeping its other lines (and
+adding it to `.gitignore` if they say so). Tell them what it will ask, wait until they say it is done, then
+read the `.env`. Run again, it offers what the `.env` already says.
+
+If they would rather answer you, ask them the same things and run it yourself with flags and `--yes`:
+`--lobby wss://… --name "…" --sim my-workroom/1.0 --page http://localhost:3000` (`--help` lists the rest;
+deploying a lobby, `--deploy user@host`, is best left to them, since ssh may ask them for a password).
+
+Without setup, by hand: [`../.env.example`](../.env.example) is the template. Copy its first section (the
+`VISIT_*` lines, with their comments) into your workroom's own settings, its `.env` if it has one (make one
+from that section if not, and keep it out of version control), and fill in:
 
 - `VISIT_LOBBY`: the **lobby URL** (`wss://…`), from whoever runs your lobby;
 - `VISIT_NAME`: the **office name** your user wants (1–24 letters, digits, space, `_ . -`, starting and
@@ -59,15 +77,43 @@ template, and it is committed.
 
 ## Step 1 — Get visit-client
 
-Put the `visit-client` binary for your machine somewhere your launcher can run it:
+If setup got it, it is at `VISIT_CLIENT_PATH`: go on to the check at the end of this step. Otherwise, put
+the `visit-client` binary for your machine somewhere your launcher can run it (beside the launcher, say,
+kept out of version control), and set `VISIT_CLIENT_PATH` to it. The quickest way is to download it: each
+release of basedverse (https://github.com/sarmiena/Basedverse/releases; `latest/download/<file>` is always
+the newest) has one file per machine:
 
-- **Linux:** `client/build` makes a static `client/bin/visit-client` in Docker (nothing to install); a
-  binary someone built that way on the same CPU architecture works too.
+| machine (`uname -sm`) | file |
+|---|---|
+| `Linux x86_64` | `visit-client-x86_64-unknown-linux-musl.tar.gz` (static: any distribution) |
+| `Linux aarch64` | `visit-client-aarch64-unknown-linux-musl.tar.gz` (static) |
+| `Darwin arm64` (Apple silicon) | `visit-client-aarch64-apple-darwin.tar.gz` |
+| `Darwin x86_64` (Intel) | `visit-client-x86_64-apple-darwin.tar.gz` |
+| Windows, x64 | `visit-client-x86_64-pc-windows-msvc.zip` |
+
+```sh
+# Linux or macOS: this machine's file from the newest release, into ./bin
+mkdir -p bin && curl -fsSL https://github.com/sarmiena/Basedverse/releases/latest/download/visit-client-x86_64-unknown-linux-musl.tar.gz | tar -xz -C bin visit-client
+```
+
+```powershell
+# Windows (PowerShell; curl.exe and tar.exe come with Windows 10 and later)
+mkdir bin; curl.exe -fsSLo visit-client.zip https://github.com/sarmiena/Basedverse/releases/latest/download/visit-client-x86_64-pc-windows-msvc.zip; tar.exe -xf visit-client.zip -C bin visit-client.exe; del visit-client.zip
+```
+
+`SHA256SUMS`, in the same release, has every file's checksum. The macOS builds are not notarized: one
+downloaded with a browser (not curl) needs `xattr -d com.apple.quarantine visit-client` before it runs.
+
+Or build it, for a machine the releases do not cover or a checkout newer than the newest release:
+
+- **Linux:** `client/build` makes a static `client/bin/visit-client` in Docker (nothing to install).
 - **macOS or Windows:** with Rust installed (https://rustup.rs), `cargo build --release` in `client/` gives
   `client/target/release/visit-client`. It has to run natively there: a container cannot listen on the
   machine's own 127.0.0.1.
 
-Check: `visit-client --help` prints its flags. You do not need visit.js separately: visit-client serves it.
+Check: `visit-client --version` prints the `version` of `client/Cargo.toml` in your checkout (the visit.js
+it serves and the protocols it speaks are that version's), and `visit-client --help` prints its flags. You
+do not need visit.js separately: visit-client serves it.
 
 ## Step 2 — Start visit-client from your launcher
 
@@ -89,7 +135,7 @@ set -a; . ./.env; set +a
 umask 077
 export VISIT_TOKEN_FILE="${XDG_RUNTIME_DIR:-/tmp}/my-workroom-visit.token"
 head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$VISIT_TOKEN_FILE"
-visit-client &
+"${VISIT_CLIENT_PATH:-visit-client}" &
 VISIT_PID=$!
 trap 'kill $VISIT_PID' EXIT
 ```
@@ -100,7 +146,7 @@ require("dotenv").config();   // or your own .env reader
 const { randomBytes } = require("crypto"), fs = require("fs"), { spawn } = require("child_process");
 const tokenFile = `${process.env.XDG_RUNTIME_DIR || "/tmp"}/my-workroom-visit.token`;
 fs.writeFileSync(tokenFile, randomBytes(32).toString("hex"), { mode: 0o600 });
-const visit = spawn("visit-client", [], { env: { ...process.env, VISIT_TOKEN_FILE: tokenFile },
+const visit = spawn(process.env.VISIT_CLIENT_PATH || "visit-client", [], { env: { ...process.env, VISIT_TOKEN_FILE: tokenFile },
                                           stdio: ["ignore", "pipe", "inherit"] });
 process.on("exit", () => visit.kill());
 ```
@@ -111,7 +157,8 @@ import secrets, os, subprocess, atexit
 from dotenv import load_dotenv; load_dotenv()   # or your own .env reader
 token_file = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "my-workroom-visit.token")
 fd = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, secrets.token_hex(32).encode()); os.close(fd)
-visit = subprocess.Popen(["visit-client"], env=dict(os.environ, VISIT_TOKEN_FILE=token_file), stdout=subprocess.PIPE)
+visit = subprocess.Popen([os.environ.get("VISIT_CLIENT_PATH", "visit-client")], env=dict(os.environ, VISIT_TOKEN_FILE=token_file),
+                         stdout=subprocess.PIPE)
 atexit.register(visit.terminate)
 ```
 
@@ -319,8 +366,8 @@ Then, in order:
 
 ## Checklist
 
-- [ ] Your settings live in your workroom's own `.env` (or config), started from `../.env.example`; that
-      `.env` is not committed, and `.env.example` keeps no real values.
+- [ ] Your settings live in your workroom's own `.env` (or config), written by setup or started from
+      `../.env.example`; that `.env` is not committed, and `.env.example` keeps no real values.
 - [ ] visit-client starts with your launcher, with a new token each run, and stops with your sim.
 - [ ] It listens on 127.0.0.1 only; the token is in a 0600 file, not on the command line or in `.env`;
       `VISIT_ORIGINS` names your page's origin.

@@ -112,5 +112,6 @@ set -e
 [ "$status" = 0 ] || die "the setup on $target failed (above). bin/deploy-lobby --logs shows the stack's log"
 
 url="$(tr -d '\r' < "$log" | sed -n 's/^[[:space:]]*LOBBY_URL=//p' | tail -n 1)"
+[ -n "$url" ] && setenv LOBBY_DEPLOY_URL "$url"   # for bin/setup
 [ -n "$url" ] && printf '\nthe lobby: %s\neach workroom gives that as its lobby (VISIT_LOBBY for a visit-client)\n' "$url"
 exit 0
