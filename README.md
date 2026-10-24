@@ -14,16 +14,22 @@ hooks a host implements, and two pieces everyone drops in unchanged.
 
 ## Adding Visit to a workroom
 
-1. **Get this repository** (clone it, or unzip a copy) anywhere; beside your workroom's project is the
-   usual place.
+Paste this to your coding agent, in your workroom's project, with the lobby's address filled in (ask
+whoever runs your lobby):
+
+> Clone https://github.com/sarmiena/Basedverse beside this project, then integrate Visit into my
+> workroom, following its visit/INTEGRATING.md. The lobby is wss://&lt;the lobby's address&gt;/.
+
+The guide takes it from there: getting visit-client for your machine, the settings (from `.env.example`),
+the launcher, the token, the three hooks, the UI, and a test on one machine. By hand, that is:
+
+1. **Get this repository** (`git clone https://github.com/sarmiena/Basedverse`) anywhere; beside your
+   workroom's project is the usual place.
 2. **Get visit-client for your machine.** On Linux, `visit/client/build` makes a static
    `visit/client/bin/visit-client` in Docker; one built that way on the same CPU architecture works too.
    On macOS or Windows, `cargo build --release` in `visit/client/`, with Rust from https://rustup.rs (a
    container cannot listen on the machine's own 127.0.0.1 there).
-3. **Tell your coding agent:** *"Integrate Visit into my workroom, following
-   &lt;where basedverse is&gt;/visit/INTEGRATING.md. The lobby is wss://&lt;the lobby's address&gt;/."* The guide
-   takes it through the settings (from `.env.example`), the launcher, the token, the three hooks, the UI,
-   and a test on one machine.
+3. **Follow [visit/INTEGRATING.md](visit/INTEGRATING.md)**, or hand it to your coding agent.
 
 ## Running the lobby
 
