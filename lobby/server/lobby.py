@@ -7,6 +7,10 @@ when a network blocks that), and this server only introduces the peers.
 One process, all state in memory. A restart empties the lobby; every client reconnects and says hello
 again. Nobody signs in: a client picks a name, first come first served, like IRC.
 
+It also speaks version 2 (basedverse-lobby/2, ../../visit/SPEC.md section 6) on the same port: visit-clients,
+not browsers, agreeing visits (one office walking around another's room) and swapping the addresses their
+visit-clients connect to each other by. Version-2 offices are a separate lobby; the first hello decides.
+
     python3 lobby.py     listens on LOBBY_HOST:LOBBY_PORT (default 0.0.0.0:8765), plain ws://.
                          In production Caddy terminates TLS in front of it (lobby/deploy/).
 
@@ -17,6 +21,7 @@ Environment:
     TURN_URLS, TURN_SECRET   coturn's urls and its static-auth-secret. Each client gets TURN
                              credentials that expire (the TURN REST convention), never the secret.
     KNOCK_TTL                seconds a knock waits for an answer (default 60)
+    RELAY_URLS               comma-separated iroh relay URLs handed to visit-clients (version 2); none: their own
 Needs the `websockets` package (requirements.txt).
 """
 import asyncio
@@ -343,6 +348,365 @@ def depart(me):
     log.info("- %s (%d online)", me.name, len(OFFICES))
 
 
+# ---------- version 2: visit-clients (../../visit/SPEC.md section 6) ----------
+# A separate lobby on the same server: version-2 offices are visit-clients, not browsers, and they do not
+# see version-1 offices. A visit is one office walking around another's room; the lobby agrees it and
+# gives each side the other's link address, and the two visit-clients connect to each other directly. A
+# dropped connection's session is kept LIMITS2["resume"] seconds, so a visit-client that reconnects in
+# time comes back as the same office, with its knocks and visits.
+PROTO2 = "basedverse-lobby/2"
+RELAY_URLS = [u.strip() for u in os.environ.get("RELAY_URLS", "").split(",") if u.strip()]
+LIMITS2 = {
+    "name": 24, "message": 280, "frame": 64 * 1024, "knocks_per_minute": 6,
+    "knock_ttl": int(os.environ.get("KNOCK_TTL", "60")),
+    "max_visitors": 8,           # the most an office may take
+    "link_addr": 2048,           # bytes of a link's `addr`, as JSON
+    "connections_per_ip": 8,
+    "resume": 30,                # seconds a dropped session is kept
+}
+END_REASONS = ("left", "kicked", "link_failed")
+
+
+class Office2:
+    """One visit-client's session. Outlives its connection by LIMITS2["resume"] seconds (`ws` None)."""
+
+    def __init__(self, ws):
+        self.ws = ws
+        self.id = self.name = self.resume = None
+        self.status = "available"
+        self.sim = {}
+        self.max_visitors = 3
+        self.link = None             # {"endpoint", "addr"} once published
+        self.visiting = None         # the visit it is on, as a visitor
+        self.hosting = set()         # the visits to it, as a host
+        self.knocked = collections.deque()
+        self.held = None             # the timer that ends a dropped session
+
+
+OFFICES2 = {}                 # id -> Office2
+BY_NAME2 = {}                 # name.casefold() -> id
+RESUMES2 = {}                 # resume secret -> id
+KNOCKS2 = {}                  # knock id -> {"id", "from", "to", "message", "timer"}
+VISITS2 = {}                  # visit id -> {"id", "host", "visitor", "ticket"}
+
+
+def tell2(office, msg):
+    """Send to an office's connection; a session whose connection dropped (held) just misses it."""
+    if office.ws is not None:
+        broadcast([office.ws], json.dumps(msg))
+
+
+def error2(office, code, text, ref=None):
+    tell2(office, dict({"type": "error", "code": code, "message": text}, **({"ref": ref} if ref else {})))
+
+
+def lobby_view2():
+    return {"type": "lobby", "offices": [
+        {"id": o.id, "name": o.name, "status": o.status, "sim": o.sim, "max_visitors": o.max_visitors,
+         "visitors": len(o.hosting), "visiting": VISITS2[o.visiting]["host"] if o.visiting else None,
+         "ready": o.link is not None}
+        for o in sorted(OFFICES2.values(), key=lambda o: o.name.casefold())]}
+
+
+def announce2():
+    broadcast([o.ws for o in OFFICES2.values() if o.ws is not None], json.dumps(lobby_view2()))
+
+
+def start_visit(host, visitor):
+    """A visit agreed: the visitor leaves any room it is in, then both get `visit` with the other's link."""
+    if visitor.visiting:
+        end_visit(visitor.visiting, "moved")
+    vid, ticket = "v" + secrets.token_hex(6), secrets.token_hex(16)
+    VISITS2[vid] = {"id": vid, "host": host.id, "visitor": visitor.id, "ticket": ticket}
+    host.hosting.add(vid)
+    visitor.visiting = vid
+    for me, peer, role in ((host, visitor, "host"), (visitor, host, "visitor")):
+        tell2(me, {"type": "visit", "id": vid, "role": role, "peer": {"id": peer.id, "name": peer.name, "sim": peer.sim},
+                   "ticket": ticket, "peer_link": peer.link})
+    announce2()
+
+
+def end_visit(vid, reason):
+    v = VISITS2.pop(vid, None)
+    if not v:
+        return
+    host, visitor = OFFICES2.get(v["host"]), OFFICES2.get(v["visitor"])
+    if host:
+        host.hosting.discard(vid)
+    if visitor and visitor.visiting == vid:
+        visitor.visiting = None
+    for o in (host, visitor):
+        if o:
+            tell2(o, {"type": "visit_ended", "id": vid, "reason": reason})
+    announce2()
+
+
+def expire2(kid):
+    k = KNOCKS2.pop(kid, None)
+    if not k:
+        return
+    if k["from"] in OFFICES2:
+        tell2(OFFICES2[k["from"]], {"type": "answered", "knock": kid, "accept": False, "reason": "timeout"})
+    if k["to"] in OFFICES2:
+        tell2(OFFICES2[k["to"]], {"type": "knock_cancelled", "id": kid, "reason": "timeout"})
+
+
+def on2_link(me, m):
+    endpoint, addr = m.get("endpoint"), m.get("addr")
+    if not isinstance(endpoint, str) or not 0 < len(endpoint) <= 200 or not isinstance(addr, dict):
+        return error2(me, "bad_message", "link needs an endpoint (string) and an addr (object)", "link")
+    if len(json.dumps(addr)) > LIMITS2["link_addr"]:
+        return error2(me, "bad_message", "addr is over %d bytes" % LIMITS2["link_addr"], "link")
+    me.link = {"endpoint": endpoint, "addr": addr}
+    announce2()
+
+
+def on2_status(me, m):
+    if m.get("status") not in STATUSES:
+        return error2(me, "bad_message", "status must be one of %s" % ", ".join(STATUSES), "status")
+    me.status = m["status"]
+    announce2()
+
+
+def on2_max_visitors(me, m):
+    n = m.get("n")
+    if not isinstance(n, int) or isinstance(n, bool) or not 0 <= n <= LIMITS2["max_visitors"]:
+        return error2(me, "bad_message", "n must be 0 to %d" % LIMITS2["max_visitors"], "max_visitors")
+    me.max_visitors = n   # lower than the visitors it has ends no visit
+    announce2()
+
+
+def text_field2(m, key, office, ref):
+    v = m.get(key, "")
+    if not isinstance(v, str):
+        error2(office, "bad_message", "%s must be a string" % key, ref)
+        return None
+    if len(v) > LIMITS2["message"]:
+        error2(office, "message_too_long", "%s is over %d characters" % (key, LIMITS2["message"]), ref)
+        return None
+    return v
+
+
+def on2_knock(me, m):
+    target = OFFICES2.get(m.get("to"))
+    msg = text_field2(m, "message", me, "knock")
+    if msg is None:
+        return
+    if not target:
+        return error2(me, "not_found", "no office with that id", "knock")
+    if target is me:
+        return error2(me, "self_knock", "an office cannot knock on itself", "knock")
+    if target.status != "available":
+        return error2(me, "not_available", "%s is not available" % target.name, "knock")
+    if len(target.hosting) >= target.max_visitors:
+        return error2(me, "full", "%s has all the visitors it takes" % target.name, "knock")
+    if not target.link or not me.link:
+        return error2(me, "not_ready", "%s cannot be visited yet" % (target.name if not target.link else "you"), "knock")
+    if me.visiting and VISITS2[me.visiting]["host"] == target.id:
+        return error2(me, "already_visiting", "you are already in %s's room" % target.name, "knock")
+    if any(k["from"] == me.id and k["to"] == target.id for k in KNOCKS2.values()):
+        return error2(me, "knock_pending", "your knock on %s is still waiting" % target.name, "knock")
+    now = time.monotonic()
+    while me.knocked and now - me.knocked[0] > 60:
+        me.knocked.popleft()
+    if len(me.knocked) >= LIMITS2["knocks_per_minute"]:
+        return error2(me, "rate_limited", "at most %d knocks a minute" % LIMITS2["knocks_per_minute"], "knock")
+    me.knocked.append(now)
+    kid = "k" + secrets.token_hex(6)
+    timer = asyncio.get_running_loop().call_later(LIMITS2["knock_ttl"], expire2, kid)
+    KNOCKS2[kid] = {"id": kid, "from": me.id, "to": target.id, "message": msg, "timer": timer,
+                    "until": time.monotonic() + LIMITS2["knock_ttl"]}
+    tell2(target, knock_msg(kid))
+    tell2(me, {"type": "knock_sent", "id": kid, "to": target.id})
+
+
+def knock_msg(kid):
+    k, knocker = KNOCKS2[kid], OFFICES2[KNOCKS2[kid]["from"]]
+    return {"type": "knock", "id": kid, "from": {"id": knocker.id, "name": knocker.name, "sim": knocker.sim},
+            "message": k["message"], "expires_in": max(0, round(k["until"] - time.monotonic()))}
+
+
+def on2_answer(me, m):
+    k = KNOCKS2.get(m.get("knock"))
+    msg = text_field2(m, "message", me, "answer")
+    if msg is None:
+        return
+    if not k:
+        return error2(me, "not_found", "no knock with that id (answered, expired, or withdrawn)", "answer")
+    if k["to"] != me.id:
+        return error2(me, "not_yours", "that knock is not on your door", "answer")
+    if not isinstance(m.get("accept"), bool):
+        return error2(me, "bad_message", "accept must be true or false", "answer")
+    KNOCKS2.pop(k["id"])
+    k["timer"].cancel()
+    knocker = OFFICES2[k["from"]]   # a knocker that left took its knocks with it
+    if not m["accept"]:
+        return tell2(knocker, {"type": "answered", "knock": k["id"], "accept": False, "reason": "declined", "message": msg})
+    if len(me.hosting) >= me.max_visitors:
+        tell2(knocker, {"type": "answered", "knock": k["id"], "accept": False, "reason": "full", "message": msg})
+        return error2(me, "full", "you have all the visitors you take", "answer")
+    tell2(knocker, {"type": "answered", "knock": k["id"], "accept": True, "message": msg})
+    start_visit(me, knocker)
+
+
+def on2_end(me, m):
+    v = VISITS2.get(m.get("visit"))
+    if not v or me.id not in (v["host"], v["visitor"]):
+        return error2(me, "no_such_visit", "you are not in a visit with that id", "end")
+    reason = m.get("reason") or ("left" if me.id == v["visitor"] else "kicked")
+    if reason not in END_REASONS:
+        return error2(me, "bad_message", "reason must be one of %s" % ", ".join(END_REASONS), "end")
+    end_visit(v["id"], reason)
+
+
+HANDLERS2 = {"link": on2_link, "status": on2_status, "max_visitors": on2_max_visitors, "knock": on2_knock,
+             "answer": on2_answer, "end": on2_end}
+
+
+def welcome2(me, resumed):
+    """A fresh resume secret each time: the last one is spent."""
+    RESUMES2.pop(me.resume, None)
+    me.resume = secrets.token_hex(16)
+    RESUMES2[me.resume] = me.id
+    tell2(me, {"type": "welcome", "proto": PROTO2, "id": me.id, "name": me.name, "relays": RELAY_URLS,
+               "resume": me.resume, "resumed": resumed, "limits": dict(LIMITS2)})
+
+
+def hello2(ws, m):
+    """The session a version-2 hello opens or resumes, or None after an error (the connection stays open)."""
+    probe = Office2(ws)   # stands in for the session until there is one, to answer errors on
+    old = OFFICES2.get(RESUMES2.get(m.get("resume")))
+    if old:
+        if old.ws is not None and old.ws is not ws:   # its old connection is not known to be dead yet: it is
+            asyncio.ensure_future(old.ws.close(4000, "resumed on another connection"))
+        if old.held:
+            old.held.cancel()
+            old.held = None
+        old.ws = ws
+        welcome2(old, True)
+        tell2(old, lobby_view2())
+        for kid, k in KNOCKS2.items():
+            if k["to"] == old.id:
+                tell2(old, knock_msg(kid))
+        log.info("~ %s resumed", old.name)
+        return old
+    name, sim, max_visitors = m.get("name"), m.get("sim", {}), m.get("max_visitors", 3)
+    if not isinstance(name, str) or not NAME.match(name):
+        error2(probe, "name_invalid", "a name is 1-24 letters, digits, spaces, _ . -, starting and ending "
+                                      "with a letter or digit", "hello")
+        return None
+    if name.casefold() in BY_NAME2:
+        error2(probe, "name_taken", "%s is taken" % name, "hello")
+        return None
+    if m.get("status", "available") not in STATUSES or not isinstance(sim, dict) or not isinstance(max_visitors, int) \
+            or isinstance(max_visitors, bool) or not 0 <= max_visitors <= LIMITS2["max_visitors"]:
+        error2(probe, "bad_message", "status must be available or busy, sim an object, max_visitors 0 to %d"
+               % LIMITS2["max_visitors"], "hello")
+        return None
+    me = probe
+    me.id = "o" + secrets.token_hex(4)
+    me.name, me.status, me.max_visitors = name, m.get("status", "available"), max_visitors
+    me.sim = {k: str(sim[k])[:40] for k in ("name", "version") if isinstance(sim.get(k), str)}
+    OFFICES2[me.id], BY_NAME2[name.casefold()] = me, me.id
+    welcome2(me, False)
+    announce2()
+    log.info("+ %s, visits (%d online)", me.name, len(OFFICES2))
+    return me
+
+
+def depart2(oid):
+    """A session ends for good: its knocks are withdrawn and its visits end `gone`."""
+    me = OFFICES2.pop(oid, None)
+    if not me:
+        return
+    BY_NAME2.pop(me.name.casefold(), None)
+    RESUMES2.pop(me.resume, None)
+    if me.held:
+        me.held.cancel()
+    for kid, k in list(KNOCKS2.items()):
+        if me.id not in (k["from"], k["to"]):
+            continue
+        KNOCKS2.pop(kid)
+        k["timer"].cancel()
+        if k["from"] == me.id and k["to"] in OFFICES2:
+            tell2(OFFICES2[k["to"]], {"type": "knock_cancelled", "id": kid, "reason": "gone"})
+        if k["to"] == me.id and k["from"] in OFFICES2:
+            tell2(OFFICES2[k["from"]], {"type": "answered", "knock": kid, "accept": False, "reason": "gone"})
+    for vid in [v["id"] for v in VISITS2.values() if me.id in (v["host"], v["visitor"])]:
+        end_visit(vid, "gone")
+    announce2()
+    log.info("- %s, visits (%d online)", me.name, len(OFFICES2))
+
+
+async def handler2(ws, raw):
+    """A version-2 connection, from its first hello on. `bye` leaves at once; a dropped connection's
+    session is held for the resume window."""
+    me, probe = None, Office2(ws)
+    try:
+        for _ in range(HELLO_TRIES):
+            m = parse2(probe, raw)
+            if m is not None:
+                if m["type"] != "hello":
+                    error2(probe, "hello_first", "say hello first", m["type"])
+                elif m.get("proto") != PROTO2:
+                    error2(probe, "proto_unsupported", "this lobby speaks %s and %s" % (PROTO, PROTO2), "hello")
+                else:
+                    me = hello2(ws, m)
+                    if me:
+                        break
+            try:
+                raw = await asyncio.wait_for(ws.recv(), HELLO_TIMEOUT)
+            except asyncio.TimeoutError:
+                error2(probe, "hello_timeout", "say hello within %d seconds" % HELLO_TIMEOUT)
+                await ws.close(1008, "no hello")
+                return
+        else:
+            await ws.close(1008, "too many tries")
+            return
+        async for raw in ws:
+            m = parse2(me, raw)
+            if m is None:
+                continue
+            if m["type"] == "bye":
+                depart2(me.id)
+                me = None
+                await ws.close(1000, "bye")
+                return
+            if m["type"] == "hello":
+                error2(me, "already_hello", "this connection is already in the lobby as %s" % me.name, "hello")
+            elif m["type"] in HANDLERS2:
+                HANDLERS2[m["type"]](me, m)
+            else:
+                error2(me, "unknown_type", "no message type %r" % m["type"], m["type"])
+    except ConnectionClosed:
+        pass
+    finally:
+        if me and me.ws is ws and me.id in OFFICES2:   # dropped, not resumed elsewhere: hold the session
+            me.ws = None
+            me.held = asyncio.get_running_loop().call_later(LIMITS2["resume"], depart2, me.id)
+            log.info("? %s dropped; held %ds", me.name, LIMITS2["resume"])
+
+
+def parse2(office, raw):
+    try:
+        m = json.loads(raw)
+    except (ValueError, TypeError):
+        error2(office, "bad_json", "a message is one JSON object")
+        return None
+    if not isinstance(m, dict) or not isinstance(m.get("type"), str):
+        error2(office, "bad_message", "a message is a JSON object with a string `type`")
+        return None
+    return m
+
+
+def is_v2(raw):
+    try:
+        m = json.loads(raw)
+    except (ValueError, TypeError):
+        return False
+    return isinstance(m, dict) and m.get("proto") == PROTO2
+
+
 def client_ip(ws):
     if TRUST_PROXY:
         fwd = ws.request.headers.get("X-Forwarded-For", "")
@@ -368,6 +732,8 @@ async def handler(ws):
                 error(me, "hello_timeout", "say hello within %d seconds" % HELLO_TIMEOUT)
                 await ws.close(1008, "no hello")
                 return
+            if is_v2(raw):   # a visit-client: the version-2 lobby takes this connection over
+                return await handler2(ws, raw)
             if hello(me, raw):
                 break
         else:
@@ -396,7 +762,7 @@ async def handler(ws):
 def health(connection, request):
     """A plain GET /health answers 200, for the load balancer or a curl; everything else is the lobby."""
     if request.path == "/health":
-        return connection.respond(200, "ok %d online\n" % len(OFFICES))
+        return connection.respond(200, "ok %d online\n" % (len(OFFICES) + len(OFFICES2)))
     return None
 
 

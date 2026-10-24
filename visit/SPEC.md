@@ -246,6 +246,7 @@ starts a new session (`resumed: false`).
 | `knock` | `to`, `message`? | ask to visit |
 | `answer` | `knock`, `accept`, `message`? | answer a knock on your door |
 | `end` | `visit`, `reason`? (`"left"`, `"kicked"`, `"link_failed"`) | end a visit you are in, either side |
+| `bye` | — | leave the lobby now: the session ends at once, not held for resuming (a visit-client stopping) |
 
 ### 6.3 Lobby → visit-client
 
