@@ -1,10 +1,12 @@
 // visit.js: the Visit library (../../SPEC.md section 9; ../../INTEGRATING.md shows it in use). Served by
 // visit-client at /visit.js, so a page always runs the library its visit-client speaks. It talks only to
 // that visit-client, on 127.0.0.1: it keeps the lobby's state, calls a host's hooks (spawn, move, render),
-// encodes what they render and decodes what a host sends (WebCodecs), and captures a visitor's input.
+// encodes what they render and decodes what a host sends (WebCodecs), and captures a visitor's input. A room
+// made with three.js can send its scene instead of video: the visitor's browser draws it (SPEC 8.3).
 //
 //   const v = await Visit.connect({ port, token, sim: { name, version } });
-//   v.host({ spawn, move, render, fps, fov });   Visit.stage(v);   Visit.panel(element, v);
+//   v.host({ spawn, move, render, fps, fov, scene: { root, three, renderer, near, far }, walk: { speed } });
+//   Visit.stage(v);   Visit.panel(element, v);
 //
 // Latency, as cloud gaming keeps it down: a visitor's input goes the moment it changes, and the host moves and
 // renders that visitor at once (up to 60 frames a second), not on its next tick; a busy host shrinks the
@@ -13,7 +15,7 @@
 // one (a timewarp, as VR headsets do), so looking around never waits for the round trip.
 "use strict";
 (function () {
-  const VERSION = "0.3.2", PROTO = "basedverse-visit-local/1";
+  const VERSION = "0.4.0", PROTO = "basedverse-visit-local/1";
   const CODECS = ["avc1.42E01F", "vp8", "vp09.00.10.08"];   // the order a host prefers, among what a visitor decodes
   const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, KEY_EVERY_MS = 10000, LOOK = 0.0025;
   // The share of a visitor's view size a host renders at: a busy host steps down these before it lowers its
@@ -21,7 +23,7 @@
   const SCALES = [1, 0.75, 0.5];
   const HAS_META = 2, META = 16;   // frames' flags bit 1: 16 bytes of meta after the timestamp (SPEC 5.4)
   // What the host hears many times a second: none of it changes what the page shows, so none fires "change".
-  const QUIET = new Set(["input", "bitrate", "keyframe", "decoders", "viewport", "video_config", "link_stats"]);
+  const QUIET = new Set(["input", "bitrate", "keyframe", "decoders", "viewport", "video_config", "link_stats", "scenes", "scene", "scene_lost", "scene_resync"]);
   // A timer from a Worker: a page's own timers slow to once a second (or less) while its tab is in the
   // background, and a host must go on rendering for its visitors.
   function ticker(ms, fn) {
@@ -44,9 +46,399 @@
     return [even(width * k), even(height * k)];
   }
 
+  // ---------- scenes: a three.js room, sent as itself and drawn by the visitor's own browser (SPEC 8.3) ----------
+  // A host whose room is three.js sends its scene instead of video, to a visitor whose page can draw it: once
+  // whole (three.js's own JSON, gzipped), then what changes in it (edits: gzipped JSON, in order, never dropped)
+  // and where its moving things are (deltas: binary, newest wins, as video). The visitor draws it with the very
+  // three.js release the host runs, fetched from a CDN and checked against the hashes below (Subresource
+  // Integrity): nothing else ever runs from it, and what the host sends is only ever read as data (cleanScene).
+  // The visitor walks at once, predicted here, and the host's answer corrects it; so walking and looking never
+  // wait for the round trip, and the host renders and encodes nothing for this visitor.
+  const SCENE = 4, DELTA = 8;   // frames' flags bits 2 (a scene edit, page to visit-client) and 3 (a delta) (SPEC 5.4)
+  // How often a host sends its scene's changes, and the places of everything that has moved, regardless; how far
+  // behind the host's clock a visitor shows moving things (two updates: always one to move toward); the most
+  // pixels a visitor's view draws (it is stretched past that).
+  const SCENE_MS = 1000 / 30, SCENE_KEY_MS = 1000, INTERP_MS = 70, MAX_PIXELS = 1920 * 1080;
+  const THREE_BASE = "https://cdn.jsdelivr.net/npm/three@0.{r}.0/build/";
+  // three.js revision -> the SHA-384 of its first release's build/three.module.js, or (r171 on, split in two)
+  // of [build/three.core.js, build/three.module.js]. A visitor draws the scenes of these revisions.
+  const THREE_FILES = {
+    "125": "sha384-5Ywi4WNpxs0w7HozLb+bKpTJNY20kAqeXn8GWrqNsIc35NOt7tqRDsjlqQTNQKNF",
+    "126": "sha384-B1lRArgkaBiW5faJFZgZ3Y/384PIWuidSL2uNNndFO/OQpgx/t0B+JdK3sNZYM95",
+    "127": "sha384-sBwxpuzXNbu5dmQMypWvEMKwpJDWuwlKjYHspu3bOhU6kotCdQhWEohdiMepsva6",
+    "128": "sha384-LKlxEdW8EIaLsGQXf6tbodzIk3iElYdwYuFHYRIoTn89xvUzXM/9Ld9KPYTxk4Zc",
+    "129": "sha384-hO+ysv9dQX1marzdRDxUAzpim6yMr73w6MnaXEg5Vn530DDf+Bz/u2HrxhcQ7WZM",
+    "130": "sha384-X30Nbdd324ays+U+6cW5KSPkr0k/KfDLJdev9xVyIaIQV5vSogTGprr9OMpcV4H5",
+    "131": "sha384-v4PgD/ouaGXkgMqHuWiTq9lZJ+lsGK0r3f8/TqN9VPaTSNAPlCJHFhHXPwecfYgh",
+    "132": "sha384-4TMDanTqjpAj1zaXppMTQaRdrAF8dP7IzGhr2Vkz5ZDFEK+a8Rb9ikEFyrywstVu",
+    "133": "sha384-+9gvq6U5LIiKWpZr5TN4CKBaFHYJYjJBBfCmeLUOYHOyeauFczAKYeko695NhW7a",
+    "134": "sha384-Wfr00bxzAvoTAQTXfxH8PIsT5JJIY/U+Z9XziadFRmiHk8OebbConLyrX6sYU/ge",
+    "135": "sha384-G2EofhFHZOwtmrs8D3EiwAeo83NR9KAKuB0KTscSkOS0GMhnkZu/2xUn85J4TW6m",
+    "136": "sha384-gQBL0VcTpNUqiL90PW82aoOu6EHGaqkmfUdzwqlFCcEiEmMsFanJvrfZ88AoTK+l",
+    "137": "sha384-L4AJFgq8HHKtqeG+0jy6j5ZajIGQz37TAiQjQQCbwly2X3MYaU5foXmQseXyP+qk",
+    "138": "sha384-pjwJZ/skEfUdUP3KMcJ7R7DK0EuZRYe5F9dorg6Wn/Ir0ZeFouRUyTWHf7LmJA5R",
+    "139": "sha384-S5XkCGb5am6P7Rv2RXgTA4Krb3LXhedDK+YrtyqC0195vctAZkIlKE4j5C+azzwc",
+    "140": "sha384-V5FXA8YZz9kx4vKeRWWrjBs0EMbFFlPlJp5Rc0Dzove929kAD660bBoCcwP+Ku3A",
+    "141": "sha384-po1eddWuuRpjNPxlslM9lQb0UPFCrgL7nJdSnu9zmkjbhitNFai6at7zcS+2O/7B",
+    "142": "sha384-x/Al+cOCpZIKZIRFdekN+Yu0ntTZtyTXzAuivfVKLjjAVruJbmDqC37QdupObzUn",
+    "143": "sha384-rkhRzjkxQRTIq6KfhMlmDK0WeNc7zppOEgXQbexSP7iFO7OilyNewEUMC02ojJ3o",
+    "144": "sha384-zGPkkFv5YPY4udMFe6P/NKDGsgOpNa60NEbvZHPHLGtTr4/aHBMtPJG/clUwH1X1",
+    "145": "sha384-D5chtu28ZTnLB+ntDkE/IM65wndGw1NB7eVUEEJk+GiUt/+VJlvZC26KwMAM8olN",
+    "146": "sha384-EgZkglHd5d5CpSGV/XQ+oAL89JkW5Jss32pdskxNQb3V/7H9pZblIhbbWs2yGyrs",
+    "147": "sha384-foyviqS/+yPbsMkU32dJTGX9lWnqtalJsKDYMmQ0Tr+tiJqUYE/tTTs1nl3dP/PI",
+    "148": "sha384-Ov4qZQIF7j8e5K2QrP/k/FbyJBxNvZtXnwJ4i05t/pCaf6eWKwMpMuQcPsj7rNLg",
+    "149": "sha384-12YogFBvdVetjPVfxidCU7NzjtjvSQnNeVzUAtopFVGtoco6uyZfxHwbAU1E6nB9",
+    "150": "sha384-4XHUcSkRNflX/146yx9K2FPU3HI4DuRxC1ZOQ25lkVKrhnHYAkQypBvChqRHFXnN",
+    "151": "sha384-ls6F1ocsyH0C4W24fbbUlOxnRPJcvyr2j7+QZKQD9bzpHwhtw7IFHaN5aND2bKHB",
+    "152": "sha384-Q+gzrfCnkOqOv+jRz5Pn2712IWFGBxVZBR7KLX63tOie3TCDPfmqafcbcowKMDVX",
+    "153": "sha384-Ftnx0JBTANz3pBRth6b6WelDf1nk4opQiE62V92gzUHaQ8Rx75aR3FCfD3xh+udC",
+    "154": "sha384-iJA3Wh2Mk4VM2GiHhGzeRsMla5CtcEYxZOgF1WnaxXWsoAIV52usXoLuuD5EUd97",
+    "155": "sha384-mnNh5DCZAFA4qsq6N8lzuYrSVHDw47RurhMpZQWOPZbbKnkesHLJlkKh0ZMyK97x",
+    "156": "sha384-CYnyeGNCWc3qAUjmhBJ5c7rSNKZkWKCPS1l5/XfFEGvQSa7qevZ622z98lXKmTf5",
+    "157": "sha384-8HEtwX7v0qvVEXBPVFMWgMAgI6hHJzZ0qycweA/vGl79MWdyXxzAHl0XwWprM3nY",
+    "158": "sha384-iuC3I0bVuCDzGoJi9KmCkGzEwo7vYFG/gBa7C/1D7mp8ZTt1CgTJ8C57dTDqqpfM",
+    "159": "sha384-Od8aWTp92huHhx5H/3qCH5ZPG12v/+EpJktLK/hPpYiC4UoV1yf8OeSk+jD/GCC3",
+    "160": "sha384-61S/Nu32S3E5+n+KpCOTb2eRYps6fVKm+9Gz1QBvSePFthb46f063Aa/qe/lykFZ",
+    "161": "sha384-c1WSdrtrvLWoZQC5zBcuCBhTpWvCcKFvUPFkF9wsEestdGUyCxZPiVXzYCZEPRzJ",
+    "162": "sha384-94gajc6XgNyCt0QElkXXk0mG9VEkNMmL4KZrhzqiErIDYDnA9qb8lR13pW6DGZMN",
+    "163": "sha384-yQjt8MxgaibK/2q9rswHtmpprSJXTyvk5UewNPUcnFG8AS53v7JY3JcBgjMD0REu",
+    "164": "sha384-wlK04bYFr3nyu6ipQq5N4n7KKGByMS1Yu1T8IrNtEnHiJ5WcGDt9dZBZFpRZjXEE",
+    "165": "sha384-Qvl1RLjZOCDFOOH2bKcGnaDHMM8MVv3zVtMvhy3juQdiIOs6RgQ/7zYdM1FbpHzI",
+    "166": "sha384-8Ka7v/0OHGFjCdsh2NfPsfSx8QWgM5GXxK78G78tnUN7UjY9LkOqJToGj10DT7Yh",
+    "167": "sha384-efR4yFjiLe4PrOyKvJfuUnmdEz0ohNoJEvmCVrdgDU5eigOkblJOVZwt1g8+64kv",
+    "168": "sha384-aFCwa46B5vks6EU3cxsUhpA9qOy3yrw5fTF4Y51WEavCCGWj0YzSGsdsP5Ougby2",
+    "169": "sha384-qOubuRxWZ0I7rXTjcuhcKNHKvPM7q0ztN8/82sJnxnyKS0OXTeB5FsIcysc2T9EY",
+    "170": "sha384-GY5FqjttLCFRt/McQbyaVdCk2O1IQtOeX8Py6NfD89BIAsIyJFRl4UgSXrk2vXAk",
+    "171": ["sha384-YpGRVT0+68wf/Tq05Sw6Nuv4F785EXwqdLOynItG6Cyvn2LGu9TSE99n+EUK12AD", "sha384-u+VykAKeL4ZnM4aIDWzqvG2G/XJtXtrdNfBeIn3gGrgMUCGh300cp5h8q6Cl2p+y"],
+    "172": ["sha384-gJN+0/sjgafSBd8VGFwNZmLffdxHYB9basxDhZKjxH7PqUizoWy+ZFIAWfknJpsS", "sha384-jSE70HgY49pvjJTRC7wZjn6JUajBcRHT3XSUEIeBqOuHlY8AzkDEjQ1Ortuqy9gh"],
+    "173": ["sha384-hDOhkNIzjECbUeD7y0ZuARgCndDLsHIuKhhnmv7Aqxr6MarrEsKbcu33dVXVKVja", "sha384-0SHQLUQ+OesZFn0blBzsF4hsvOTa52wQyct1xwYFAnTTcE3zrv7TSNt/nPZ4TGzq"],
+    "174": ["sha384-v4ooZZpwAOZGuZr/1Aw2lIuvBUqLMXwXo4YPUxvwjAEX7LMjrTbTJ00YxL392JL/", "sha384-XYnXNAOuPDbehWj5Esz4dUjqxDbdgiQMzzHwBk3u+S8hIT06xorwCCqxT2/levx+"],
+    "175": ["sha384-9iVlJdFMhmo7AjXDdUB+T8nF93quj9nhfeEX3b2Nklv3aoN/VAqsSYpJ+aKLZbxc", "sha384-54vXwOTeTwpNxEBFrjmaBZG3guaJvxC0KbKuhK3YwfVvQipd0/xa0P3Y2b6EMt31"],
+    "176": ["sha384-otibkZtXfamhCvKhSPwls+10DMOoYgxW8HQCOC6H0tG3MY+mchtwF0XlkGdPAzBY", "sha384-p5Plfh0W9MU6uGNwg+SryQ5EROPDcqxekRMB9Crrr+uCHXcgE3T0oot4ByGAYDKa"],
+    "177": ["sha384-m0oq2VuT/Tt5IpjZtCp+HTaarVOrfp03v2AYRveyDoX4lOVlpk1DPm8fgcn1tDes", "sha384-ITUL0v5v2j45lpwmHksUHldYxM9gaEuM96EH4dDqwIVZpxWI+PMksJcTHxCAB1jM"],
+    "178": ["sha384-v7zMvc4Cb5TVml7Htaud7ffbaZ6T1inM2KUGHbfogwbzpbM2HjvdYcn9CpA750Gb", "sha384-FWF4sd0r4IzFTqeNbUmKIVBAWeo88feJafLWCRweaAy60myqpVini5QSjSFsDJ0a"],
+    "179": ["sha384-kdRESMLTvI77N5JbbUfZRkASeD0sPnpy89hrqC8kG9/Ih16CWrS9L9qpIdd7CYTM", "sha384-NU/HwPb+8799fAUOI2MmcKBXISPLF1rxYZk5lhnqPQ+IWd3zjAvW2jv0RSihhPKx"],
+    "180": ["sha384-r1q8Si7xFBrvMv3Q4yjQkKhkYZ2lp+wn/bPPzNZTsc8DY4uPJmm2vheuz1Yn+8m8", "sha384-wyxAlyAVVsyc7KN24a4+m1tMTC2BwrjQyLgLStDaUBDmwK+gWUMULWHSS0NRoZKv"],
+    "181": ["sha384-TwzOUuMYWxW+SbKueCH0R+hoyXBEJ4ZosoHXv+5iX96teAZkI7+lJzKISlR0DRyV", "sha384-fV/3dzi4eiEEAyJEEtFCmXv8gRy4AYNwnDxN+Ki3G97d4hZOliHXxM65JEZbgdsV"],
+    "182": ["sha384-6fmg00/Gyjwhs6thvtCHmdaCH/64inXNq9FpwdBWtjV7wHXiHPaPtkBTXl1J7w17", "sha384-u+OjJoQpIuqoJyY+K18+0gLahoZWtDRoz5XJlhiJ/9OpKZV61xnAmgFDYGLrD8X7"],
+    "183": ["sha384-bO4ODxwQgwSn05egB/vbceihrp4tn6jmJzx7oZDy/EVWd0imIgGkvccDH3k6HXdL", "sha384-tDnOBR4yGB9V87jI7t3/bA2vGgtDUaOU+poekPUUnV7O3yEhLb4f+gRAXEd6eoCN"],
+    "184": ["sha384-dw2ooPewaEIrAgl6oFDBmmBWCE9oW9LxRGcfwZ0hLvEprzo202wXl7vCYHRlSnOT", "sha384-8FCZ1eVO6it4+pbec2aDtnTrwjWXZLJRC+MAGCIPDgsYnUrl/E0A2YlF8ioMKI/J"],
+    "185": ["sha384-3nKmLDZR5EoFrqfdssW1u3u4Mi0kjozeBhgNj6XQQ7CT8BEnu/6Skhv0k4MDLmoN", "sha384-Ecdwhw2t8c3nTR0hkEDZbwj+5rkKqzJ376RCQN2x1uofujOCuW/EvGg3BQzE7TS6"],
+    "186": ["sha384-mdKeCwPEcbDvzaxwhm+MVuLoMou+E7jQqrs4tmu/n8HBYPGI1kZt0MkJxlMR4zFM", "sha384-m8JoFX52V6NGv2usipnlLJKnJfL7IE8dbniPDDCSGSQv3Hm4n6PjfV6syVwfuoRc"],
+  };
+  const threes = new Map();   // revision -> its module (a promise)
+
+  // A three.js release as a module of its own (not the page's THREE): fetched, checked against its hash, run.
+  function loadThree(rev, base) {
+    rev = String(rev);
+    if (!threes.has(rev)) {
+      const files = THREE_FILES[rev];
+      const p = !files ? Promise.reject(new Error(`three.js r${rev} is not one this visit.js knows`)) : (async () => {
+        const url = f => (base || THREE_BASE).replace("{r}", rev) + f;
+        const get = async (f, integrity) => {
+          const r = await fetch(url(f), { integrity, credentials: "omit" });
+          if (!r.ok) throw new Error(`${url(f)}: ${r.status}`);
+          return r.text();
+        };
+        const js = text => URL.createObjectURL(new Blob([text], { type: "text/javascript" }));
+        let main;
+        if (Array.isArray(files)) {   // three.module.js imports ./three.core.js: the checked copy instead
+          const core = js(await get("three.core.js", files[0]));
+          main = (await get("three.module.js", files[1])).replace(/(["'])\.\/three\.core\.js\1/g, JSON.stringify(core));
+        } else main = await get("three.module.js", files);
+        // three.js warns of a second copy in a page (the room's own): this one is apart, on purpose.
+        const prev = window.__THREE__;
+        window.__THREE__ = undefined;
+        try { return await import(js(main)); } finally { window.__THREE__ = prev; }
+      })();
+      threes.set(rev, p);
+      p.catch(() => threes.delete(rev));
+    }
+    return threes.get(rev);
+  }
+
+  // A data URL image's size, from its header (PNG, JPEG, WebP), before anything decodes it; null if not one.
+  function imageDims(url) {
+    const m = /^data:image\/(png|jpeg|webp);base64,/.exec(url);
+    if (!m) return null;
+    let b;
+    try { b = Uint8Array.from(atob(url.slice(m[0].length, m[0].length + 87380)), c => c.charCodeAt(0)); } catch (e) { return null; }
+    const u16 = i => (b[i] << 8) | b[i + 1], le = (i, n) => { let v = 0; for (let k = n - 1; k >= 0; k--) v = v * 256 + b[i + k]; return v; };
+    if (m[1] === "png") return b.length >= 24 && b[1] === 0x50 ? [u16(16) * 65536 + u16(18), u16(20) * 65536 + u16(22)] : null;
+    if (m[1] === "jpeg") {
+      for (let i = 2; i + 9 < b.length;) {
+        if (b[i] !== 0xff) { i++; continue; }
+        const mk = b[i + 1];
+        if (mk >= 0xc0 && mk <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(mk)) return [u16(i + 7), u16(i + 5)];
+        i += mk === 0xd8 || mk === 0x01 || (mk >= 0xd0 && mk <= 0xd7) ? 2 : 2 + u16(i + 2);
+      }
+      return null;
+    }
+    const kind = String.fromCharCode(...b.slice(12, 16));
+    if (kind === "VP8 ") return [le(26, 2) & 0x3fff, le(28, 2) & 0x3fff];
+    if (kind === "VP8L") return [1 + (((b[22] & 0x3f) << 8) | b[21]), 1 + (((b[24] & 0xf) << 10) | (b[23] << 2) | ((b[22] & 0xc0) >> 6))];
+    if (kind === "VP8X") return [1 + le(24, 3), 1 + le(27, 3)];
+    return null;
+  }
+
+  // What a host sends, made safe to hand to three.js's ObjectLoader (SPEC 8.3): materials only of the kinds
+  // three.js draws itself (a ShaderMaterial is a program: it becomes plain grey), images only as data URLs no
+  // bigger than 4096 px a side (checked from their headers, before decoding), shapes' segment counts at most
+  // 256, and, across the scene, at most about 4 million vertices and 100,000 objects. In place; the JSON too.
+  const MATERIALS = new Set(["MeshBasicMaterial", "MeshLambertMaterial", "MeshPhongMaterial", "MeshStandardMaterial", "MeshPhysicalMaterial",
+    "MeshToonMaterial", "MeshNormalMaterial", "MeshMatcapMaterial", "MeshDepthMaterial", "MeshDistanceMaterial", "LineBasicMaterial",
+    "LineDashedMaterial", "PointsMaterial", "SpriteMaterial", "ShadowMaterial"]);
+  const SEGMENTS = new Set(["widthSegments", "heightSegments", "depthSegments", "radialSegments", "tubularSegments", "capSegments",
+    "phiSegments", "thetaSegments", "segments", "curveSegments", "steps", "bevelSegments"]);
+  const ARRAYS = new Set(["Int8Array", "Uint8Array", "Uint8ClampedArray", "Int16Array", "Uint16Array", "Int32Array", "Uint32Array", "Float32Array", "Float64Array"]);
+  const BLANK = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+  const MAX_SIDE = 4096, MAX_VERTICES = 4e6, MAX_OBJECTS = 1e5;
+  const isObj = x => !!x && typeof x === "object" && !Array.isArray(x);
+  function cleanScene(json, budget) {
+    if (!isObj(json)) throw new Error("a scene is a JSON object");
+    const arr = k => (Array.isArray(json[k]) ? json[k] : []).filter(isObj);
+    json.materials = arr("materials").map(m => MATERIALS.has(m.type) ? m : { uuid: String(m.uuid), type: "MeshLambertMaterial", color: 0x808080 });
+    json.geometries = arr("geometries").map(g => {
+      let n = 1;
+      if (isObj(g.data)) n = (((g.data.attributes || {}).position || {}).array || []).length / 3;
+      else {
+        const clamp = (o, k, hi) => { o[k] = Math.max(0, Math.min(hi, Math.floor(Number(o[k]) || 0))); return o[k]; };
+        const p = isObj(g.parameters) ? g.parameters : {};
+        for (const o of [p, isObj(p.options) ? p.options : {}]) for (const k of Object.keys(o)) if (SEGMENTS.has(k)) n *= clamp(o, k, 256) + 1;
+        if ("detail" in p) n *= 20 * (clamp(p, "detail", 5) + 1) ** 2;
+        if (Array.isArray(p.points)) { p.points = p.points.slice(0, 4096); n *= p.points.length; }   // a lathe's outline
+        if (/Box/.test(g.type)) n *= 6;
+      }
+      budget.vertices += n;
+      return budget.vertices <= MAX_VERTICES ? g : { uuid: String(g.uuid), type: "BufferGeometry", data: { attributes: {} } };
+    });
+    const ok = u => {
+      if (typeof u === "string") { const d = imageDims(u); return d && d[0] <= MAX_SIDE && d[1] <= MAX_SIDE ? u : BLANK; }
+      return isObj(u) && Array.isArray(u.data) && ARRAYS.has(u.type) && u.width > 0 && u.height > 0 && u.width <= MAX_SIDE && u.height <= MAX_SIDE
+        && u.data.length <= u.width * u.height * 4 ? u : BLANK;
+    };
+    json.images = arr("images").map(im => ({ uuid: String(im.uuid), url: Array.isArray(im.url) ? im.url.slice(0, 6).map(ok) : ok(im.url) }));
+    let count = 0;
+    const stack = [json.object];
+    while (stack.length) {
+      const o = stack.pop();
+      if (!isObj(o)) continue;
+      count++;
+      if (Array.isArray(o.children)) { o.children = o.children.filter(isObj); for (const c of o.children) stack.push(c); }
+    }
+    budget.objects += count;
+    if (budget.objects > MAX_OBJECTS) throw new Error(`more than ${MAX_OBJECTS} objects`);
+    return json;
+  }
+
+  // What the host's renderer draws with, for the visitor's to match, by what its release calls it.
+  function rendererProps(r, three) {
+    const rev = Number(three.REVISION), out = {};
+    if (!r) return out;
+    if (r.shadowMap) out.shadowMap = { enabled: !!r.shadowMap.enabled, type: r.shadowMap.type };
+    const keys = ["toneMapping", "toneMappingExposure", "sortObjects", rev < 152 ? "outputEncoding" : "outputColorSpace"];
+    if (rev < 155) keys.push("physicallyCorrectLights"); else if (rev < 165) keys.push("useLegacyLights");
+    for (const k of keys) if (k in r && ["number", "boolean", "string"].includes(typeof r[k])) out[k] = r[k];
+    try { const c = new three.Color(); r.getClearColor(c); out.clear = [c.getHex(), r.getClearAlpha()]; } catch (e) { /* not this release */ }
+    if (rev >= 152 && three.ColorManagement) out.colorManagement = !!three.ColorManagement.enabled;
+    return out;
+  }
+
+  // A material's state that changes as a room runs (colours, opacity, visibility...), sent as it changes; a
+  // change of its textures sends the whole material again.
+  const COLORS = ["color", "emissive", "specular"];
+  const VALUES = ["opacity", "transparent", "visible", "wireframe", "side", "depthWrite", "depthTest", "alphaTest", "emissiveIntensity",
+    "roughness", "metalness", "shininess", "size", "rotation", "vertexColors", "flatShading", "fog", "toneMapped", "blending"];
+  const RECOMPILE = new Set(["transparent", "side", "vertexColors", "flatShading", "fog", "alphaTest", "blending", "toneMapped", "wireframe"]);
+  const MAPS = ["map", "emissiveMap", "alphaMap", "normalMap", "bumpMap", "aoMap", "lightMap", "roughnessMap", "metalnessMap", "specularMap",
+    "envMap", "gradientMap", "matcap", "displacementMap"];
+  const list = x => Array.isArray(x) ? x : x ? [x] : [];
+  function matProps(m) {
+    const p = {};
+    for (const k of COLORS) if (m[k] && m[k].isColor) p[k] = m[k].getHex();
+    for (const k of VALUES) if (k in m && ["number", "boolean"].includes(typeof m[k])) p[k] = m[k];
+    return p;
+  }
+  function setProps(m, p) {
+    for (const k of COLORS) if (typeof p[k] === "number" && m[k] && m[k].isColor) m[k].setHex(p[k]);
+    for (const k of VALUES) {
+      if (!(k in p) || !(k in m) || typeof p[k] !== typeof m[k] || m[k] === p[k]) continue;
+      m[k] = p[k];
+      if (RECOMPILE.has(k)) m.needsUpdate = true;
+    }
+  }
+  const mat16 = (a, b) => { for (let i = 0; i < 16; i++) if (Math.abs(a[i] - b[i]) > 1e-6) return true; return false; };
+  const keep = (a, x) => { a.push(x); if (a.length > 6000) a.splice(0, 1000); };
+
+  // The host's side of a scene: what it last sent of each object, material, geometry and texture, so that each
+  // round (every SCENE_MS) sends only what changed. One for all of a host's visitors: they get the same edits.
+  class SceneSync {
+    constructor(cfg) {
+      const t = cfg.three;
+      Object.assign(this, { cfg, objs: new Map(), next: 1, mats: new Map(), geos: new Map(), texs: new Map(), dynamic: new Set(), sent: new Set(),
+        keyAt: 0, sceneSig: null, tmp: { p: new t.Vector3(), q: new t.Quaternion(), s: new t.Vector3() } });
+      this.scan(0);   // where everything is now: what the first whole scene shows
+    }
+
+    _record(o, parent) {
+      const r = { o, idx: this.next++, parent: parent ? parent.o.uuid : null, mats: list(o.material).map(m => m.uuid).join(),
+        geo: o.geometry ? o.geometry.uuid : "", m: Float64Array.from(o.matrix.elements), vis: o.visible };
+      this.objs.set(o.uuid, r);
+      return r;
+    }
+
+    // Since the last round: objects added (whole, with what they are made of), removed, moved to another parent,
+    // given other materials or geometry; materials' state; geometries and textures changed in place; the scene's
+    // background and fog: { edit (null: nothing), moved (the objects whose place or visibility changed) }.
+    scan(now) {
+      const root = this.cfg.root, first = !this.objs.size;
+      const adds = [], removes = [], parents = [], assigns = [], props = [], moved = [], res = new Map(), seen = new Set();
+      const usedMats = new Set(), usedGeos = new Set(), usedTexs = new Set();
+      root.updateMatrixWorld();
+      const stack = [[root, null, false]];
+      while (stack.length) {
+        const [o, parent, fresh] = stack.pop();
+        seen.add(o.uuid);
+        let r = this.objs.get(o.uuid), inNew = fresh;
+        if (fresh || !r) {
+          if (r) removes.push(r.idx);   // it was elsewhere: it comes again within what it was added under
+          r = this._record(o, parent);
+          if (!fresh && !first) { adds.push(r); inNew = true; }
+        } else {
+          const p = parent ? parent.o.uuid : null;
+          if (r.parent !== p) { r.parent = p; parents.push([r.idx, parent ? parent.idx : 0]); }
+          const mats = list(o.material).map(m => m.uuid).join(), geo = o.geometry ? o.geometry.uuid : "";
+          if (mats !== r.mats || geo !== r.geo) { r.mats = mats; r.geo = geo; assigns.push(r); }
+          if (r.vis !== o.visible || mat16(r.m, o.matrix.elements)) { r.m.set(o.matrix.elements); r.vis = o.visible; moved.push(r); this.dynamic.add(r); }
+        }
+        for (const m of list(o.material)) usedMats.add(m);
+        if (o.geometry) usedGeos.add(o.geometry);
+        for (let i = o.children.length - 1; i >= 0; i--) stack.push([o.children[i], r, inNew]);
+      }
+      const gone = [];
+      for (const [uuid, r] of this.objs) if (!seen.has(uuid)) { this.objs.delete(uuid); this.dynamic.delete(r); gone.push(r); }
+      const goneIds = new Set(gone.map(r => r.o.uuid));
+      for (const r of gone) if (!goneIds.has(r.parent)) removes.push(r.idx);
+      // Materials: their state, or (their textures changed) all of them again.
+      for (const m of usedMats) {
+        const ps = JSON.stringify(matProps(m)), maps = MAPS.map(k => m[k] && m[k].isTexture ? m[k].uuid : "").join(), rec = this.mats.get(m.uuid);
+        for (const k of MAPS) if (m[k] && m[k].isTexture) usedTexs.add(m[k]);
+        if (!rec) { this.mats.set(m.uuid, { props: ps, maps }); continue; }
+        if (maps !== rec.maps) { Object.assign(rec, { props: ps, maps }); res.set(m.uuid, ["material", m]); }
+        else if (ps !== rec.props) { rec.props = ps; props.push(Object.assign({ uuid: m.uuid }, JSON.parse(ps))); }
+      }
+      // Geometries and textures changed in place (their versions moved on): again, at most every 250 and 500 ms.
+      const again = (map, x, ver, every, kind) => {
+        const rec = map.get(x.uuid);
+        if (!rec) return map.set(x.uuid, { ver, at: now });
+        if (rec.ver !== ver && now - rec.at >= every) { Object.assign(rec, { ver, at: now }); res.set(x.uuid, [kind, x]); }
+      };
+      for (const g of usedGeos) again(this.geos, g, Object.values(g.attributes || {}).map(a => a.version).join() + "|" + (g.index ? g.index.version : ""), 250, "geometry");
+      if (root.background && root.background.isTexture) usedTexs.add(root.background);
+      for (const t of usedTexs) again(this.texs, t, t.version, 500, "texture");
+      for (const r of assigns) {
+        for (const m of list(r.o.material)) if (!this.sent.has(m.uuid)) res.set(m.uuid, ["material", m]);
+        if (r.o.geometry && !this.sent.has(r.o.geometry.uuid)) res.set(r.o.geometry.uuid, ["geometry", r.o.geometry]);
+      }
+      // The scene's own: its background and fog.
+      let scene = null;
+      if (root.isScene) {
+        const bg = root.background, f = root.fog;
+        const now2 = { background: bg && bg.isColor ? bg.getHex() : bg && bg.isTexture ? { texture: bg.uuid } : null,
+          fog: f ? { type: f.isFogExp2 ? "FogExp2" : "Fog", color: f.color.getHex(), near: f.near, far: f.far, density: f.density } : null };
+        const sig = JSON.stringify(now2);
+        if (this.sceneSig !== null && sig !== this.sceneSig) {
+          scene = now2;
+          if (bg && bg.isTexture && !this.sent.has(bg.uuid)) res.set(bg.uuid, ["texture", bg]);
+        }
+        this.sceneSig = sig;
+      }
+      if (first) return { edit: null, moved: [] };
+      const edit = { type: "edit" };
+      if (res.size) edit.res = this._resources([...res.values()]);
+      if (removes.length) edit.remove = removes;
+      if (adds.length) edit.add = adds.map(r => this._added(r));
+      if (parents.length) edit.parent = parents;
+      if (assigns.length) edit.assign = assigns.map(r => [r.idx, Array.isArray(r.o.material) ? r.o.material.map(m => m.uuid) : r.o.material ? r.o.material.uuid : null, r.o.geometry ? r.o.geometry.uuid : null]);
+      if (props.length) edit.props = props;
+      if (scene) edit.scene = scene;
+      return { edit: Object.keys(edit).length > 1 ? edit : null, moved };
+    }
+
+    // An added object, whole: its JSON (with everything it is made of), each object's number, its lights' targets.
+    _added(r) {
+      const json = r.o.toJSON(), ids = [];
+      r.o.traverse(o => { const x = this.objs.get(o.uuid); if (x) ids.push([o.uuid, x.idx]); });
+      for (const k of ["geometries", "materials", "textures", "images"]) for (const x of json[k] || []) this.sent.add(x.uuid);
+      const parent = this.objs.get(r.parent);
+      return { parent: parent ? parent.idx : 0, json, ids, targets: this.targets(r.o) };
+    }
+
+    // Geometries, materials and textures to send again (or for the first time), as three.js's toJSON makes them.
+    _resources(items) {
+      const meta = { geometries: {}, materials: {}, textures: {}, images: {}, shapes: {}, skeletons: {}, animations: {}, nodes: {} };
+      for (const [kind, x] of items) {
+        if (kind === "geometry") {
+          meta.geometries[x.uuid] = x.toJSON();
+          for (const sh of list(x.parameters && x.parameters.shapes)) meta.shapes[sh.uuid] = sh.toJSON();
+        } else if (kind === "material") meta.materials[x.uuid] = x.toJSON(meta);
+        else meta.textures[x.uuid] = x.toJSON(meta);
+      }
+      const out = {};
+      for (const k of ["geometries", "materials", "textures", "images", "shapes"]) {
+        out[k] = Object.values(meta[k]).map(x => { delete x.metadata; return x; });
+        for (const x of out[k]) this.sent.add(x.uuid);
+      }
+      return out;
+    }
+
+    // Lights' targets (three.js's own JSON leaves them out before r160): [light, target] numbers, or [light,
+    // null, the target's place] for a target that is not in the scene.
+    targets(top) {
+      const out = [];
+      top.traverse(o => {
+        if (!(o.isDirectionalLight || o.isSpotLight) || !o.target) return;
+        const l = this.objs.get(o.uuid), t = this.objs.get(o.target.uuid);
+        if (l) out.push(t ? [l.idx, t.idx] : [l.idx, null, o.target.position.toArray()]);
+      });
+      return out;
+    }
+
+    // Everything that has moved since the scene was first sent: a key delta's objects.
+    dynamicRecs() { return [...this.dynamic].filter(r => this.objs.get(r.o.uuid) === r); }
+
+    // Objects' places, as a delta lists them (SPEC 8.3): number (u32), flags (u8: 1 visible, 2 scaled), position
+    // and quaternion (f32), and the scale (f32) when it is not 1.
+    entries(recs) {
+      recs = recs.slice(0, 20000);
+      const buf = new ArrayBuffer(recs.length * 45), dv = new DataView(buf), { p, q, s } = this.tmp;
+      let at = 0;
+      for (const r of recs) {
+        r.o.matrix.decompose(p, q, s);
+        const scaled = Math.abs(s.x - 1) + Math.abs(s.y - 1) + Math.abs(s.z - 1) > 1e-6;
+        dv.setUint32(at, r.idx); dv.setUint8(at + 4, (r.o.visible ? 1 : 0) | (scaled ? 2 : 0)); at += 5;
+        for (const x of [p.x, p.y, p.z, q.x, q.y, q.z, q.w]) { dv.setFloat32(at, x); at += 4; }
+        if (scaled) for (const x of [s.x, s.y, s.z]) { dv.setFloat32(at, x); at += 4; }
+      }
+      return { n: recs.length, bytes: new Uint8Array(buf, 0, at) };
+    }
+
+    // The whole scene, for a visitor starting (or starting again): three.js's own JSON of it, each object's
+    // number, and what the visitor needs to draw it as the host does and to walk in it.
+    snapshot(h, hooks) {
+      const { root, three, renderer } = this.cfg, w = hooks.walk;
+      root.updateMatrixWorld();
+      const json = root.toJSON();
+      this.sent = new Set(["geometries", "materials", "textures", "images"].flatMap(k => (json[k] || []).map(x => x.uuid)));
+      return { type: "scene", three: String(three.REVISION), json, ids: [...this.objs.values()].map(r => [r.o.uuid, r.idx]), targets: this.targets(root),
+        renderer: rendererProps(renderer, three), fov: Number(hooks.fov) || 70, near: Number(this.cfg.near) || 0.1, far: Number(this.cfg.far) || 1000,
+        walk: w && Number(w.speed) > 0 ? { speed: Number(w.speed) } : null, yaw0: h.yaw0, pose: h.pose };
+    }
+  }
+
   class Client {
-    constructor(port, token, sim) {
-      Object.assign(this, { port, token, sim });
+    constructor(port, token, sim, { scenes = true, threeBase = null } = {}) {
+      Object.assign(this, { port, token, sim, _sceneOk: scenes !== false, _threeBase: threeBase });
       this.state = "connecting";   // then "online", "offline" (the lobby out of reach), or "away" (left on purpose)
       this.office = null;
       this.status = "available";
@@ -63,8 +455,11 @@
       this._limits = { max_width: 1280, max_height: 720, fps: 60 };
       // A visitor's numbers, about once a second (the "stats" event): input to screen and the link's round
       // trip in ms, the link's path ("direct" or "relay"), frames drawn a second. null while not visiting.
-      this.stats = { latency: null, rtt: null, path: null, fps: 0 };
+      // "mode": "scene" while drawing the host's scene here (latency is then input to screen here), else null.
+      this.stats = { latency: null, rtt: null, path: null, fps: 0, mode: null };
       this._decoders = null;
+      this._scenesCaps = null;    // the three.js revisions this page draws scenes of (none: video only)
+      this._sync = null;          // what this room last sent of its scene (SceneSync), while a visitor gets it
       this._viewer = null;        // the visit this office is on: { channel, decoder, waitKey, config }
       this._view = null;          // where it is shown: { element, canvas, ... }
       this._closed = false;
@@ -134,6 +529,7 @@
       this._limits = m.limits || this._limits;
       this.knocks = []; this.knocking = [];
       for (const v of m.visits || []) this._started(v);
+      this._sendScenes();   // before what it decodes: a host decides on a scene first
       this._sendDecoders();
       this._changed();
     }
@@ -183,7 +579,9 @@
         case "link_stats":
           if (this._viewer && this._viewer.channel === m.channel) { this.stats.rtt = Number(m.rtt_ms); this.stats.path = String(m.path); }
           break;
-        case "decoders": case "viewport": case "keyframe": case "bitrate": case "input": this._hostMessage(m); break;
+        case "decoders": case "viewport": case "keyframe": case "bitrate": case "input": case "scenes": case "scene_resync": this._hostMessage(m); break;
+        case "scene": this._sceneEdit(m); break;
+        case "scene_lost": if (this._viewer && this._viewer.channel === m.channel) this._sceneResync(this._viewer); break;
         case "error": this._emit("error", { code: m.code, message: m.message, ref: m.ref }); break;
       }
     }
@@ -206,13 +604,14 @@
       if (m.role === "host") {
         const h = { id: m.id, channel: m.channel, visitor: m.peer || {}, pose: null, yaw0: 0, input: null, inputAt: 0,
           decoders: null, viewport: null, encoder: null, codec: null, width: 0, height: 0, bps: 1000000, fps: this._fps(), scale: 0, scaledAt: 0,
-          keyNext: true, lastKey: 0, nextAt: 0, fails: 0, configuring: false, scratch: null, since: performance.now(), meta: new Map() };
+          keyNext: true, lastKey: 0, nextAt: 0, fails: 0, configuring: false, scratch: null, since: performance.now(), meta: new Map(),
+          mode: null, three: null, sceneSent: false, posed: null };   // mode: "scene" or "video", once the visitor says what it draws
         if (m.state && m.state.pose) { h.pose = m.state.pose; h.yaw0 = m.state.yaw0 || 0; }   // back after this page reloaded
         this._hosted.set(m.channel, h);
         this._spawn(h);
       } else {
         this.visiting = { id: m.id, host: m.peer || {}, paused: false };
-        this._viewer = { channel: m.channel, decoder: null, waitKey: true, config: null, fov: null, meta: new Map(), last: null, lastMeta: null, count: 0 };
+        this._viewer = { channel: m.channel, decoder: null, waitKey: true, config: null, fov: null, meta: new Map(), last: null, lastMeta: null, count: 0, scene: null, sceneQ: null };
         this._sendViewport();
       }
       this._visitorsList();
@@ -238,12 +637,19 @@
     _visitorsList() { this.visitors = [...this._hosted.values()].map(h => ({ id: h.id, visitor: h.visitor, pose: h.pose })); }
 
     // ---------- hosting ----------
+    // `scene` (optional): { root, three, renderer, near, far }, the room's three.js scene (or the part of it to
+    // share), the THREE namespace it was made with, its renderer and its camera's range: visitors whose page draws
+    // scenes get it instead of video. `walk` (optional): { speed }, when `move` walks with Visit.walk at that
+    // speed: the visitor's page then walks at once, before the host's answer.
     host(hooks) {
       if (!hooks || typeof hooks.spawn !== "function" || typeof hooks.move !== "function" || typeof hooks.render !== "function") {
         throw new Error("visit.host needs spawn, move and render functions");
       }
+      const sc = hooks.scene;
+      if (sc && !(sc.root && sc.root.isObject3D && sc.three && sc.three.REVISION)) throw new Error("visit.host: scene needs { root, three }: the three.js scene and the THREE it was made with");
       this._hooks = hooks;
-      for (const h of this._hosted.values()) { h.fps = this._fps(); this._spawn(h); }
+      this._sync = null;
+      for (const h of this._hosted.values()) { h.fps = this._fps(); this._spawn(h); h.sceneSent = false; this._chooseMode(h); }
     }
     _fps() { return Math.max(10, Math.min(this._limits.fps || 60, (this._hooks && this._hooks.fps) || 60)); }
 
@@ -258,8 +664,10 @@
       if (!h) return;
       if (m.type === "input") { h.input = m; h.inputAt = performance.now(); this._step(h, h.inputAt); }   // at once: the next frame shows it
       else if (m.type === "keyframe") h.keyNext = true;
-      else if (m.type === "decoders") { h.decoders = m.codecs || []; this._configureEncoder(h); }
-      else if (m.type === "viewport") { h.viewport = [m.width, m.height]; this._configureEncoder(h); }
+      else if (m.type === "scenes") { h.three = Array.isArray(m.three) ? m.three.map(String) : []; this._chooseMode(h); }
+      else if (m.type === "scene_resync") { if (h.mode === "scene") h.sceneSent = false; }
+      else if (m.type === "decoders") { h.decoders = m.codecs || []; if (h.mode === "video") this._configureEncoder(h); else this._chooseMode(h); }
+      else if (m.type === "viewport") { h.viewport = [m.width, m.height]; if (h.mode === "video") this._configureEncoder(h); }
       else if (m.type === "bitrate" && h.encoder && Math.abs(m.bps - h.bps) / h.bps > 0.15) {
         h.bps = m.bps;
         try { h.encoder.configure(this._encoderConfig(h)); } catch (e) { console.warn("visit: bitrate change refused", e); }
@@ -274,7 +682,7 @@
     // A codec this visitor decodes and this page encodes, at the visitor's view size; then its settings
     // to the visitor, and a keyframe first.
     async _configureEncoder(h) {
-      if (typeof VideoEncoder === "undefined") return;
+      if (typeof VideoEncoder === "undefined" || h.mode !== "video") return;
       if (h.configuring) { h.again = true; return; }   // new settings arrived meanwhile: once this is done, again
       h.configuring = true;
       try {
@@ -330,6 +738,435 @@
 
     _dropHosted(h) { if (h.encoder) { try { h.encoder.close(); } catch (e) { /* closed */ } h.encoder = null; } }
 
+    // ---------- scenes: hosting ----------
+    // Scene or video, for one visitor: its scene when this room gave visit.host() a three.js scene of a revision
+    // the visitor draws (its page said which, in `scenes`), else video.
+    _chooseMode(h) {
+      if (!this._hooks) return;   // decided once the room says how it hosts (host())
+      const sc = this._hooks.scene;
+      if (sc && Array.isArray(h.three) && h.three.includes(String(sc.three.REVISION))) {
+        if (h.mode !== "scene") { this._dropHosted(h); h.codec = null; h.mode = "scene"; h.sceneSent = false; }
+      } else if ((h.three || h.decoders) && h.mode !== "video") {   // it said what it draws (or, before 0.4, only what it decodes)
+        h.mode = "video";
+        if (h.decoders) this._configureEncoder(h);
+      }
+    }
+
+    // Every SCENE_MS, for the visitors that get the scene: what changed in it (one edit for them all), where its
+    // moving things and each visitor are (a delta each), and the whole scene to any visitor starting.
+    _sceneTick(now) {
+      const hs = [...this._hosted.values()].filter(h => h.mode === "scene" && h.pose);
+      if (!hs.length || !this._hooks || !this._hooks.scene) { this._sync = null; return; }
+      const t0 = performance.now();
+      try {
+        if (!this._sync || this._sync.cfg !== this._hooks.scene) {   // a new scene, or numbered anew: everyone gets it whole
+          this._sync = new SceneSync(this._hooks.scene);
+          for (const h of hs) h.sceneSent = false;
+        }
+        const sync = this._sync, { edit, moved } = sync.scan(now), ready = hs.filter(h => h.sceneSent);
+        if (edit && ready.length) this._sendScene(ready, edit);
+        const key = now - sync.keyAt >= SCENE_KEY_MS;
+        if (key) sync.keyAt = now;
+        const body = sync.entries(moved), all = key || ready.some(h => h.keyNext) ? sync.entries(sync.dynamicRecs()) : null;
+        for (const h of ready) {
+          const k = key || h.keyNext, p = h.pose, posed = [p.x, p.y, p.z, p.yaw, p.pitch, h.input && h.input.t].join();
+          if (k || body.n || posed !== h.posed) { this._sendDelta(h, k ? all : body, k, now); h.posed = posed; h.keyNext = false; }
+        }
+        for (const h of hs) if (!h.sceneSent) { this._sendScene([h], sync.snapshot(h, this._hooks)); h.sceneSent = true; h.keyNext = true; }
+      } catch (e) { console.error("visit: could not send the scene", e); }
+      if (this._busy) this._busy.spent += performance.now() - t0;
+    }
+
+    // A scene edit to these visitors, gzipped, after any before it (SPEC 5.4: flags SCENE).
+    _sendScene(hs, edit) {
+      let text;
+      try { text = JSON.stringify(edit); } catch (e) { return console.warn("visit: a scene edit that does not turn into JSON", e); }
+      const channels = hs.map(h => h.channel);
+      this._sceneOut = (this._sceneOut || Promise.resolve()).then(async () => {
+        const gz = new Uint8Array(await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer());
+        if (gz.byteLength > 16 << 20) return console.warn(`visit: a scene edit too big to send (${gz.byteLength} bytes gzipped)`);
+        for (const ch of channels) {
+          if (!this._ws || this._ws.readyState !== 1) return;
+          const buf = new Uint8Array(11 + gz.byteLength);
+          new DataView(buf.buffer).setUint16(0, ch);
+          buf[2] = SCENE;
+          buf.set(gz, 11);
+          this._ws.send(buf);
+        }
+      }).catch(e => console.warn("visit: could not send a scene edit", e));
+    }
+
+    // A delta (SPEC 8.3): where the host has this visitor (and the input it got that far with), then objects'
+    // places; a key delta has everything that ever moved.
+    _sendDelta(h, body, key, now) {
+      if (!this._ws || this._ws.readyState !== 1) return;
+      const buf = new Uint8Array(11 + 37 + body.bytes.byteLength), dv = new DataView(buf.buffer), p = h.pose;
+      dv.setUint16(0, h.channel); dv.setUint8(2, DELTA | (key ? 1 : 0)); dv.setBigUint64(3, BigInt(Math.round(now * 1000)));
+      dv.setUint8(11, 1);
+      dv.setFloat64(12, h.input ? Number(h.input.t) || 0 : 0);
+      dv.setFloat32(20, h.input ? now - h.inputAt : 0);
+      [p.x, p.y, p.z, p.yaw, p.pitch].forEach((x, i) => dv.setFloat32(24 + 4 * i, Number(x) || 0));
+      dv.setUint32(44, body.n);
+      buf.set(body.bytes, 48);
+      this._ws.send(buf);
+    }
+
+    // ---------- scenes: visiting ----------
+    _sendScenes() {
+      if (!this._scenesCaps) {
+        let gl = false;
+        try {
+          const c = this._sceneOk !== false && document.createElement("canvas").getContext("webgl2");
+          gl = !!c;
+          if (c) { const x = c.getExtension("WEBGL_lose_context"); if (x) x.loseContext(); }
+        } catch (e) { /* no WebGL 2: video */ }
+        this._scenesCaps = gl ? Object.keys(THREE_FILES) : [];
+      }
+      this._send({ type: "scenes", three: this._scenesCaps });
+    }
+
+    // Edits apply one after another, in order (the first, the whole scene, waits for three.js to load).
+    _sceneEdit(m) {
+      const w = this._viewer;
+      if (!w || w.channel !== m.channel || !isObj(m.edit)) return;
+      const whole = m.edit.type === "scene";
+      w.sceneQ = (w.sceneQ || Promise.resolve()).then(() => this._viewer !== w ? null : whole ? this._sceneStart(w, m.edit) : this._sceneApply(w, m.edit))
+        .catch(e => {
+          if (this._viewer !== w) return;
+          if (whole) {   // this page cannot draw it: video from now on (the host hears it draws no scenes)
+            console.warn("visit: cannot draw this room's scene; asking for video instead", e);
+            this._sceneDrop(w);
+            this._scenesCaps = [];
+            this._sendScenes();
+          } else { console.warn("visit: a scene edit that did not apply; asking for the whole scene again", e); this._sceneResync(w); }
+        });
+    }
+
+    // At most every 2 s (as visit-client passes them on): one asked for sooner goes when it may.
+    _sceneResync(w) {
+      const wait = 2000 - (performance.now() - (w.resyncAt || -1e9));
+      if (wait > 0) {
+        if (!w.resyncTimer) w.resyncTimer = setTimeout(() => { w.resyncTimer = 0; if (this._viewer === w) this._sceneResync(w); }, wait);
+        return;
+      }
+      w.resyncAt = performance.now();
+      this._send({ type: "scene_resync", channel: w.channel });
+    }
+
+    async _sceneStart(w, e) {
+      const T = await loadThree(e.three, this._threeBase);
+      if (this._viewer !== w) return;
+      this._sceneDrop(w);
+      if (w.decoder) { try { w.decoder.close(); } catch (x) { /* closed */ } w.decoder = null; }
+      if (w.last) { w.last.close(); w.last = null; }
+      const budget = { vertices: 0, objects: 0 }, loader = new T.ObjectLoader();
+      let root = loader.parse(cleanScene(e.json, budget));
+      if (!root.isScene) { const sc = new T.Scene(); sc.add(root); root = sc; }
+      const pose = isObj(e.pose) ? e.pose : {}, num = (x, d) => Number.isFinite(Number(x)) ? Number(x) : d;
+      const s = { T, loader, budget, root, byIdx: new Map(), idxOf: new Map(), geos: new Map(), mats: new Map(), texs: new Map(), samples: new Map(),
+        offs: [], offset: null, pose: { x: num(pose.x, 0), y: num(pose.y, 1.6), z: num(pose.z, 0) }, yaw0: num(e.yaw0, 0),
+        walk: isObj(e.walk) && num(e.walk.speed, 0) > 0 ? { speed: Math.min(50, num(e.walk.speed, 2.5)) } : null,
+        hist: [], vis: { x: 0, y: 0, z: 0 }, waitKey: true, own: [], last: 0, gcAt: performance.now(), q: new T.Quaternion(), v: new T.Vector3() };
+      this._sceneAdopt(s, root);
+      const byUuid = new Map();
+      root.traverse(o => byUuid.set(o.uuid, o));
+      for (const [uuid, idx] of Array.isArray(e.ids) ? e.ids : []) { const o = byUuid.get(uuid); if (o) { s.byIdx.set(idx, o); s.idxOf.set(o, idx); } }
+      s.byIdx.set(0, root);
+      this._sceneTargets(s, e.targets);
+      // Drawn as the host draws it: its renderer's settings, its camera's field of view and range.
+      s.canvas = document.createElement("canvas");
+      s.renderer = new T.WebGLRenderer({ canvas: s.canvas, antialias: true });
+      const r = isObj(e.renderer) ? e.renderer : {};
+      if (isObj(r.shadowMap)) { s.renderer.shadowMap.enabled = !!r.shadowMap.enabled; if (typeof r.shadowMap.type === "number") s.renderer.shadowMap.type = r.shadowMap.type; }
+      for (const k of ["toneMapping", "toneMappingExposure", "sortObjects", "outputEncoding", "outputColorSpace", "physicallyCorrectLights", "useLegacyLights"]) {
+        if (k in r && k in s.renderer && typeof r[k] === typeof s.renderer[k]) s.renderer[k] = r[k];
+      }
+      if (Array.isArray(r.clear)) s.renderer.setClearColor(num(r.clear[0], 0), num(r.clear[1], 1));
+      if (typeof r.colorManagement === "boolean" && T.ColorManagement && "enabled" in T.ColorManagement) T.ColorManagement.enabled = r.colorManagement;
+      s.camera = new T.PerspectiveCamera(Math.min(150, Math.max(10, num(e.fov, 70))), 1, Math.max(0.001, num(e.near, 0.1)), Math.max(1, num(e.far, 1000)));
+      s.camera.rotation.order = "YXZ";
+      w.scene = s;
+      this._sceneOwn(s);
+      this._sceneAttach(w);
+      this.stats.mode = "scene";
+      this._send({ type: "keyframe", channel: w.channel });   // where its moving things are now
+      const loop = () => {
+        if (w.scene !== s) return;
+        s.raf = requestAnimationFrame(loop);
+        try { this._sceneFrame(w); } catch (x) { console.error("visit: drawing the scene", x); }
+      };
+      s.raf = requestAnimationFrame(loop);
+    }
+
+    // Each geometry, material and texture kept once, by its uuid: one the scene has already stays (the new copy
+    // goes), so an added object made of what is already here shares it.
+    _sceneAdopt(s, top) {
+      const maps = m => {
+        for (const k of MAPS) {
+          const t = m[k];
+          if (!t || !t.isTexture) continue;
+          const have = s.texs.get(t.uuid);
+          if (have && have !== t) { t.dispose(); m[k] = have; } else s.texs.set(t.uuid, t);
+        }
+      };
+      top.traverse(o => {
+        if (o.geometry && o.geometry.uuid) {
+          const have = s.geos.get(o.geometry.uuid);
+          if (have && have !== o.geometry) { o.geometry.dispose(); o.geometry = have; } else s.geos.set(o.geometry.uuid, o.geometry);
+        }
+        if (o.material) {
+          const ms = list(o.material).map(m => {
+            const have = s.mats.get(m.uuid);
+            if (have && have !== m) { m.dispose(); return have; }
+            s.mats.set(m.uuid, m); maps(m); return m;
+          });
+          o.material = Array.isArray(o.material) ? ms : ms[0];
+        }
+        if (o.isScene && o.background && o.background.isTexture) s.texs.set(o.background.uuid, o.background);
+      });
+    }
+
+    _sceneTargets(s, targets) {
+      for (const t of Array.isArray(targets) ? targets : []) {
+        const light = s.byIdx.get(t[0]);
+        if (!light || !(light.isDirectionalLight || light.isSpotLight)) continue;
+        const to = t[1] != null && s.byIdx.get(t[1]);
+        if (to) light.target = to;
+        else if (Array.isArray(t[2]) && t[2].length === 3 && t[2].every(Number.isFinite)) { light.target.position.fromArray(t[2]); light.target.updateMatrixWorld(); }
+      }
+    }
+
+    // The visitor's own body, which the host draws in its room for everyone else: not drawn in its own eyes
+    // (the host marks it with userData.visitor = the visit's id).
+    _sceneOwn(s) {
+      const id = this.visiting && this.visiting.id;
+      s.own = [];
+      s.root.traverse(o => { if (id && o.userData && o.userData.visitor === id) s.own.push(o); });
+    }
+
+    _sceneAttach(w) {
+      const v = this._view, s = w.scene;
+      if (v && s && v.gl !== s.canvas) v.attach(s.canvas);
+    }
+
+    _sceneApply(w, e) {
+      const s = w.scene;
+      if (!s) return this._sceneResync(w);   // an edit with no scene to apply it to: start again
+      const L = s.loader;
+      if (isObj(e.res)) this._sceneResources(s, e.res);
+      for (const idx of Array.isArray(e.remove) ? e.remove : []) {
+        const o = idx ? s.byIdx.get(idx) : null;
+        if (!o) continue;
+        if (o.parent) o.parent.remove(o);
+        o.traverse(c => { const i = s.idxOf.get(c); if (i !== undefined) { s.byIdx.delete(i); s.idxOf.delete(c); s.samples.delete(i); } });
+      }
+      for (const a of Array.isArray(e.add) ? e.add : []) {
+        if (!isObj(a)) continue;
+        try {
+          const o = L.parse(cleanScene(a.json, s.budget));
+          this._sceneAdopt(s, o);
+          const byUuid = new Map();
+          o.traverse(c => byUuid.set(c.uuid, c));
+          for (const [uuid, idx] of Array.isArray(a.ids) ? a.ids : []) { const c = byUuid.get(uuid); if (c && idx) { s.byIdx.set(idx, c); s.idxOf.set(c, idx); } }
+          (s.byIdx.get(a.parent) || s.root).add(o);
+          this._sceneTargets(s, a.targets);
+        } catch (x) { console.warn("visit: an object added to the scene that could not be read", x); }
+      }
+      for (const [idx, p] of Array.isArray(e.parent) ? e.parent : []) {
+        const o = s.byIdx.get(idx), to = s.byIdx.get(p) || s.root;
+        if (o && idx && o !== to && !o.getObjectById(to.id)) to.add(o);
+      }
+      for (const [idx, mats, geo] of Array.isArray(e.assign) ? e.assign : []) {
+        const o = s.byIdx.get(idx);
+        if (!o) continue;
+        if (mats != null && "material" in o) {
+          const ms = list(mats).map(u => s.mats.get(u)).filter(Boolean);
+          if (ms.length) o.material = Array.isArray(mats) ? ms : ms[0];
+        }
+        if (geo != null && "geometry" in o && s.geos.get(geo)) o.geometry = s.geos.get(geo);
+      }
+      for (const p of Array.isArray(e.props) ? e.props : []) { const m = isObj(p) && s.mats.get(p.uuid); if (m) setProps(m, p); }
+      if (isObj(e.scene)) {
+        const { background: bg, fog } = e.scene, T = s.T;
+        if (typeof bg === "number") s.root.background = new T.Color(bg);
+        else if (isObj(bg)) s.root.background = s.texs.get(bg.texture) || null;
+        else if (bg === null) s.root.background = null;
+        if (fog === null) s.root.fog = null;
+        else if (isObj(fog) && Number.isFinite(fog.color)) s.root.fog = fog.type === "FogExp2" ? new T.FogExp2(fog.color, Number(fog.density) || 0.00025) : new T.Fog(fog.color, Number(fog.near) || 1, Number(fog.far) || 1000);
+      }
+      this._sceneOwn(s);
+    }
+
+    // Geometries, materials and textures sent again (changed in place) or new: one the scene has takes the new
+    // one's content, where it is used; a new one is kept for what refers to it.
+    _sceneResources(s, res) {
+      const L = s.loader, json = cleanScene(Object.assign({}, res), s.budget);
+      const geos = L.parseGeometries(json.geometries, L.parseShapes(Array.isArray(res.shapes) ? res.shapes : []));
+      const texs = L.parseTextures(Array.isArray(res.textures) ? res.textures : [], L.parseImages(json.images));
+      const mats = L.parseMaterials(json.materials, Object.assign(Object.fromEntries(s.texs), texs));
+      for (const [uuid, g] of Object.entries(geos)) {
+        const have = s.geos.get(uuid);
+        if (have) { have.dispose(); have.copy(g); g.dispose(); } else s.geos.set(uuid, g);
+      }
+      for (const [uuid, t] of Object.entries(texs)) {
+        const have = s.texs.get(uuid);
+        if (have) { have.copy(t); have.needsUpdate = true; } else s.texs.set(uuid, t);
+      }
+      for (const [uuid, m] of Object.entries(mats)) {
+        const have = s.mats.get(uuid);
+        for (const k of MAPS) if (m[k] && m[k].isTexture && s.texs.get(m[k].uuid)) m[k] = s.texs.get(m[k].uuid);
+        if (have && have.type === m.type) { have.copy(m); have.needsUpdate = true; m.dispose(); continue; }
+        if (have) s.root.traverse(o => { if (o.material === have) o.material = m; else if (Array.isArray(o.material)) o.material = o.material.map(x => x === have ? m : x); });
+        s.mats.set(uuid, m);
+      }
+    }
+
+    // A delta: where the host has this visitor, and its moving things' places, each kept with the host's time
+    // to be shown INTERP_MS later, between two of them.
+    _sceneDelta(w, dv, key) {
+      const s = w.scene;
+      if (!s || dv.byteLength < 48 || dv.getUint8(11) !== 1) return;
+      if (s.waitKey && !key) return;
+      if (key) s.waitKey = false;
+      const ts = Number(dv.getBigUint64(3)) / 1000, now = performance.now();
+      // The host's clock against this page's: the least (arrival - sent) of the last 2 s (a one-way trip's
+      // floor: no update is shown before it could have come).
+      s.offs.push([now, now - ts]);
+      while (s.offs.length > 1 && now - s.offs[0][0] > 2000) s.offs.shift();
+      s.offset = s.offs.reduce((a, x) => Math.min(a, x[1]), Infinity);
+      this._sceneReconcile(s, dv.getFloat64(12), dv.getFloat32(20), dv.getFloat32(24), dv.getFloat32(28), dv.getFloat32(32), now);
+      const n = dv.getUint32(44);
+      let at = 48;
+      for (let i = 0; i < n && at + 33 <= dv.byteLength; i++) {
+        const idx = dv.getUint32(at), fl = dv.getUint8(at + 4), f = k => dv.getFloat32(at + 5 + 4 * k);
+        const p = [f(0), f(1), f(2)], q = [f(3), f(4), f(5), f(6)];
+        at += 33;
+        let sc = null;
+        if (fl & 2) { if (at + 12 > dv.byteLength) break; sc = [dv.getFloat32(at), dv.getFloat32(at + 4), dv.getFloat32(at + 8)]; at += 12; }
+        const o = s.byIdx.get(idx);
+        if (!o || !idx || ![...p, ...q, ...(sc || [])].every(x => Number.isFinite(x) && Math.abs(x) < 1e7)) continue;
+        let l = s.samples.get(idx);
+        if (!l) s.samples.set(idx, l = []);
+        const last = l[l.length - 1];
+        if (last && ts <= last.ts) continue;   // older than what it has
+        // At rest until now: where it was, just before this, so it moves from there rather than glides from long ago.
+        if (!last || ts - last.ts > 2.5 * SCENE_MS) l.push({ ts: ts - SCENE_MS, p: o.position.toArray(), q: o.quaternion.toArray(), s: o.scale.toArray(), vis: o.visible });
+        l.push({ ts, p, q, s: sc, vis: !!(fl & 1) });
+        if (l.length > 8) l.splice(0, l.length - 8);
+      }
+    }
+
+    // Where the host has this visitor, for the input of time `t` (this page's clock) it had got `age` ms into:
+    // against where this page had predicted it would be by then, the difference is put right at once in where
+    // it stands, and eased away (in 100 ms or so) in what it sees. A host that does not say how its visitors
+    // walk gets followed, eased the same way.
+    _sceneReconcile(s, t, age, x, y, z, now) {
+      if (![x, y, z].every(Number.isFinite)) return;
+      s.vis.y -= y - s.pose.y; s.pose.y = y;
+      let px = s.pose.x, pz = s.pose.z, when = null;
+      if (s.walk && t > 0 && s.hist.length) {
+        when = Math.min(now, t + Math.max(0, age));
+        const h = s.hist;
+        let i = h.length - 1;
+        while (i > 0 && h[i][0] > when) i--;
+        const a = h[i], b = h[i + 1];
+        const k = b && b[0] > a[0] ? Math.max(0, Math.min(1, (when - a[0]) / (b[0] - a[0]))) : 0;
+        px = b ? a[1] + (b[1] - a[1]) * k : a[1]; pz = b ? a[2] + (b[2] - a[2]) * k : a[2];
+      }
+      const ex = x - px, ez = z - pz;
+      if (Math.hypot(ex, ez) > 4) { s.pose.x = x; s.pose.z = z; s.vis.x = s.vis.z = 0; s.hist.length = 0; return; }   // far off (put elsewhere): there at once
+      if (Math.abs(ex) + Math.abs(ez) < 1e-5) return;
+      s.pose.x += ex; s.pose.z += ez; s.vis.x -= ex; s.vis.z -= ez;
+      if (when !== null) for (const e of s.hist) if (e[0] >= when) { e[1] += ex; e[2] += ez; }
+    }
+
+    // One frame of the room visited, drawn here: this visitor walked as its keys say (when the host said how its
+    // visitors walk), looking where its mouse says, the room's moving things where they were INTERP_MS ago.
+    _sceneFrame(w) {
+      const s = w.scene, v = this._view, c = s.canvas, now = performance.now();
+      const dt = Math.min(0.1, s.last ? (now - s.last) / 1000 : 0);
+      s.last = now;
+      const cw = c.clientWidth, ch = c.clientHeight;
+      if (!cw || !ch) return;   // not shown
+      const k = Math.min(window.devicePixelRatio || 1, Math.sqrt(MAX_PIXELS / (cw * ch))), W = Math.max(2, Math.round(cw * k)), H = Math.max(2, Math.round(ch * k));
+      if (c.width !== W || c.height !== H) { s.renderer.setSize(W, H, false); s.camera.aspect = W / H; s.camera.updateProjectionMatrix(); }
+      const yaw = s.yaw0 + (v ? v.yaw : 0), pitch = v ? v.pitch : 0;
+      if (s.walk && v && v.active && this.visiting && !this.visiting.paused) {
+        const key = x => v.keys.has(x);
+        const p = walk({ x: s.pose.x, z: s.pose.z, yaw }, { forward: (key("KeyW") || key("ArrowUp") ? 1 : 0) - (key("KeyS") || key("ArrowDown") ? 1 : 0),
+          strafe: (key("KeyD") || key("ArrowRight") ? 1 : 0) - (key("KeyA") || key("ArrowLeft") ? 1 : 0), run: key("ShiftLeft") || key("ShiftRight") }, dt, s.walk);
+        s.pose.x = p.x; s.pose.z = p.z;
+      }
+      s.hist.push([now, s.pose.x, s.pose.z]);
+      while (s.hist.length > 2 && now - s.hist[0][0] > 2000) s.hist.shift();
+      const fade = Math.exp(-dt / 0.1);
+      s.vis.x *= fade; s.vis.y *= fade; s.vis.z *= fade;
+      s.camera.position.set(s.pose.x + s.vis.x, s.pose.y + s.vis.y, s.pose.z + s.vis.z);
+      s.camera.rotation.set(pitch, yaw, 0);
+      if (s.offset !== null) this._sceneInterp(s, now - s.offset - INTERP_MS);
+      for (const o of s.own) o.visible = false;
+      s.renderer.render(s.root, s.camera);
+      w.count++;
+      this.frames = (this.frames || 0) + 1;
+      const done = performance.now();
+      keep(this._samples.drawn, done);
+      if (v && v.changedAt) {   // input to screen: drawn here, the next frame after the keys or mouse changed
+        const ms = done - v.changedAt;
+        v.changedAt = 0;
+        this.stats.latency = this.stats.latency == null ? ms : this.stats.latency * 0.9 + ms * 0.1;
+        keep(this._samples.latency, ms);
+      }
+      if (now - s.gcAt > 30000) { s.gcAt = now; this._sceneGc(s); }
+    }
+
+    _sceneInterp(s, at) {
+      for (const [idx, l] of s.samples) {
+        const o = s.byIdx.get(idx);
+        if (!o || !l.length) { s.samples.delete(idx); continue; }
+        let i = 0;
+        while (i < l.length - 1 && l[i + 1].ts <= at) i++;
+        const a = l[i], b = l[i + 1], k = b && at > a.ts ? Math.min(1, (at - a.ts) / (b.ts - a.ts)) : 0;
+        o.position.fromArray(a.p);
+        o.quaternion.fromArray(a.q);
+        if (a.s) o.scale.fromArray(a.s); else o.scale.set(1, 1, 1);
+        if (b && k > 0) {
+          o.position.lerp(s.v.fromArray(b.p), k);
+          o.quaternion.slerp(s.q.fromArray(b.q), k);
+          o.scale.lerp(b.s ? s.v.fromArray(b.s) : s.v.set(1, 1, 1), k);
+        }
+        o.visible = (b && k >= 1 ? b : a).vis;
+        if (i > 0) l.splice(0, i);
+        if (!b && at - a.ts > 1000) s.samples.delete(idx);   // at rest: as it is
+      }
+    }
+
+    // What no object uses any more (removed with them): freed, and the scene's size counted again.
+    _sceneGc(s) {
+      const used = new Set();
+      let objects = 0, vertices = 0;
+      s.root.traverse(o => {
+        objects++;
+        if (o.geometry) used.add(o.geometry.uuid);
+        for (const m of list(o.material)) { used.add(m.uuid); for (const k of MAPS) if (m[k] && m[k].isTexture) used.add(m[k].uuid); }
+      });
+      if (s.root.background && s.root.background.isTexture) used.add(s.root.background.uuid);
+      for (const map of [s.geos, s.mats, s.texs]) for (const [uuid, x] of map) if (!used.has(uuid)) { x.dispose(); map.delete(uuid); }
+      for (const g of s.geos.values()) vertices += g.attributes && g.attributes.position ? g.attributes.position.count : 0;
+      Object.assign(s.budget, { objects, vertices });
+    }
+
+    _sceneDrop(w) {
+      const s = w && w.scene;
+      if (!s) return;
+      w.scene = null;
+      cancelAnimationFrame(s.raf);
+      for (const map of [s.geos, s.mats, s.texs]) for (const x of map.values()) { try { x.dispose(); } catch (e) { /* gone */ } }
+      try { s.renderer.dispose(); s.renderer.forceContextLoss(); } catch (e) { /* gone */ }
+      if (this._view && this._view.gl === s.canvas) this._view.detach(); else s.canvas.remove();
+      this.stats.mode = null;
+    }
+
+
     // 60 times a second: a visitor's input (when it is due), every hosted visitor moved and (when its frame is
     // due) rendered, and once a second the stats and how hard rendering is working this page.
     _tick() {
@@ -343,6 +1180,7 @@
       if (!this._hooks || !this._hosted.size) return;
       this._busy = this._busy || { since: now, spent: 0, due: 0, skipped: 0 };
       for (const h of [...this._hosted.values()]) this._step(h, now);
+      if (now - (this._sceneAt || 0) >= SCENE_MS - 2) { this._sceneAt = now; this._sceneTick(now); }
       this._visitorsList();
       if (now - this._busy.since >= 1000) { this._adapt(now); this._busy = { since: now, spent: 0, due: 0, skipped: 0 }; }
     }
@@ -365,6 +1203,7 @@
         h.keptAt = now;
         this._send({ type: "pose", channel: h.channel, state: { pose: h.pose, yaw0: h.yaw0 } });
       }
+      if (h.mode === "scene") return;   // its page draws the room: where it stands goes in the scene's deltas
       // Frames on an even beat: the next one a slot after this one was due (not after it happened, which a
       // timer's lateness would push later and later), with a couple of ms' grace for that lateness; a host
       // that fell behind starts the beat again rather than rush to catch up.
@@ -438,10 +1277,12 @@
       canvas.style.cssText = "display:block;width:100%;height:100%;background:#000;cursor:pointer;outline:none";
       canvas.tabIndex = 0;
       element.appendChild(canvas);
-      const view = { element, canvas, ctx: canvas.getContext("2d"), keys: new Set(), yaw: 0, pitch: 0, sentAt: 0, resizeAt: 0, active: true, pending: false, raf: 0 };
+      const view = { element, canvas, ctx: canvas.getContext("2d"), keys: new Set(), yaw: 0, pitch: 0, sentAt: 0, resizeAt: 0, active: true, pending: false, raf: 0,
+        gl: null, changedAt: 0 };   // gl: the canvas a scene is drawn on, in this one's place
+      const locked = () => !!document.pointerLockElement && (document.pointerLockElement === canvas || document.pointerLockElement === view.gl);
       const ignore = e => e.ctrlKey || e.metaKey || e.altKey || (e.target && (e.target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)));
       const KEYS = ["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "ShiftLeft", "ShiftRight"];
-      const changed = () => this._sendInput(performance.now(), true);   // at once (at most every 8 ms): no waiting for a tick
+      const changed = () => { view.changedAt = view.changedAt || performance.now(); this._sendInput(performance.now(), true); };   // at once (at most every 8 ms): no waiting for a tick
       const down = e => {
         if (!this.visiting || !view.active || ignore(e) || !KEYS.includes(e.code)) return;
         e.preventDefault();
@@ -449,9 +1290,9 @@
       };
       const up = e => { if (view.keys.delete(e.code)) changed(); };
       const blur = () => { if (view.keys.size) { view.keys.clear(); changed(); } };
-      const click = () => { if (view.active && canvas.requestPointerLock) canvas.requestPointerLock(); };
+      const click = e => { if (view.active && e.currentTarget.requestPointerLock) e.currentTarget.requestPointerLock(); };
       const look = e => {
-        if (document.pointerLockElement !== canvas) return;
+        if (!locked()) return;
         view.yaw -= e.movementX * LOOK;
         view.pitch = Math.max(-1.4, Math.min(1.4, view.pitch - e.movementY * LOOK));
         changed();
@@ -462,23 +1303,41 @@
       canvas.addEventListener("click", click); document.addEventListener("mousemove", look);
       const resize = new ResizeObserver(() => { view.resizeAt = performance.now() + 250; });
       resize.observe(element);
+      view.attach = gl => {
+        view.detach();
+        gl.style.cssText = canvas.style.cssText; gl.tabIndex = 0;
+        element.insertBefore(gl, canvas);
+        canvas.style.display = "none";
+        gl.addEventListener("click", click);
+        view.gl = gl;
+      };
+      view.detach = () => {
+        if (!view.gl) return;
+        if (document.pointerLockElement === view.gl) document.exitPointerLock();
+        view.gl.removeEventListener("click", click);
+        view.gl.remove();
+        view.gl = null;
+        canvas.style.display = "block";
+      };
       view.release = () => {
         removeEventListener("keydown", down); removeEventListener("keyup", up); removeEventListener("blur", blur);
         canvas.removeEventListener("click", click); document.removeEventListener("mousemove", look);
         resize.disconnect();
-        if (document.pointerLockElement === canvas) document.exitPointerLock();
+        if (locked()) document.exitPointerLock();
+        view.detach();
         canvas.remove();
         if (this._view === view) this._view = null;
       };
       view.setActive = on => {
         view.active = !!on;
         if (!view.active) {
-          if (document.pointerLockElement === canvas) document.exitPointerLock();
+          if (locked()) document.exitPointerLock();
           if (view.keys.size) { view.keys.clear(); changed(); }
         }
       };
       this._view = view;
       this._sizeView();
+      if (this._viewer && this._viewer.scene) this._sceneAttach(this._viewer);   // a scene being drawn: here now
       if (this._viewer) { this._viewer.waitKey = true; this._send({ type: "keyframe", channel: this._viewer.channel }); }
       return { release: () => view.release(), setActive: on => view.setActive(on), get active() { return view.active; }, canvas };
     }
@@ -513,6 +1372,7 @@
     _configureDecoder(m) {
       const w = this._viewer;
       if (!w || w.channel !== m.channel || typeof VideoDecoder === "undefined") return;
+      this._sceneDrop(w);   // the host sends video after all
       const same = w.config && w.config.codec === m.codec && w.config.codedWidth === m.width && w.config.codedHeight === m.height;
       if (same && w.decoder && w.decoder.state === "configured") return;   // told again: nothing to change
       if (w.decoder) { try { w.decoder.close(); } catch (e) { /* closed */ } }
@@ -531,6 +1391,7 @@
       if (!w || buf.byteLength < 11) return;
       const dv = new DataView(buf), channel = dv.getUint16(0), flags = dv.getUint8(2), key = (flags & 1) === 1;
       const hasMeta = (flags & HAS_META) !== 0, at = hasMeta ? 11 + META : 11;
+      if (channel === w.channel && (flags & DELTA)) return this._sceneDelta(w, dv, key);
       if (channel !== w.channel || !w.decoder || w.decoder.state !== "configured" || buf.byteLength < at) return;
       if (w.waitKey && !key) return;
       if (w.decoder.decodeQueueSize > 3) { w.waitKey = true; return this._send({ type: "keyframe", channel }); }   // behind: newest wins
@@ -552,7 +1413,7 @@
       w.meta.delete(frame.timestamp);
       if (w.last) w.last.close();
       w.last = frame; w.lastMeta = meta || null; w.count++;
-      const at = performance.now(), keep = (a, x) => { a.push(x); if (a.length > 6000) a.splice(0, 1000); };
+      const at = performance.now();
       keep(this._samples.drawn, at);
       if (meta && meta.t > 0) {   // input to screen, on this page's own clock: the time of the input this frame shows
         const ms = at - meta.t;
@@ -593,10 +1454,11 @@
 
     _dropViewer() {
       const w = this._viewer;
+      this._sceneDrop(w);
       if (w && w.decoder) { try { w.decoder.close(); } catch (e) { /* closed */ } }
       if (w && w.last) w.last.close();
       this._viewer = null;
-      this.stats = { latency: null, rtt: null, path: null, fps: 0 };
+      this.stats = { latency: null, rtt: null, path: null, fps: 0, mode: null };
       if (this._view) {
         const { canvas, ctx } = this._view;
         ctx.fillStyle = "#000"; ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -747,7 +1609,7 @@
     }
     function stats() {
       const x = v.stats;
-      nums.textContent = !v.visiting ? "" : [x.path, x.rtt != null && `link ${Math.round(x.rtt)} ms`,
+      nums.textContent = !v.visiting ? "" : [x.mode === "scene" && "drawn here", x.path, x.rtt != null && `link ${Math.round(x.rtt)} ms`,
         x.latency != null && `input to screen ${Math.round(x.latency)} ms`, x.fps ? `${x.fps} fps` : ""].filter(Boolean).join(" · ");
     }
     root.addEventListener("click", e => {
@@ -765,9 +1627,15 @@
 
   window.Visit = {
     version: VERSION,
-    connect({ port, token, sim = {} }) { const c = new Client(port, token, sim); return c._open().then(() => c, e => { c.close(); throw e; }); },
+    // `scenes: false`: this page never draws a host's scene (video only). `threeBase`: where to fetch three.js
+    // from instead of the CDN ("{r}" the revision; the same files, checked against the same hashes).
+    connect({ port, token, sim = {}, scenes = true, threeBase = null }) {
+      const c = new Client(port, token, sim, { scenes, threeBase });
+      return c._open().then(() => c, e => { c.close(); throw e; });
+    },
     walk,
     panel,
     stage,
+    _test: { cleanScene, imageDims },   // for visit-client's own tests
   };
 })();

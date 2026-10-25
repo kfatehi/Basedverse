@@ -78,7 +78,7 @@ async fn upgrade(ws: WebSocketUpgrade, headers: HeaderMap, State(st): State<Arc<
         warn!(origin, "a page from an origin not in --origins");
         return (StatusCode::FORBIDDEN, "not from this workroom's page").into_response();
     }
-    ws.max_message_size(2 << 20).on_upgrade(move |sock| page(sock, st))
+    ws.max_message_size(crate::frames::MAX_SCENE + 64).max_frame_size(crate::frames::MAX_SCENE + 64).on_upgrade(move |sock| page(sock, st))
 }
 
 async fn close(sock: &mut WebSocket, code: u16, why: &'static str) {

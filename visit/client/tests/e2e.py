@@ -4,9 +4,10 @@ two stand-in pages speaking basedverse-visit-local/1 (../../SPEC.md section 5). 
 machine's loopback; the visit-clients link directly (no relay).
 
     python3 e2e.py path/to/visit-client [B's]   (run-e2e.sh runs it in a container; a second binary runs B,
-                                                 to try two versions together)
+                                                 to try two versions together; E2E_A=an older one runs A)
 """
 import asyncio
+import gzip
 import json
 import os
 import re
@@ -24,7 +25,9 @@ from websockets.exceptions import ConnectionClosed  # noqa: E402
 BIN = sys.argv[1]
 VERSION = re.search(r'^version = "(.*)"', open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Cargo.toml")).read(), re.M).group(1)
 BIN_B = sys.argv[2] if len(sys.argv) > 2 else BIN
-OLD_B = BIN_B != BIN   # B is an older visit-client (0.2): the checks of what only 0.3 does become checks it still works
+OLD_B = BIN_B != BIN   # B is an older visit-client (0.3): the checks of what only 0.4 does become checks it still works
+BIN_A = os.environ.get("E2E_A") or BIN
+OLD_A = BIN_A != BIN   # A is the older one: the same, the other way round
 TMP = tempfile.mkdtemp()
 fails = 0
 
@@ -116,6 +119,11 @@ def frame_meta(channel, key, ts, meta, payload):
     return struct.pack(">HBQ", channel, (1 if key else 0) | 2, ts) + meta + payload
 
 
+def scene_edit(channel, edit, raw=None):
+    """A page's scene edit: the scene flag, then the edit, gzipped JSON (or `raw` bytes as they are)."""
+    return struct.pack(">HBQ", channel, 4, 0) + (raw if raw is not None else gzip.compress(json.dumps(edit).encode()))
+
+
 def unframe(b):
     channel, flags, ts = struct.unpack(">HBQ", b[:11])
     return (channel, bool(flags & 1), ts, b[27:]) if flags & 2 else (channel, bool(flags & 1), ts, b[11:])
@@ -132,7 +140,7 @@ async def main():
         url = "ws://127.0.0.1:%d" % server.sockets[0].getsockname()[1]
         state = os.path.join(TMP, "A.state.json")   # where A keeps whether it is away
         a_flags = ("--origins", "http://room.test", "--state-file", state)
-        (pa, ta), (pb, tb) = await start_client("A", 7411, url, *a_flags), await start_client("B", 7412, url, binary=BIN_B)
+        (pa, ta), (pb, tb) = await start_client("A", 7411, url, *a_flags, binary=BIN_A), await start_client("B", 7412, url, binary=BIN_B)
 
         print("\npage connection")
         bad = await Page(7411, ta).open(token="0" * 64)
@@ -148,7 +156,7 @@ async def main():
             check("A takes pages only from its --origins", "403" in str(e), True)
         a, b = await Page(7411, ta).open(), await Page(7412, tb).open()
         ra, rb = await a.expect("ready"), await b.expect("ready")
-        check("ready: the version, limits, no visits, not away", (ra["version"], ra["limits"]["fps"], ra["visits"], ra["away"]), (VERSION, 60, [], False))
+        check("ready: the version, limits, no visits, not away", (ra["version"] if not OLD_A else VERSION, ra["limits"]["fps"], ra["visits"], ra["away"]), (VERSION, 60, [], False))
         both = lambda m: m["type"] == "lobby" and sum(o["ready"] for o in m["offices"]) == 2
         lob = await a.until(both)
         await b.until(both)
@@ -192,7 +200,7 @@ async def main():
         await b.send(type="input", forward=1, strafe=-1, run=True, yaw=0.5, pitch=9, t=12345.5)
         i = await a.expect("input")
         check("B's input reaches A's page, clamped", (i["channel"], i["forward"], i["strafe"], i["run"], i["yaw"], i["pitch"]), (cha, 1, -1, True, 0.5, 1.4))
-        check("with B's time on it, for A's frames to carry back" if not OLD_B else "an older B sends no time: A's page gets 0", i["t"], 0.0 if OLD_B else 12345.5)
+        check("with B's time on it, for A's frames to carry back", i["t"], 12345.5)
         await a.drain()
         for _ in range(5):
             await b.send(type="keyframe", channel=chb)
@@ -204,8 +212,8 @@ async def main():
                 keys.append(m["channel"])
         check("B asking for a keyframe five times at once: A's page is asked once (they cost its machine)", keys, [cha])
         sa_stats = await a.until(lambda m: m["type"] == "link_stats", timeout=4)
-        sb_stats = {"channel": chb, "path": "direct", "rtt_ms": 0} if OLD_B else await b.until(lambda m: m["type"] == "link_stats", timeout=4)
-        check("both pages hear the link's path and round trip, about once a second: direct here" + (" (A's only: B is older)" if OLD_B else ""),
+        sb_stats = await b.until(lambda m: m["type"] == "link_stats", timeout=4)
+        check("both pages hear the link's path and round trip, about once a second: direct here",
               (sa_stats["channel"], sa_stats["path"], sb_stats["channel"], sb_stats["path"], 0 <= sb_stats["rtt_ms"] < 100), (cha, "direct", chb, "direct", True))
 
         print("\nhost to visitor: video")
@@ -236,13 +244,65 @@ async def main():
         meta = struct.pack(">dff", 4242.25, 0.5, -0.25)
         await a.ws.send(frame_meta(cha, False, 70_000, meta, b"with meta"))
         got = await asyncio.wait_for(b.frames.get(), 5)
-        if OLD_B:
-            check("a frame with meta reaches an older B without it (B's handshake did not ask), the chunk whole", (unframe(got)[3], meta_of(got)), (b"with meta", None))
-        else:
-            check("a frame with meta (the input it shows, the look it was drawn at) reaches B whole",
-                  (unframe(got)[3], meta_of(got) and struct.unpack(">dff", meta_of(got))), (b"with meta", (4242.25, 0.5, -0.25)))
+        check("a frame with meta (the input it shows, the look it was drawn at) reaches B whole",
+              (unframe(got)[3], meta_of(got) and struct.unpack(">dff", meta_of(got))), (b"with meta", (4242.25, 0.5, -0.25)))
         bitrate = await a.until(lambda m: m["type"] == "bitrate", timeout=4)
         check("A's page is told a bitrate for the visit", (bitrate["channel"], 300_000 <= bitrate["bps"] <= 6_000_000), (cha, True))
+
+        print("\nscenes")
+        await a.drain()
+        await b.drain()
+        await b.send(type="scenes", three=["128", "170"])
+        if OLD_B:
+            check("an older B does not know `scenes`: refused, there and then (and A hears nothing: video it is)", (await b.expect("error"))["code"], "unknown_type")
+        elif OLD_A:
+            await asyncio.sleep(1)
+            heard = []
+            while not a.texts.empty():
+                m = a.texts.get_nowait()
+                if m:
+                    heard.append(m["type"])
+            check("an older A's page never hears `scenes` (video it is)", "scenes" in heard, False)
+        else:
+            sc = await a.expect("scenes")
+            check("A's page hears which three.js revisions B draws, on A's channel", (sc["channel"], sc["three"]), (cha, ["128", "170"]))
+            await b.send(type="scenes", three=["r128"])
+            check("a revision that is not digits: refused", (await b.expect("error"))["code"], "bad_message")
+            whole = {"type": "scene", "three": "128", "json": {"metadata": {"version": 4.5}, "object": {"type": "Scene", "uuid": "u-1"}}, "ids": [["u-1", 1]]}
+            edits = [whole] + [{"type": "edit", "props": [{"uuid": "m", "opacity": n / 10}]} for n in range(5)]
+            for e in edits:
+                await a.ws.send(scene_edit(cha, e))
+            got = [await b.expect("scene") for _ in edits]
+            check("A's scene and its edits reach B's page whole, in order, on B's channel (gzipped on the way, unpacked for the page)",
+                  [(g["channel"], g["edit"]) for g in got], [(chb, e) for e in edits])
+            big = {"type": "edit", "blob": secrets.token_hex(750_000)}
+            await a.ws.send(scene_edit(cha, big))
+            check("a 1.5 MB edit (a big room's whole scene) arrives whole", (await b.expect("scene", timeout=20))["edit"] == big, True)
+            bomb = gzip.compress(b" " * (65 << 20))
+            await a.ws.send(scene_edit(cha, None, raw=bomb))
+            check("a zip bomb (%d KB that would unpack to 65 MB): dropped, and B's page told the scene is lost" % (len(bomb) // 1024),
+                  (await b.expect("scene_lost", timeout=20))["channel"], chb)
+            for raw in (gzip.compress(b'{"type": "edit", '), gzip.compress(b"[1, 2]"), b"not gzip at all"):
+                await a.ws.send(scene_edit(cha, None, raw=raw))
+                await b.expect("scene_lost")
+            check("cut-short JSON, an array, not gzip: each dropped, scene_lost", True, True)
+            await a.ws.send(scene_edit(cha, {"type": "edit", "after": True}))
+            check("and the next edit after them still arrives", (await b.expect("scene"))["edit"], {"type": "edit", "after": True})
+            await a.ws.send(struct.pack(">HBQ", cha, 8 | 1, 300_000) + b"a key delta")
+            got = await asyncio.wait_for(b.frames.get(), 5)
+            check("a scene delta travels as a frame does, its flags kept (delta, key)", (got[2], got[11:]), (9, b"a key delta"))
+            for _ in range(3):
+                await b.send(type="scene_resync", channel=chb)
+            await asyncio.sleep(0.4)
+            asked = []
+            while not a.texts.empty():
+                m = a.texts.get_nowait()
+                if m and m["type"] == "scene_resync":
+                    asked.append(m["channel"])
+            check("B asking for the whole scene three times at once: A's page is asked once", asked, [cha])
+            await a.ws.send(scene_edit(9999, {"type": "edit"}))
+            await b.send(type="scene_resync", channel=9999)
+            check("an edit for no visit is dropped; a resync for none is refused", (await b.expect("error"))["code"], "no_such_visit")
 
         print("\nreloads")
         await a.send(type="pose", channel=cha, state={"pose": {"x": 1.5, "z": 2}, "yaw0": 0})
@@ -253,6 +313,8 @@ async def main():
         ra = await a.expect("ready")
         check("A's page back: ready lists the visit", [(v["id"], v["role"], v["channel"]) for v in ra["visits"]], [(vid, "host", cha)])
         check("with where B stood, as A's page last said", ra["visits"][0].get("state"), {"pose": {"x": 1.5, "z": 2}, "yaw0": 0})
+        if not OLD_B and not OLD_A:
+            check("which scenes B draws again, first (A's page decides on them before video)", (await a.expect("scenes"))["three"], ["128", "170"])
         d2, vp2 = await a.expect("decoders"), await a.expect("viewport")
         check("and what B decodes and its view size again, to encode for", (d2["codecs"], vp2["width"]), (["avc1.42E01F", "vp8"], 1600))
         check("and B hears its host resumed", (await b.expect("host_resumed"))["channel"], chb)
@@ -317,7 +379,7 @@ async def main():
         a = a2
         pa.terminate()
         await asyncio.wait_for(pa.wait(), 5)
-        pa, ta = await start_client("A", 7411, url, *a_flags)
+        pa, ta = await start_client("A", 7411, url, *a_flags, binary=BIN_A)
         a = await Page(7411, ta).open()
         ra = await a.expect("ready")
         await asyncio.sleep(1.5)

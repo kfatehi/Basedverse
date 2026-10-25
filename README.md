@@ -3,7 +3,8 @@
 Everyone builds their own workroom (an agent-office sim, in their own engine), and basedverse is what
 they share: a lobby to meet in, and **Visit**, to walk around each other's rooms with WASD and the mouse.
 Nothing about a room is shared but the video of it, so what everyone agrees on is a thin interface: three
-hooks a host implements, and two pieces everyone drops in unchanged.
+hooks a host implements, and two pieces everyone drops in unchanged. A room made with three.js can share its
+scene instead: the visitor's browser draws the room itself, so walking in it is as quick as in your own.
 
 | | |
 |---|---|
@@ -58,7 +59,7 @@ tag the changelog has no entry for is not released).
 | `python3 lobby/server/test_lobby.py`, `python3 lobby/server/test_lobby2.py` | the lobby, versions 1 and 2 (they need `websockets`: `lobby/server/requirements.txt`) |
 | `visit/client/cargo test` | visit-client's unit tests, in Docker |
 | `visit/client/tests/run-e2e.sh` | the lobby, two visit-clients and two stand-in pages, in Docker |
-| `visit/client/tests/run-browser.sh` | visit.js in two headless Chromes on this machine (it needs `google-chrome`) |
+| `visit/client/tests/run-browser.sh` | visit.js in two headless Chromes on this machine (it needs `google-chrome`): video, and a three.js room's scene |
 | `visit/client/tests/perf/run-perf.sh` | visits through simulated networks (delay, jitter, loss, rate caps; several visitors), each in its own container: input to frame, frame rate, stalls, against targets |
 
 ## License

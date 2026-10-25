@@ -9,6 +9,55 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.4.0 — 2026-10-25
+
+**A three.js room sends its scene, not video, and the visitor's browser draws it.** Video asks the host's
+browser to render and encode every visitor's view, and a real visit showed what that costs: a host whose
+Chrome is busy (its GPU process overloaded, as on a 4K screen) passed frames to the encoder hundreds of ms
+late. Now a room made with three.js gives Visit its scene: the visitor's page fetches that very three.js
+release (checked against its hash), draws the room itself, and walks and looks around at once, corrected by
+the host. The host sends the scene once, then only what changes; it renders and encodes nothing for that
+visitor. Rooms in other engines, and visitors on older versions, keep video. Protocol names: unchanged
+(additions only); 0.3 and 0.4 rooms still visit each other, by video.
+
+Measured on one machine, a busy three.js room (466 objects) visited this way:
+
+| | video (0.3) | scene (0.4) |
+|---|---|---|
+| visitor's input to screen | the round trip, plus the host's render and encode | one frame of its own (5 ms) |
+| what crosses the link while walking | 1–6 Mbit/s | 0.13 Mbit/s |
+| the host's work per visitor | a render and an encode, up to 60 a second | reading its scene for changes: 0.35 ms, 30 a second |
+| from knock to the room on screen | a keyframe | 1.2 s (the whole scene, and three.js the first time) |
+
+### What changed
+
+- visit.js: `v.host({ ..., scene: { root, three, renderer, near, far }, walk: { speed } })`; scenes drawn in
+  the visitor's view (the stage says **drawn here**); `v.stats.mode`; `Visit.connect({ scenes, threeBase })`;
+  a host's scene checked before three.js reads it (no shaders, images only as data URLs of a sane size,
+  bounded geometry); a visitor's body marked `userData.visitor` left out of its own eyes.
+- visit-client: the page messages `scenes` and `scene_resync`, and `scene`, `scene_lost`, `scene_resync` to
+  the page; scene edits (gzipped JSON) on a link stream of their own, unpacked with a limit (a zip bomb stops
+  at 64 MiB) and checked before the page sees them; scene deltas on the video path; typed link streams
+  (`streams: 2` in the handshake).
+- [visit/SPEC.md](visit/SPEC.md) sections 5, 7.1, 7.2, 7.4, 8.3 (new), 9, 10; [visit/INTEGRATING.md](visit/INTEGRATING.md)
+  step 5 ("three.js rooms"), step 6, the checklist, troubleshooting.
+
+### What an integration does
+
+1. Get visit-client 0.4.0 (`bin/setup` again, download; or this release).
+2. If your room is made with three.js: in `visit.host({ ... })`, add `scene: { root: scene, three: THREE,
+   renderer, near, far }` (your scene, the THREE it was made with, your renderer, your visitor camera's
+   near and far), and `walk: { speed }` if your `move` is `Visit.walk` at that speed. If you draw your
+   visitors in your room, mark each body `userData.visitor = entry.id` (its entry in `visit.visitors`). Keep
+   `render`: visitors on older versions still get video. Anything under `root` is shared: keep what your
+   user would not show a guest outside it. ([visit/INTEGRATING.md](visit/INTEGRATING.md), step 5, "three.js
+   rooms".)
+3. If your page has a Content-Security-Policy: allow `connect-src https://cdn.jsdelivr.net` and
+   `script-src blob:`, so it can draw three.js hosts' scenes when visiting (step 6).
+4. Check: visit your room from a second workroom: the stage says **drawn here**, walking is instant, your
+   room's moving things move, and the visitor does not see its own body. A room not made with three.js does
+   only step 1 (and 3): it sends video as before, and draws three.js hosts' scenes when it visits them.
+
 ## v0.3.2 — 2026-10-25
 
 **A busy encoder counts as a busy host.** A host steps its visitors' picture down (then their frame rate)

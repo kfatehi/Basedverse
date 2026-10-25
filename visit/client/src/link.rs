@@ -1,13 +1,15 @@
 //! The links between visit-clients (../SPEC.md section 7): one QUIC connection per visit, made with iroh.
 //! The visitor dials and proves the visit with its ticket; the host admits it only if the ticket matches
 //! and the dialler is the endpoint the lobby named. A link that drops is redialled for a grace period.
-//! Inputs travel as datagrams, video as one stream per group of pictures, everything else on the control
-//! stream. Video is newest-wins, as in cloud gaming: a link that falls behind drops frames (and starts again
-//! from a keyframe) rather than queue them, and a newer group of pictures cuts off the older's rest.
+//! Inputs travel as datagrams, video (or a scene's deltas) as one stream per group of pictures, a scene's
+//! edits on a stream of their own, everything else on the control stream. Video is newest-wins, as in cloud
+//! gaming: a link that falls behind drops frames (and starts again from a keyframe) rather than queue them, and
+//! a newer group of pictures cuts off the older's rest. A scene's edits are never dropped one by one: a link
+//! too far behind drops them all, and the host's page sends its whole scene again.
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         Arc, Mutex,
     },
     time::Duration,
@@ -41,6 +43,16 @@ const SEND_WINDOW: u64 = 64 * 1024;
 /// A frame this much older than the newest one waiting behind it is stale: the link is behind (microseconds,
 /// of the frames' own timestamps). A few frames handed over at once, as an encoder does, are not.
 const BEHIND_US: u64 = 100_000;
+/// What a link's streams start with, once both sides said `streams: 2` in the handshake (visit-client 0.4 and
+/// later): a group of pictures (or of scene deltas), or a scene's edits.
+const STREAM_VIDEO: u8 = 0;
+const STREAM_SCENE: u8 = 1;
+/// The most of a scene's edits (gzipped) that may wait to go: past it, a link is far slower than the room
+/// changes, and what waits is dropped (the host's page then sends the whole scene again).
+const SCENE_QUEUE: usize = 32 << 20;
+/// The most a visitor takes from a host's scene a second, unpacked: past it, edits are dropped, and the page
+/// asks for the whole scene again (once things are calmer).
+const SCENE_PER_SECOND: usize = 64 << 20;
 
 /// What the core tells one visit's link.
 pub enum LinkCmd {
@@ -48,8 +60,10 @@ pub enum LinkCmd {
     Ctl(Value),
     /// The visitor's input (sent as a datagram).
     Input(Value),
-    /// An encoded frame of the host's view.
+    /// An encoded frame of the host's view, or a delta of its scene.
     Frame(Frame),
+    /// An edit of the host's scene, gzipped JSON (../SPEC.md section 8.3).
+    Scene(Bytes),
     /// End the link, saying why.
     Close(String),
 }
@@ -74,6 +88,8 @@ pub struct Established {
     recv: RecvStream,
     /// The other side reads frames' meta (its handshake said `frame_meta`; visit-client 0.3 and later).
     meta: bool,
+    /// Both sides said `streams: 2`: each stream starts with what it is (STREAM_VIDEO, STREAM_SCENE).
+    typed: bool,
 }
 
 /// A visit a host is waiting to be dialled for.
@@ -188,9 +204,10 @@ async fn admit(incoming: Incoming, expected: Ledger) -> Result<()> {
             }
         }
     };
-    frames::write_msg(&mut send, &json!({ "ok": true })).await?;
+    frames::write_msg(&mut send, &json!({ "ok": true, "streams": 2 })).await?;
     let meta = hello.get("frame_meta").and_then(Value::as_bool).unwrap_or(false);
-    tx.send(Established { conn, send, recv, meta }).await.map_err(|_| anyhow!("visit {visit} is over"))
+    let typed = hello.get("streams").and_then(Value::as_u64) == Some(2);
+    tx.send(Established { conn, send, recv, meta, typed }).await.map_err(|_| anyhow!("visit {visit} is over"))
 }
 
 /// The host turned the link down (code 1): its visit, ticket or endpoint did not match. Redialling is no use.
@@ -208,7 +225,7 @@ impl std::error::Error for Refused {}
 async fn dial(ep: &Endpoint, addr: &EndpointAddr, visit: &str, ticket: &str) -> Result<Established> {
     let conn = ep.connect(addr.clone(), ALPN).await?;
     let (mut send, mut recv) = conn.open_bi().await?;
-    frames::write_msg(&mut send, &json!({ "proto": "basedverse-visit/1", "visit": visit, "ticket": ticket, "frame_meta": true })).await?;
+    frames::write_msg(&mut send, &json!({ "proto": "basedverse-visit/1", "visit": visit, "ticket": ticket, "frame_meta": true, "streams": 2 })).await?;
     let ok = tokio::time::timeout(HANDSHAKE, frames::read_msg(&mut recv)).await.ok().and_then(Result::ok).flatten();
     if ok.as_ref().and_then(|v| v.get("ok")).and_then(Value::as_bool) != Some(true) {
         if matches!(conn.close_reason(), Some(ConnectionError::ApplicationClosed(c)) if c.error_code.into_inner() == 1) {
@@ -216,7 +233,8 @@ async fn dial(ep: &Endpoint, addr: &EndpointAddr, visit: &str, ticket: &str) -> 
         }
         bail!("the host did not answer the handshake");
     }
-    Ok(Established { conn, send, recv, meta: false })   // the host sends the video: whether it reads meta is moot
+    let typed = ok.as_ref().and_then(|v| v.get("streams")).and_then(Value::as_u64) == Some(2);
+    Ok(Established { conn, send, recv, meta: false, typed })   // the host sends the video: whether it reads meta is moot
 }
 
 /// Waits for a Close from the core (or for the core to drop the link), discarding anything else: what is
@@ -332,21 +350,27 @@ async fn next_arrival(arrivals: &mut Option<&mut mpsc::Receiver<Established>>) -
 
 /// One connection of a visit's link, until it ends.
 async fn run(role: Role, visit: &str, est: Established, cmds: &mut mpsc::Receiver<LinkCmd>, core: &mpsc::UnboundedSender<Ev>, mut arrivals: Option<&mut mpsc::Receiver<Established>>) -> Ended {
-    let Established { conn, mut send, recv, meta } = est;
+    let Established { conn, mut send, recv, meta, typed } = est;
     let (ctl_tx, mut ctl_rx) = mpsc::channel::<Value>(64);
     let mut tasks: Vec<JoinHandle<()>> = vec![tokio::spawn(read_ctl(recv, ctl_tx))];
     let (need_key, newest) = (Arc::new(AtomicBool::new(true)), Arc::new(AtomicU64::new(0)));
     let video = match role {
         Role::Host => {
             let (tx, rx) = mpsc::channel::<Frame>(32);
-            tasks.push(tokio::spawn(write_video(conn.clone(), rx, need_key.clone(), newest.clone(), meta, visit.to_string(), core.clone())));
+            tasks.push(tokio::spawn(write_video(conn.clone(), rx, need_key.clone(), newest.clone(), meta, typed, visit.to_string(), core.clone())));
             Some(tx)
         }
         Role::Visitor => {
-            tasks.push(tokio::spawn(read_video(conn.clone(), visit.to_string(), core.clone())));
+            tasks.push(tokio::spawn(read_streams(conn.clone(), typed, visit.to_string(), core.clone())));
             None
         }
     };
+    let scene = (role == Role::Host).then(|| {
+        let (tx, rx) = mpsc::unbounded_channel::<(u64, Bytes)>();
+        let q = Arc::new(SceneQueue { bytes: AtomicUsize::new(0), gen: AtomicU64::new(0) });
+        tasks.push(tokio::spawn(write_scene(conn.clone(), rx, q.clone(), typed, visit.to_string(), core.clone())));
+        (tx, q)
+    });
     let (mut bitrate, mut tick, mut path) = (Bitrate::new(), tokio::time::interval(Bitrate::EVERY), None::<bool>);
     let mut stats_at = Instant::now();
     let ended = loop {
@@ -369,6 +393,16 @@ async fn run(role: Role, visit: &str, est: Established, cmds: &mut mpsc::Receive
                     // The writer cannot keep up: drop frames until the next keyframe, and ask for one.
                     if tx.try_send(f).is_err() && !need_key.swap(true, Ordering::SeqCst) {
                         let _ = core.send(Ev::WantKey { visit: visit.to_string() });
+                    }
+                },
+                Some(LinkCmd::Scene(gz)) => if let Some((tx, q)) = &scene {
+                    if q.bytes.load(Ordering::SeqCst) + gz.len() > SCENE_QUEUE {
+                        warn!(%visit, "the link is far behind the room's changes: sending the whole scene again");
+                        q.gen.fetch_add(1, Ordering::SeqCst);   // what waits is stale: the writer drops it
+                        let _ = core.send(Ev::SceneResync { visit: visit.to_string() });
+                    } else {
+                        q.bytes.fetch_add(gz.len(), Ordering::SeqCst);
+                        let _ = tx.send((q.gen.load(Ordering::SeqCst), gz));
                     }
                 },
                 Some(LinkCmd::Close(why)) => {
@@ -421,7 +455,7 @@ async fn read_ctl(mut recv: RecvStream, tx: mpsc::Sender<Value>) {
 /// The host's side of the video: each keyframe starts a new stream, cutting off what is left of the older
 /// one (reset, not finished: its unsent frames are stale). A frame BEHIND_US older than the newest one
 /// waiting means the link is behind: the rest of that group is dropped, and the page asked for a keyframe.
-async fn write_video(conn: Connection, mut rx: mpsc::Receiver<Frame>, need_key: Arc<AtomicBool>, newest: Arc<AtomicU64>, meta: bool, visit: String, core: mpsc::UnboundedSender<Ev>) {
+async fn write_video(conn: Connection, mut rx: mpsc::Receiver<Frame>, need_key: Arc<AtomicBool>, newest: Arc<AtomicU64>, meta: bool, typed: bool, visit: String, core: mpsc::UnboundedSender<Ev>) {
     let mut cur: Option<SendStream> = None;
     while let Some(f) = rx.recv().await {
         if f.key {
@@ -429,10 +463,10 @@ async fn write_video(conn: Connection, mut rx: mpsc::Receiver<Frame>, need_key: 
                 let _ = old.reset(VarInt::from_u32(0));
             }
             match conn.open_uni().await {
-                Ok(s) => cur = Some(s),
+                Ok(mut s) => cur = (!typed || s.write_all(&[STREAM_VIDEO]).await.is_ok()).then_some(s),
                 Err(e) => return debug!("cannot open a video stream: {e}"),
             }
-            need_key.store(false, Ordering::SeqCst);
+            need_key.store(cur.is_none(), Ordering::SeqCst);
         } else if need_key.load(Ordering::SeqCst) {
             continue;
         } else if newest.load(Ordering::SeqCst).saturating_sub(f.ts) > BEHIND_US {
@@ -452,33 +486,130 @@ async fn write_video(conn: Connection, mut rx: mpsc::Receiver<Frame>, need_key: 
     }
 }
 
-/// The visitor's side of the video: streams in the order they started; a newer one abandons the older
-/// (dropping its reader stops it), so a stalled group of pictures is never waited for.
-async fn read_video(conn: Connection, visit: String, core: mpsc::UnboundedSender<Ev>) {
-    let mut reader: Option<JoinHandle<()>> = None;
-    while let Ok(mut stream) = conn.accept_uni().await {
-        if let Some(old) = reader.take() {
-            old.abort();
-        }
-        let (core, visit) = (core.clone(), visit.clone());
-        debug!(%visit, "a new group of pictures");
-        reader = Some(tokio::spawn(async move {
-            loop {
-                match frames::read_link_frame(&mut stream).await {
-                    Ok(Some(frame)) => {
-                        trace!(%visit, key = frame.key, ts = frame.ts, len = frame.data.len(), "frame in");
-                        if core.send(Ev::LinkFrame { visit: visit.clone(), frame }).is_err() {
-                            return;
-                        }
+/// A visit's scene edits waiting to go: their bytes, and which round of the scene they belong to (a new one
+/// starts when the link falls too far behind: what waits from the old one is dropped).
+struct SceneQueue {
+    bytes: AtomicUsize,
+    gen: AtomicU64,
+}
+
+/// The host's side of a scene: its edits in order on one stream of their own (reliable: each builds on the
+/// last), opened with the first. A stream that fails, or a round dropped, has the host's page send its whole
+/// scene again.
+async fn write_scene(conn: Connection, mut rx: mpsc::UnboundedReceiver<(u64, Bytes)>, q: Arc<SceneQueue>, typed: bool, visit: String, core: mpsc::UnboundedSender<Ev>) {
+    let mut cur: Option<SendStream> = None;
+    while let Some((gen, gz)) = rx.recv().await {
+        if gen == q.gen.load(Ordering::SeqCst) {
+            if !typed {
+                warn!(%visit, "a scene for a visitor that cannot take one: dropped");
+            } else {
+                if cur.is_none() {
+                    match conn.open_uni().await {
+                        Ok(mut s) => cur = s.write_all(&[STREAM_SCENE]).await.is_ok().then_some(s),
+                        Err(e) => return debug!("cannot open the scene stream: {e}"),
                     }
-                    Ok(None) => return,
-                    Err(e) => return debug!(%visit, "a video stream broke off: {e:#}"),
+                }
+                let ok = match cur.as_mut() {
+                    Some(s) => frames::write_scene_msg(s, &gz).await.is_ok(),
+                    None => false,
+                };
+                if !ok {
+                    debug!(%visit, "the scene stream failed: the page sends the scene again");
+                    cur = None;
+                    q.gen.fetch_add(1, Ordering::SeqCst);
+                    let _ = core.send(Ev::SceneResync { visit: visit.clone() });
                 }
             }
-        }));
+        }
+        q.bytes.fetch_sub(gz.len(), Ordering::SeqCst);
     }
-    if let Some(old) = reader {
-        old.abort();
+}
+
+/// The visitor's side: each stream the host opens is a group of pictures (or of scene deltas), or its scene's
+/// edits (with typed streams its first byte says which; without, every stream is video). A newer group of
+/// pictures abandons the older (its reader stopped), so a stalled one is never waited for.
+async fn read_streams(conn: Connection, typed: bool, visit: String, core: mpsc::UnboundedSender<Ev>) {
+    let (mut video, mut scene): (Option<JoinHandle<()>>, Option<JoinHandle<()>>) = (None, None);
+    while let Ok(mut stream) = conn.accept_uni().await {
+        let mut kind = [STREAM_VIDEO];
+        if typed && !matches!(tokio::time::timeout(HANDSHAKE, stream.read_exact(&mut kind)).await, Ok(Ok(()))) {
+            continue;
+        }
+        let (core, visit) = (core.clone(), visit.clone());
+        match kind[0] {
+            STREAM_VIDEO => {
+                debug!(%visit, "a new group of pictures");
+                if let Some(old) = video.replace(tokio::spawn(read_video(stream, visit, core))) {
+                    old.abort();
+                }
+            }
+            STREAM_SCENE => {
+                if let Some(old) = scene.replace(tokio::spawn(read_scene(stream, visit, core))) {
+                    old.abort();
+                }
+            }
+            other => debug!(%visit, other, "a stream of a kind this version does not know: ignored"),
+        }
+    }
+    for t in [video, scene].into_iter().flatten() {
+        t.abort();
+    }
+}
+
+async fn read_video(mut stream: RecvStream, visit: String, core: mpsc::UnboundedSender<Ev>) {
+    loop {
+        match frames::read_link_frame(&mut stream).await {
+            Ok(Some(frame)) => {
+                trace!(%visit, key = frame.key, delta = frame.delta, ts = frame.ts, len = frame.data.len(), "frame in");
+                if core.send(Ev::LinkFrame { visit: visit.clone(), frame }).is_err() {
+                    return;
+                }
+            }
+            Ok(None) => return,
+            Err(e) => return debug!(%visit, "a video stream broke off: {e:#}"),
+        }
+    }
+}
+
+/// A scene's edits, each unpacked and checked (frames::unpack_scene) off the async threads, then passed to
+/// the page; one that fails the checks, or past SCENE_PER_SECOND, is dropped and the page told (it then asks
+/// for the whole scene again).
+async fn read_scene(mut stream: RecvStream, visit: String, core: mpsc::UnboundedSender<Ev>) {
+    let mut second = (Instant::now(), 0usize);
+    loop {
+        let gz = match frames::read_scene_msg(&mut stream).await {
+            Ok(Some(gz)) => gz,
+            Ok(None) => return,
+            Err(e) => {
+                warn!(%visit, "the scene stream broke off: {e:#}");
+                let _ = core.send(Ev::SceneLost { visit });
+                return;
+            }
+        };
+        let json = match tokio::task::spawn_blocking(move || frames::unpack_scene(&gz)).await {
+            Ok(Ok(json)) => String::from_utf8(json).map_err(|_| anyhow!("not UTF-8")),
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(anyhow!("{e}")),
+        };
+        if second.0.elapsed() >= Duration::from_secs(1) {
+            second = (Instant::now(), 0);
+        }
+        match json {
+            Ok(json) if second.1 + json.len() <= SCENE_PER_SECOND => {
+                second.1 += json.len();
+                if core.send(Ev::LinkScene { visit: visit.clone(), json }).is_err() {
+                    return;
+                }
+            }
+            Ok(json) => {
+                warn!(%visit, len = json.len(), "the host sends more of its scene than a visitor takes a second: dropped");
+                let _ = core.send(Ev::SceneLost { visit: visit.clone() });
+            }
+            Err(e) => {
+                warn!(%visit, "a scene edit that is not what it should be: {e:#}");
+                let _ = core.send(Ev::SceneLost { visit: visit.clone() });
+            }
+        }
     }
 }
 

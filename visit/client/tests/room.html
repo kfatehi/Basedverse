@@ -7,14 +7,17 @@
 <style>
 /* A workroom to test visit.js with: its room is a floor plan (walls, a desk), drawn from above, with
    each visitor an arrow where it stands and looks. The page gets its visit-client's port and token from
-   the URL fragment (#port=7401&token=...), one of INTEGRATING.md's ways. */
+   the URL fragment (#port=7401&token=...), one of INTEGRATING.md's ways. ?three=1 makes the same room in
+   three.js (r128), and shares its scene with visitors whose page draws scenes (SPEC 8.3); ?scenes=0 makes
+   this page draw none (video only, as a visitor). */
 html, body { height: 100%; margin: 0; background: #0d1117; color: #e6edf3; font: 13px system-ui, sans-serif; }
-#own { position: fixed; inset: 0; width: 100%; height: 100%; }
+#own, #own3 { position: fixed; inset: 0; width: 100%; height: 100%; }
 #panel { position: fixed; top: 12px; right: 12px; width: 320px; }
 </style>
 </head>
 <body>
 <canvas id="own"></canvas>
+<canvas id="own3" hidden></canvas>
 <div id="panel"></div>
 <script>
 "use strict";
@@ -64,6 +67,78 @@ function drawBusy(ctx, w, h, pose) {
   }
 }
 
+// ?three=1: the room in three.js, its scene shared with visitors whose page draws scenes. window.room has what a
+// test changes while a visitor looks: a spinning cube that circles the desk, a sign whose text it redraws, and
+// objects added and taken away.
+async function threeRoom(v) {
+  const THREE = await import("https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.module.js");
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x1d232b);
+  scene.fog = new THREE.Fog(0x1d232b, 12, 40);
+  const lambert = c => new THREE.MeshLambertMaterial({ color: c });
+  const box = (w, h, d, m, x, y, z) => { const o = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m); o.position.set(x, y, z); o.castShadow = o.receiveShadow = true; scene.add(o); return o; };
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(ROOM.w, ROOM.d), lambert(0x2b3138));
+  floor.rotation.x = -Math.PI / 2; floor.position.set(ROOM.w / 2, 0, ROOM.d / 2); floor.receiveShadow = true; scene.add(floor);
+  const wall = lambert(0x8b949e);
+  box(ROOM.w, 2.5, 0.1, wall, ROOM.w / 2, 1.25, 0); box(ROOM.w, 2.5, 0.1, wall, ROOM.w / 2, 1.25, ROOM.d);
+  box(0.1, 2.5, ROOM.d, wall, 0, 1.25, ROOM.d / 2); box(0.1, 2.5, ROOM.d, wall, ROOM.w, 1.25, ROOM.d / 2);
+  const desk = box(ROOM.desk.w, 0.75, ROOM.desk.d, lambert(0xb98b5e), ROOM.desk.x + ROOM.desk.w / 2, 0.375, ROOM.desk.z + ROOM.desk.d / 2);
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x8890a0, 0.7));
+  const sun = new THREE.DirectionalLight(0xffffff, 0.6);
+  sun.position.set(8, 10, 6); sun.target.position.set(5, 0, 4); scene.add(sun.target); sun.castShadow = true; scene.add(sun);
+  const spinner = box(0.4, 0.4, 0.4, lambert(0x3fb950), 5, 1.2, 3.6);
+  spinner.name = "spinner";
+  const signCanvas = document.createElement("canvas"); signCanvas.width = 256; signCanvas.height = 64;
+  const signTex = new THREE.CanvasTexture(signCanvas);
+  const sign = new THREE.Mesh(new THREE.PlaneGeometry(2, 0.5), new THREE.MeshBasicMaterial({ map: signTex }));
+  sign.position.set(ROOM.w / 2, 1.8, 0.06); scene.add(sign);
+  const write = text => { const x = signCanvas.getContext("2d"); x.fillStyle = "#0d1117"; x.fillRect(0, 0, 256, 64); x.fillStyle = "#e6edf3"; x.font = "28px sans-serif"; x.fillText(text, 12, 42); signTex.needsUpdate = true; };
+  write("test room");
+  // Visitors' bodies: each where it stands, marked as its own (userData.visitor), so its own eyes do not see it.
+  const bodies = new Map();
+  const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById("own3"), antialias: true });
+  renderer.shadowMap.enabled = true;
+  const top = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
+  top.position.set(ROOM.w / 2, 11, ROOM.d + 4); top.lookAt(ROOM.w / 2, 0, ROOM.d / 2);
+  document.getElementById("own").hidden = true; document.getElementById("own3").hidden = false;
+  window.room = { THREE, scene, spinner, sign, write, bodies, frozen: false,
+    add(name) { const o = box(0.3, 0.3, 0.3, lambert(0xe3b341), 2, 0.15, 2); o.name = name; return o.uuid; },
+    remove(name) { const o = scene.getObjectByName(name); if (o) scene.remove(o); },
+    shader() { const o = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, 0.3), new THREE.ShaderMaterial({ vertexShader: "void main(){gl_Position=vec4(0.);}", fragmentShader: "void main(){gl_FragColor=vec4(1.);}" })); o.name = "shader"; scene.add(o); return o.uuid; } };
+  (function frame(t) {
+    requestAnimationFrame(frame);
+    if (!window.room.frozen) {
+      const a = t / 1000;
+      spinner.position.set(5 + Math.cos(a) * 2.2, 1.2, 3.6 + Math.sin(a) * 1.6); spinner.rotation.y = a * 2;
+    }
+    const here = new Set();
+    for (const x of v.visitors) {
+      if (!x.pose) continue;
+      here.add(x.id);
+      let b = bodies.get(x.id);
+      if (!b) { b = new THREE.Mesh(new THREE.BoxGeometry(0.4, 1.7, 0.4), lambert(0x58a6ff)); b.userData.visitor = x.id; b.name = "body:" + x.visitor.name; scene.add(b); bodies.set(x.id, b); }
+      b.position.set(x.pose.x, 0.85, x.pose.z); b.rotation.y = x.pose.yaw;
+    }
+    for (const [id, b] of bodies) if (!here.has(id)) { scene.remove(b); bodies.delete(id); }
+    const c = renderer.domElement;
+    if (c.width !== c.clientWidth || c.height !== c.clientHeight) { renderer.setSize(c.clientWidth, c.clientHeight, false); top.aspect = c.clientWidth / c.clientHeight; top.updateProjectionMatrix(); }
+    renderer.render(scene, top);
+  })(0);
+  // For a visitor that draws no scenes: video, rendered by a second renderer from where it stands.
+  const eye = new THREE.WebGLRenderer({ antialias: true }), cam = new THREE.PerspectiveCamera(70, 16 / 9, 0.05, 100);
+  cam.rotation.order = "YXZ";
+  return {
+    THREE, scene, renderer,
+    render(pose, w, h) {
+      eye.setSize(w, h, false); cam.aspect = w / h; cam.updateProjectionMatrix();
+      cam.position.set(pose.x, pose.y, pose.z); cam.rotation.set(pose.pitch, pose.yaw, 0);
+      eye.render(scene, cam);
+      window.renders++;
+      return eye.domElement;
+    },
+  };
+}
+
 const own = document.getElementById("own"), ownCtx = own.getContext("2d");
 const visitCanvas = document.createElement("canvas"), visitCtx = visitCanvas.getContext("2d");
 window.renders = 0;
@@ -79,7 +154,21 @@ window.renders = 0;
   const { port, token } = JSON.parse(sessionStorage.getItem("visit") || "{}");
   await new Promise((ok, fail) => { const s = document.createElement("script"); s.src = `http://127.0.0.1:${port}/visit.js`; s.onload = ok;
     s.onerror = () => fail(new Error(`visit-client is not running on 127.0.0.1:${port}`)); document.head.appendChild(s); });
-  const v = window.v = await Visit.connect({ port, token, sim: { name: "test-room", version: "1" } });
+  const v = window.v = await Visit.connect({ port, token, sim: { name: "test-room", version: "1" }, scenes: OPTS.get("scenes") !== "0" });
+  if (OPTS.get("three")) {
+    const t = await threeRoom(v);
+    v.host({
+      spawn: () => ({ x: 2, y: 1.6, z: 6, yaw: 0, pitch: 0 }),
+      move: (pose, input, dt) => Visit.walk(pose, input, dt, { speed: 2.5, blocked }),
+      render: t.render,
+      fov: 70,
+      scene: { root: t.scene, three: t.THREE, renderer: t.renderer, near: 0.05, far: 100 },
+      walk: { speed: 2.5 },   // as move() walks: the visitor's page walks at once, before the answer
+    });
+    Visit.panel(document.getElementById("panel"), v);
+    Visit.stage(v);
+    return;
+  }
   v.host({
     spawn: () => ({ x: 2, y: 1.6, z: 6, yaw: 0, pitch: 0 }),
     move: (pose, input, dt) => Visit.walk(pose, input, dt, { speed: 2.5, blocked }),

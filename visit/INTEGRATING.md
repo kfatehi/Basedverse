@@ -305,6 +305,46 @@ visible canvas.
 **Check (once step 6 works, from a second workroom):** a visitor sees your room from your spawn point,
 walks with WASD, stops at your walls, and looks around with the mouse.
 
+### three.js rooms: send your scene instead
+
+If your room is made with three.js, give `visit.host` your scene as well. Visitors whose page draws scenes
+(visit.js 0.4 or later, with WebGL 2) then get your scene instead of video, and their browser draws your room
+itself. They walk and look around as quickly as in their own room, your machine renders and encodes nothing
+for them, and the link carries a tenth of the data or less. Visitors on older versions, or without WebGL 2,
+still get video from `render`, so keep it.
+
+```js
+visit.host({
+  spawn, move, render, fov: 70,
+  // your scene, the THREE you made it with, your renderer, and your visitor camera's near and far
+  scene: { root: scene, three: THREE, renderer, near: 0.05, far: 500 },
+  // the speed your move() gives Visit.walk: a visitor's page walks at once, and your move() corrects it
+  walk: { speed: 2.5 },
+});
+```
+
+- **`root`**: your `THREE.Scene` (its background and fog come along), or a `Group` holding the part to share.
+  Everything under it is sent to visitors: keep anything your user would not show a guest outside it.
+- **`three`**: the namespace your scene was made with (`THREE`, or what `import * as THREE` gave you). Its
+  revision (`THREE.REVISION`) picks the three.js the visitor draws with: the same release, r125 to r186.
+- **`renderer`**: your own renderer, for its settings (shadows, tone mapping, colour space): the visitor's
+  matches them.
+- **`walk`**, only if your `move` walks with `Visit.walk` at that speed (with `blocked` or not). Without it,
+  visitors still look around at once, but walking waits for your answer.
+- **Visitors' bodies**: if you draw your visitors in your room, mark each one with
+  `body.userData.visitor = entry.id` (the `id` of its entry in `visit.visitors`), so a visitor's own eyes do
+  not see it from inside.
+- **What carries**: objects moving, appearing and going, materials' colours and opacity, canvas textures you
+  redraw (`texture.needsUpdate = true`), the background and the fog. **What does not**: custom shaders (a
+  `ShaderMaterial` is code: it arrives plain grey), HTML overlays, post-processing (an `EffectComposer`), and
+  anything you draw outside the scene.
+- **What it costs you**: well under 1 ms of your page's time 30 times a second (Visit reads the scene for
+  changes), and the whole scene once as each visitor starts (`toJSON`: some tens of ms for a room of a few
+  hundred objects).
+
+**Check:** visiting your room from a second workroom, its stage says **drawn here**; walking and turning
+are instant; your room's moving things move in the visitor's view; the visitor does not see its own body.
+
 ## Step 6 — Be a visitor: show the room you are in
 
 The quickest way: the ready-made stage, once, right after `connect`:
@@ -335,6 +375,12 @@ captures the keyboard and mouse; `view.setActive(false)` stops it capturing (a p
 `view.release()` takes it away. Show it when `visit.visiting` becomes true (and at once after a reload, if
 already visiting), give your user a way to leave (`visit.leave()`), and show `visit.stats` if you can:
 it is what to look at when a visit feels slow.
+
+A three.js host's scene (step 5) is drawn by your page itself, in the same view: nothing for you to do. It
+fetches that release of three.js from cdn.jsdelivr.net (checked against its hash) and runs it from a `blob:`
+URL, so a Content-Security-Policy on your page needs `connect-src https://cdn.jsdelivr.net` and
+`script-src blob:` for it (or pass `threeBase` to `connect`, to serve those same files yourself). Pass
+`scenes: false` to `connect` to take video only.
 
 **Check:** with a host to visit (step 8), its room fills the window; WASD and the mouse move you in it,
 and turning is instant; Back to my room shrinks it to the corner and gives your room its keys back.
@@ -409,6 +455,8 @@ Then, in order:
       mouse work; Esc frees the pointer; there is a way to leave, and back to your room; your own keys wait
       while `visit.viewFocused`.
 - [ ] `fov` is given in `visit.host` (for a first-person `render`), so turning is instant.
+- [ ] A three.js room gives `scene` (and `walk`, if `move` is `Visit.walk`) in `visit.host`, marks its
+      visitors' bodies `userData.visitor`, and keeps nothing private under `root`.
 - [ ] The lobby: offices, knocks, answers, visitors (kick), your visit (leave), status and max visitors
       all work, with the knock rules of step 7; names and messages are escaped.
 - [ ] Your user can go offline and back (the panel, or `leaveLobby()` / `joinLobby()`), and stays offline
@@ -432,6 +480,10 @@ Then, in order:
 | the visitor sees a black or frozen view | `render` returned a canvas that was not drawn (cleared, or a different canvas), or threw (see the console) |
 | visitors walk through walls | your `blocked` does not cover them, or your `move` ignores it |
 | a visit feels laggy | read the stage's numbers (`visit.stats`): `relay` means the two machines could not reach each other directly (a relay is slower and rate-limited); a high link round trip is the network; input to screen far above the round trip is the host: its `render` is slow (fewer effects for visitors), or its machine is busy. Turning should be instant either way: if it is not, the host gave no `fov` |
+| a visitor gets video from your three.js room (its stage never says **drawn here**) | the visitor's visit.js is older than 0.4, its browser has no WebGL 2, its page passed `scenes: false`, or your three.js is older than r125 or newer than the visit.js knows; or its page could not load three.js (its console says why: a Content-Security-Policy blocking cdn.jsdelivr.net or `blob:` scripts, step 6) |
+| visitors see their own body from inside | mark each body `userData.visitor = entry.id` (step 5) |
+| visitors drift back as they walk, in a scene | your `walk.speed` is not the speed your `move` gives `Visit.walk`, or your `move` is not `Visit.walk` (leave `walk` out) |
+| something in your room is missing from a visitor's view of it | it is drawn outside `root`, with a custom shader, as HTML, or in post-processing (step 5) |
 | visitors' view slows to a crawl while your tab is in the background | your page's Content-Security-Policy forbids `blob:` workers, so the library's timer is the page's own (slowed in the background): allow `worker-src blob:` |
 
 ## Upgrading

@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, trace, warn};
 
 use crate::{
-    frames::Frame,
+    frames::{self, Frame},
     link::{LinkCmd, Links, Relays, Role},
     lobby::LobbyOut,
     VERSION,
@@ -41,6 +41,12 @@ pub enum Ev {
     /// The link's path (direct or through a relay) and round-trip time, about once a second.
     LinkStats { visit: String, relay: bool, rtt_ms: f64 },
     WantKey { visit: String },
+    /// An edit of the scene of the room this office visits: unpacked, checked JSON (../SPEC.md section 8.3).
+    LinkScene { visit: String, json: String },
+    /// An edit of that scene was dropped (too big, malformed, too many): the page asks for the whole scene.
+    SceneLost { visit: String },
+    /// This office's scene edits for a visitor were dropped (its link far behind): the page sends it all again.
+    SceneResync { visit: String },
     Tick,
     Shutdown,
 }
@@ -72,8 +78,10 @@ struct Visit {
     inputs: (Instant, u32),
     /// A frame for the page was dropped (visitor side): ask the host for a keyframe, once.
     want_key: bool,
-    /// What the visitor decodes and how big its view is (host side), for a page that connects later.
+    /// What the visitor decodes, which scenes it draws, and how big its view is (host side), for a page that
+    /// connects later.
     peer_decoders: Option<Value>,
+    peer_scenes: Option<Value>,
     peer_viewport: Option<Value>,
     /// The host page's state for this visitor (where it stands), kept for a page that reloads.
     host_state: Option<Value>,
@@ -82,12 +90,15 @@ struct Visit {
     /// When a keyframe the visitor asked for was last passed to the page (host side): at most every
     /// KEY_EVERY, as a keyframe costs the host's machine far more than another frame.
     key_asked: Option<Instant>,
+    /// When the visitor last asked for the whole scene (host side): at most every RESYNC_EVERY.
+    resync_asked: Option<Instant>,
 }
 
 /// The most control messages a link's other side may send a second; more are dropped (a peer flooding
 /// keyframe requests or encoder settings must not swamp this office's page).
 const CTL_PER_SECOND: u32 = 20;
 const KEY_EVERY: Duration = Duration::from_millis(500);
+const RESYNC_EVERY: Duration = Duration::from_secs(2);
 /// The most inputs a second taken from a visitor (it sends one whenever its keys or look change, at most
 /// every 8 ms, and every 33 ms regardless).
 const INPUTS_PER_SECOND: u32 = 120;
@@ -113,8 +124,10 @@ pub struct Core {
     knocks: BTreeMap<String, (Value, Instant)>,
     visits: HashMap<String, Visit>,
     next_channel: u16,
-    /// What this office's page decodes and how big its view is, to tell the rooms it visits.
+    /// What this office's page decodes, which scenes it draws, and how big its view is, to tell the rooms it
+    /// visits.
     decoders: Option<Value>,
+    scenes: Option<Value>,
     viewport: Option<Value>,
     input_seq: u64,
 }
@@ -144,6 +157,7 @@ impl Core {
             visits: HashMap::new(),
             next_channel: 1,
             decoders: None,
+            scenes: None,
             viewport: None,
             input_seq: 0,
         }
@@ -241,6 +255,23 @@ impl Core {
                     self.to_page(json!({ "type": "keyframe", "channel": ch }));
                 }
             }
+            Ev::LinkScene { visit, json } => {
+                if let Some(v) = self.visits.get(&visit).filter(|v| v.role == Role::Visitor) {
+                    // Already checked JSON: wrapped as it is, not parsed again.
+                    let msg = format!("{{\"type\":\"scene\",\"channel\":{},\"edit\":{json}}}", v.channel);
+                    if let Some(p) = &self.page {
+                        let _ = p.text.send(PageOut::Text(msg));
+                    }
+                }
+            }
+            Ev::SceneLost { visit } | Ev::SceneResync { visit } => {
+                let lost = self.visits.get(&visit).map(|v| (v.channel, v.role));
+                match lost {
+                    Some((ch, Role::Visitor)) => self.to_page(json!({ "type": "scene_lost", "channel": ch })),
+                    Some((ch, Role::Host)) => self.to_page(json!({ "type": "scene_resync", "channel": ch })),
+                    None => {}
+                }
+            }
             Ev::Tick | Ev::Shutdown | Ev::Fatal(_) => {}
         }
     }
@@ -268,13 +299,15 @@ impl Core {
             self.to_page(k);
         }
         self.tell_hosted(json!({ "paused": false }));
-        // A visit to this office: what its visitor decodes and how big its view is, to encode for.
+        // A visit to this office: which scenes its visitor draws (first: the page decides on them before the
+        // video), what it decodes and how big its view is.
         let hosted: Vec<Value> = self.visits.values().filter(|v| v.up && v.role == Role::Host)
-            .flat_map(|v| [v.peer_decoders.clone(), v.peer_viewport.clone()]).flatten().collect();
+            .flat_map(|v| [v.peer_scenes.clone(), v.peer_decoders.clone(), v.peer_viewport.clone()]).flatten().collect();
         for m in hosted {
             self.to_page(m);
         }
-        // A visit this page is on: the host's encoder settings, and a keyframe to start decoding from.
+        // A visit this page is on: the host's encoder settings, a keyframe to start decoding from, and its whole
+        // scene again (a page that comes back has none).
         let mine: Vec<(u16, Option<Value>, mpsc::Sender<LinkCmd>)> =
             self.visits.values().filter(|v| v.up && v.role == Role::Visitor).map(|v| (v.channel, v.video_config.clone(), v.cmd.clone())).collect();
         for (ch, cfg, cmd) in mine {
@@ -282,6 +315,7 @@ impl Core {
                 self.to_page(with_channel("video_config", ch, &cfg));
             }
             let _ = cmd.try_send(LinkCmd::Ctl(json!({ "keyframe": true })));
+            let _ = cmd.try_send(LinkCmd::Ctl(json!({ "scene_resync": true })));
         }
     }
 
@@ -347,6 +381,22 @@ impl Core {
                     let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "viewport": vp })));
                 }
             }
+            "scenes" => match scenes(&m) {
+                Some(s) => {
+                    self.scenes = Some(s.clone());
+                    if let Some(v) = self.visiting() {
+                        let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "scenes": s })));
+                    }
+                }
+                None => self.page_error("bad_message", "three is a list of at most 128 three.js revisions (digits)", Some("scenes")),
+            },
+            "scene_resync" => {
+                let ch = m.get("channel").and_then(Value::as_u64).unwrap_or(0) as u16;
+                match self.visits.values().find(|v| v.channel == ch && v.up && v.role == Role::Visitor) {
+                    Some(v) => { let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "scene_resync": true }))); }
+                    None => self.page_error("no_such_visit", "you are not visiting on that channel", Some("scene_resync")),
+                }
+            }
             "decoders" => {
                 let codecs = m.get("codecs").cloned().unwrap_or(json!([]));
                 self.decoders = Some(codecs.clone());
@@ -382,8 +432,18 @@ impl Core {
         }
     }
 
-    /// A frame of this office's room, rendered for one of its visitors.
+    /// A frame of this office's room rendered for one of its visitors, a delta of its scene, or an edit of it.
     fn page_frame(&mut self, data: &[u8]) {
+        if let Some((ch, gz)) = frames::scene_from_page(data) {
+            let resync = match self.visits.values().find(|v| v.channel == ch && v.role == Role::Host && v.up) {
+                Some(v) => v.cmd.try_send(LinkCmd::Scene(gz)).is_err(),
+                None => return debug!(ch, "a scene edit for no visit"),
+            };
+            if resync {   // the link's queue is full: what follows would build on an edit it never got
+                self.to_page(json!({ "type": "scene_resync", "channel": ch }));
+            }
+            return;
+        }
         let Some((ch, frame)) = Frame::from_page(data) else { return debug!(len = data.len(), "a malformed frame from the page") };
         match self.visits.values().find(|v| v.channel == ch && v.role == Role::Host && v.up) {
             Some(v) => {
@@ -553,8 +613,8 @@ impl Core {
                 info!(visit = id, ?role, channel, "visit agreed");
                 self.visits.insert(id.to_string(), Visit {
                     id: id.to_string(), channel, role, peer: m.get("peer").cloned().unwrap_or(Value::Null), up: false, cmd,
-                    video_config: None, last_seq: 0, inputs: (Instant::now(), 0), want_key: false, peer_decoders: None, peer_viewport: None, host_state: None, ctl: (Instant::now(), 0),
-                    key_asked: None,
+                    video_config: None, last_seq: 0, inputs: (Instant::now(), 0), want_key: false, peer_decoders: None, peer_scenes: None, peer_viewport: None, host_state: None,
+                    ctl: (Instant::now(), 0), key_asked: None, resync_asked: None,
                 });
             }
             Err(e) => {
@@ -604,13 +664,17 @@ impl Core {
     }
 
     fn link_up(&mut self, id: &str, first: bool) {
-        let (decoders, viewport, has_page) = (self.decoders.clone(), self.viewport.clone(), self.page.is_some());
+        let (scenes, decoders, viewport, has_page) = (self.scenes.clone(), self.decoders.clone(), self.viewport.clone(), self.page.is_some());
         let Some(v) = self.visits.get_mut(id) else { return };
         v.up = true;
         let (role, cmd) = (v.role, v.cmd.clone());
         let started = started(v);
         match role {
             Role::Visitor => {
+                // Which scenes this page draws, before what it decodes: the host decides on a scene first.
+                if let Some(s) = scenes {
+                    let _ = cmd.try_send(LinkCmd::Ctl(json!({ "scenes": s })));
+                }
                 if let Some(d) = decoders {
                     let _ = cmd.try_send(LinkCmd::Ctl(json!({ "decoders": d })));
                 }
@@ -651,7 +715,20 @@ impl Core {
         match v.role {
             // From the visitor.
             Role::Host => {
-                if let Some(codecs) = m.get("decoders") {
+                if let Some(s) = m.get("scenes") {
+                    if let Some(s) = scenes(s) {
+                        let mut msg = s;
+                        msg["type"] = json!("scenes");
+                        msg["channel"] = json!(ch);
+                        v.peer_scenes = Some(msg.clone());
+                        self.to_page(msg);
+                    }
+                } else if m.get("scene_resync").is_some() {
+                    if v.resync_asked.is_none_or(|t| t.elapsed() >= RESYNC_EVERY) {
+                        v.resync_asked = Some(Instant::now());
+                        self.to_page(json!({ "type": "scene_resync", "channel": ch }));
+                    }
+                } else if let Some(codecs) = m.get("decoders") {
                     let msg = json!({ "type": "decoders", "channel": ch, "codecs": codecs });
                     v.peer_decoders = Some(msg.clone());
                     self.to_page(msg);
@@ -728,6 +805,14 @@ fn started(v: &Visit) -> Value {
     m
 }
 
+/// Which hosts' scenes a page draws (../SPEC.md section 8.3): `three`, the three.js revisions it renders (each
+/// digits, at most 128 of them). None if malformed.
+fn scenes(m: &Value) -> Option<Value> {
+    let three = m.get("three")?.as_array()?;
+    let ok = three.len() <= 128 && three.iter().all(|r| r.as_str().is_some_and(|r| (1..=4).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_digit())));
+    ok.then(|| json!({ "three": three }))
+}
+
 fn with_channel(kind: &str, channel: u16, cfg: &Value) -> Value {
     json!({ "type": kind, "channel": channel, "codec": cfg.get("codec"), "width": cfg.get("width"), "height": cfg.get("height"), "fov": fov(cfg) })
 }
@@ -753,6 +838,16 @@ fn clamp_input(m: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scenes_are_checked() {
+        assert_eq!(scenes(&json!({ "three": ["128", "170"], "x": 1 })), Some(json!({ "three": ["128", "170"] })));
+        assert_eq!(scenes(&json!({ "three": [] })), Some(json!({ "three": [] })));
+        assert_eq!(scenes(&json!({ "three": ["r128"] })), None);
+        assert_eq!(scenes(&json!({ "three": [128] })), None);
+        assert_eq!(scenes(&json!({ "three": vec!["1"; 129] })), None);
+        assert_eq!(scenes(&json!({})), None);
+    }
 
     #[test]
     fn inputs_are_clamped() {

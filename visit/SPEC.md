@@ -156,7 +156,8 @@ lobby refused it for good (`proto_unsupported`, `name_invalid`).
 
 One WebSocket, `ws://127.0.0.1:<port>/ws`, with Nagle's algorithm off at both ends (a visit-client sets
 `TCP_NODELAY`, as browsers do: without it a small message waits for the last one's acknowledgement, some
-20 ms). Text frames are JSON objects with a string `type`; binary frames carry video (5.4). The library implements all of this; a sim never sees it unless it writes its own
+20 ms). Text frames are JSON objects with a string `type`; binary frames carry video, a scene's deltas and
+(from the host's page) its edits (5.4). The library implements all of this; a sim never sees it unless it writes its own
 library (for a native sim, say).
 
 ### 5.1 Handshake
@@ -170,7 +171,7 @@ The page sends, within 5 s:
 The visit-client answers `ready` (or closes: 4401 bad token, 4400 bad `proto`):
 
 ```json
-{"type": "ready", "version": "0.3.0", "office": {"id": "o1a2b3c4", "name": "Magic Room"},
+{"type": "ready", "version": "0.4.0", "office": {"id": "o1a2b3c4", "name": "Magic Room"},
  "online": true, "away": false, "status": "available", "max_visitors": 3,
  "visits": [{"id": "v…", "channel": 1, "role": "host", "peer": {"id": "o…", "name": "Ada", "sim": {…}}}],
  "limits": {"max_width": 1280, "max_height": 720, "fps": 60}}
@@ -193,10 +194,12 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `input` | `forward`, `strafe`, `run`, `yaw`, `pitch`, `t` (8.2) | the visitor's input, whole: whenever it changes (at most every 8 ms) and every 33 ms regardless, while visiting |
 | `viewport` | `width`, `height` | the visitor's view size, on start and when it changes (debounced 250 ms) |
 | `video_config` | `channel`, `codec`, `width`, `height`, `fov`? | the host's encoder settings for a visit, before its first frame and whenever they change; `fov`, its camera's vertical field of view in degrees, lets the visitor turn its picture between frames (9) |
+| `scenes` | `three`: [string] (≤ 128 revisions, digits) | the three.js revisions whose scenes this page draws (8.3), sent once after `ready`, before `decoders`; `[]`: none (video only) |
 | `decoders` | `codecs`: [string] | the codecs this page can decode, best first (sent once after `ready`) |
-| `keyframe` | `channel` | the visitor's page asks for a keyframe (its decoder lost its place) |
+| `keyframe` | `channel` | the visitor's page asks for a keyframe (its decoder lost its place), or a key delta (8.3) |
+| `scene_resync` | `channel` | the visitor's page asks for the host's whole scene again (an edit was lost, or did not apply) |
 | `pose` | `channel`, `state` (≤ 2 KiB) | the host page's state for a visitor (where it stands), about 5 a second; kept by the visit-client and handed back in `ready` to a page that reloads |
-| binary | section 5.4 | an encoded frame (host) |
+| binary | section 5.4 | an encoded frame, a scene delta or a scene edit (host) |
 
 ### 5.3 Visit-client → page
 
@@ -212,22 +215,27 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `host_paused` / `host_resumed` | `channel` | the host's page went away / came back (visitor side) |
 | `input` | `channel`, `seq`, `forward`, `strafe`, `run`, `yaw`, `pitch` | a visitor's latest input (host side) |
 | `viewport` | `channel`, `width`, `height` | a visitor's view size (host side) |
+| `scenes` | `channel`, `three` | which three.js revisions' scenes a visitor draws (host side; before `decoders`) |
 | `decoders` | `channel`, `codecs` | what a visitor can decode (host side) |
 | `video_config` | `channel`, `codec`, `width`, `height`, `fov` | the host's encoder settings (visitor side); `fov` null when the host gave none |
 | `bitrate` | `channel`, `bps` | the bitrate the host should encode a visit at, about once a second (7.5) |
 | `link_stats` | `channel`, `path` (`"direct"` \| `"relay"`), `rtt_ms` | the visit's link, about once a second, both sides: a relayed path is slower and rate-limited |
-| `keyframe` | `channel` | send a keyframe on this visit soon (host side) |
+| `keyframe` | `channel` | send a keyframe (or a key delta) on this visit soon (host side) |
+| `scene_resync` | `channel` | send this visitor the whole scene again (host side): it asked, or the link dropped edits it had not sent |
+| `scene` | `channel`, `edit` | an edit of the host's scene, unpacked and checked (8.3) (visitor side) |
+| `scene_lost` | `channel` | an edit of the host's scene was dropped (malformed, too big, too many): ask for the whole scene (visitor side) |
 | `error` | `code`, `message`, `ref`? | a refusal (section 11) |
-| binary | section 5.4 | an encoded frame (visitor) |
+| binary | section 5.4 | an encoded frame or a scene delta (visitor) |
 
 ### 5.4 Binary frames
 
-Both directions, one encoded video frame per WebSocket binary message:
+Both directions, one encoded video frame (or one scene delta, or from the host's page one scene edit) per
+WebSocket binary message:
 
 | bytes | field |
 |---|---|
 | 0–1 | `channel`, u16 big-endian |
-| 2 | flags: bit 0 = keyframe; bit 1 = the frame carries its meta |
+| 2 | flags: bit 0 = keyframe; bit 1 = the frame carries its meta; bit 2 = a scene edit (host page to visit-client only, alone); bit 3 = a scene delta |
 | 3–10 | timestamp, u64 big-endian, microseconds (the `VideoFrame` timestamp) |
 | 11–26 | the meta, when flagged: `t` (f64, the visitor's input time this frame reflects, from its `input`), then `yaw` and `pitch` (f32 each, the look it was drawn at, from that input); all big-endian |
 | 11… or 27… | the encoded chunk, as `EncodedVideoChunk.copyTo` gives it |
@@ -235,6 +243,12 @@ Both directions, one encoded video frame per WebSocket binary message:
 A frame larger than 1 MiB is dropped. The meta lets the visitor measure input to screen (its own clock,
 now minus `t`) and turn its picture between frames (section 9); a visit-client passes it through untouched,
 and leaves it out for a visitor whose link handshake did not ask for it (7.1).
+
+A **scene delta** (bit 3, and bit 0 for a key delta) has the same header, its timestamp the host's clock when
+it was taken, then the delta (8.3) in place of the chunk; it travels exactly as video does. A **scene edit**
+(bit 2 alone; the timestamp unused) has the edit, gzipped JSON, in place of the chunk, at most 16 MiB; the
+visit-client sends it on the visit's scene stream (7.4) and passes it to the visitor's page unpacked, as
+`scene` (5.3).
 
 ## 6. The lobby: `basedverse-lobby/2`
 
@@ -328,11 +342,13 @@ ALPN **`basedverse-visit/1`**. iroh connections are encrypted and authenticated 
 
 1. On `visit`, the **visitor's** visit-client dials `peer_link` with the ALPN. The **host's** waits for it.
 2. The visitor opens the **control stream** (bidirectional) and sends `{"proto": "basedverse-visit/1",
-   "visit": "<id>", "ticket": "<ticket>", "frame_meta": true}` (`frame_meta`: it reads frames' meta,
-   section 7.4; visit-clients before 0.3 leave it out, and get frames without).
+   "visit": "<id>", "ticket": "<ticket>", "frame_meta": true, "streams": 2}` (`frame_meta`: it reads frames'
+   meta, section 7.4; visit-clients before 0.3 leave it out, and get frames without. `streams: 2`: it reads
+   typed streams, 7.4; before 0.4 it is left out).
 3. The host checks that it has that visit, that the ticket matches, and that the connecting endpoint's id
    is the visitor's `peer_link.endpoint`. If not, it closes the connection (application error code 1,
-   `"refused"`). If so it answers `{"ok": true}`.
+   `"refused"`). If so it answers `{"ok": true, "streams": 2}` (before 0.4, `{"ok": true}`). When both said
+   `streams: 2`, the link's streams are typed (7.4).
 4. Both tell their pages `visit_started`. If the dial or handshake fails for 20 s, either side sends the
    lobby `end` with `reason: "link_failed"`.
 
@@ -344,7 +360,9 @@ Messages are JSON, each prefixed by its length (u32 big-endian). In order, relia
 |---|---|---|
 | visitor | `{"decoders": [codec, …]}` | what the visitor's page can decode, best first |
 | visitor | `{"viewport": {"width", "height"}}` | the visitor's view size |
-| visitor | `{"keyframe": true}` | send a keyframe soon |
+| visitor | `{"keyframe": true}` | send a keyframe (or a key delta) soon |
+| visitor | `{"scenes": {"three": [revision, …]}}` | which three.js revisions' scenes the visitor's page draws (8.3), before `decoders` |
+| visitor | `{"scene_resync": true}` | send the whole scene again (passed to the host's page at most every 2 s) |
 | host | `{"video_config": {"codec", "width", "height", "fov"}}` | before the first frame and on every change |
 | host | `{"paused": true}` / `{"paused": false}` | the host's page went away / came back |
 | either | `{"bye": "<reason>"}` | ending the visit (also sent to the lobby as `end`) |
@@ -374,6 +392,14 @@ every frame of a group that is more than
 streams in order of their keyframes' timestamps. When a newer stream starts it stops reading older ones
 (QUIC `STOP_SENDING`): a stalled group is abandoned rather than waited for, and no frame of an older group
 follows a newer group's keyframe. Frames go to the page as they arrive (5.4).
+
+A scene's deltas (8.3) travel exactly as video does, a key delta starting each stream. Its edits go on **one
+more unidirectional stream**, reliable and in order (each builds on the last), each edit its length (u32
+big-endian) then the gzipped JSON: never dropped one by one. The host's visit-client lets at most 32 MiB of
+them wait; past that, or if the stream fails, it drops what waits and tells its page `scene_resync`. With
+**typed streams** (both sides said `streams: 2`, 7.1) each stream's first byte says what it is: 0 a group of
+pictures (or of deltas), 1 the scene's edits; without, every stream is a group of pictures, and no scene is
+sent.
 
 ### 7.5 Bitrate
 
@@ -433,9 +459,65 @@ and a visitor refused at the handshake ends it at once (`link_failed`).
 as the mouse moves and sends where it is looking; the host applies it as is. Between the host's frames the
 visitor's page shifts the last one by how far it has turned since (it knows the look each frame was drawn
 at, and the host's field of view), so turning feels instant whatever the round trip; walking waits for
-the host. Where the visitor stands is
+the host (in a scene, 8.3, the visitor's page walks at once too). Where the visitor stands is
 the host's to decide (`move`), against its own walls and furniture. The host clamps every field to its
 range.
+
+### 8.3 Scenes
+
+A host whose room is made with three.js MAY send its **scene** instead of video, to a visitor whose page draws
+scenes: the visitor's page draws the room itself. Walking and looking are then as quick as in its own room,
+the host renders and encodes nothing for that visitor, and what crosses the link is the scene as data.
+
+- **Which.** A visitor's page says which three.js revisions it draws (`scenes`): visit.js lists every one it
+  carries a hash for (r125 to r186 in 0.4.0), or none (`[]`: no WebGL 2, or `scenes: false` in `connect`).
+  The host's page sends its scene when `v.host()` was given one (`scene`), of a revision in that list; else
+  video, as before. A visitor that never says (before 0.4) gets video.
+- **The whole scene** is the edit `{"type": "scene", …}`: `three` (the revision), `json` (three.js's own
+  `toJSON()` of the scene, or of the part shared), `ids` ([uuid, number] for every object: deltas and edits
+  name objects by number; 0 is the root), `targets` (lights' targets, which three.js's JSON leaves out before
+  r160: [light, target], or [light, null, [x, y, z]] for a target outside the scene), `renderer` (the host
+  renderer's settings, by its release's names: `shadowMap` {enabled, type}, `toneMapping`,
+  `toneMappingExposure`, `sortObjects`, `outputEncoding` or `outputColorSpace`, `physicallyCorrectLights` or
+  `useLegacyLights`, `clear` [colour, alpha], `colorManagement`), `fov`, `near`, `far` (the visitor's camera),
+  `walk` ({speed}, how the host's `move` walks, or null), `yaw0` and `pose` (where the visitor starts). It goes
+  when the visitor starts, and when asked (`scene_resync`); it replaces whatever the visitor had.
+- **Edits** (`{"type": "edit", …}`): at most one every 33 ms, only when something changed, each field
+  optional, applied in this order: `res` ({geometries, materials, textures, images, shapes}, in `toJSON` form:
+  new ones, or ones changed in place, whose content the visitor's copy takes), `remove` ([number]), `add`
+  ([{parent, json (the new object's `toJSON()`, with what it is made of), ids, targets}]), `parent` ([[number,
+  new parent's number]]), `assign` ([[number, material uuid (or uuids) or null, geometry uuid or null]]),
+  `props` ([{uuid, …}]: materials' colours and values as they change: `color`, `emissive`, `specular`,
+  `opacity`, `transparent`, `visible`, …), `scene` ({background (a colour, {texture: uuid}, or null), fog
+  ({type, color, near, far, density} or null)}).
+- **Deltas**, every 33 ms when anything moved, a key delta every second and when asked (`keyframe`), all
+  big-endian: u8 version (1); f64 `t`, the visitor's latest input time the host has, and f32 `age`, the ms
+  since that input reached the host; f32 x, y, z, yaw, pitch, where the host has the visitor; u32 n; then n
+  objects: u32 number, u8 flags (bit 0 visible, bit 1 scaled), f32 position (3) and quaternion (4), and f32
+  scale (3) when scaled (else 1). A key delta lists everything that has moved since the whole scene; the
+  others, what moved since the last.
+- **Moving things** are shown about 70 ms behind the host's clock (estimated as the least of arrival minus
+  timestamp over the last 2 s), between the two updates around that time: smooth, and always one to move
+  toward.
+- **Where the visitor stands.** Its page walks it with `Visit.walk` at the host's `walk.speed`, as its keys
+  say, at once (without the host's walls). Each delta's pose is compared with where the page had predicted it
+  would be `age` ms after `t`; the difference is put right at once in where it stands, and eased out of what
+  it sees over about 100 ms (more than 4 units off: there at once). A host that gives no `walk` is followed,
+  eased the same way: walking then waits for the round trip; looking never does.
+- **Its own body**, which the host draws for everyone else, the host marks `userData.visitor = <visit id>`;
+  the visitor's page does not draw it in its own eyes.
+- **Data, never code.** The visitor's page draws a scene with the host's very three.js revision (its first
+  release, `0.<r>.0`), fetched from `https://cdn.jsdelivr.net/npm/three@0.<r>.0/build/` (or a page's own
+  `threeBase`), checked against the SHA-384 hash visit.js carries for it (Subresource Integrity) and run as a
+  module of its own: nothing else ever runs. Before three.js reads what a host sent, visit.js makes it safe:
+  materials only of the kinds three.js draws itself (a `ShaderMaterial` or `RawShaderMaterial` is a program:
+  it becomes plain grey), images only as PNG, JPEG or WebP data URLs at most 4096 px a side (read from their
+  headers, before anything decodes them) or typed-array data of that size, shapes' segment counts at most 256
+  (detail 5), and across the scene about 4 million vertices and 100,000 objects at most.
+- **Checked on the way.** The visitor's visit-client unpacks each edit with a limit (64 MiB: a "zip bomb"
+  stops there), checks it is one JSON object nested at most 256 deep, and passes it to the page as `scene`; one
+  that fails, or past 64 MiB a second, is dropped and the page told (`scene_lost`): it asks for the whole scene
+  again.
 
 ## 9. The library: `visit.js`
 
@@ -445,12 +527,15 @@ The normative surface; INTEGRATING.md shows it in use. Loaded with
 ```js
 // token: the token, or a function giving it (sync or async), asked again on each reconnect: a visit-client
 // restarted with a new token is then found again by itself. A wrong token is final for a string.
-const v = await Visit.connect({ port, token, sim: { name, version } });
+// scenes: false: this page draws no host's scene (video only). threeBase: where to fetch three.js from instead
+// of the CDN ("{r}" the revision; the same files, checked against the same hashes).
+const v = await Visit.connect({ port, token, sim: { name, version }, scenes, threeBase });
 
 // state, always current; "change" fires whenever any of it changes (never for the per-frame traffic)
 v.state        // "connecting" | "online" | "offline" (the lobby out of reach) | "away" (out of it on purpose)
 v.stats        // while visiting, about once a second: { latency (input to screen, ms), rtt (the link's, ms),
-               //   path ("direct" | "relay"), fps (frames drawn a second) }
+               //   path ("direct" | "relay"), fps (frames drawn a second), mode ("scene" while drawing the
+               //   host's scene here, else null) }
 v.viewFocused  // visiting, and the view takes the keys and mouse (not shrunk to a corner): the page's own keys wait
 v.office       // { id, name } while online
 v.status       // "available" | "busy"
@@ -477,6 +562,9 @@ v.host({
   render(pose, width, height) { return canvas; },   // your room from pose, into a canvas of that size
   fps: 60,                                          // optional: the most frames a second per visitor (10–60)
   fov: 70,                                          // optional: the camera's vertical field of view, in degrees: visitors turn instantly
+  scene: { root, three, renderer, near, far },      // optional, three.js rooms: the scene (or the part to share), the THREE it was
+                                                    //   made with, its renderer, the camera's range: sent instead of video (8.3)
+  walk: { speed },                                  // optional: move() walks with Visit.walk at this speed: scene visitors walk at once
 });
 
 // visiting: where to show the room you are in; the library draws it there and captures input
@@ -499,6 +587,11 @@ visitor slides along walls.
 input and `dt` in seconds. `render` at the visit's frame rate (8.1: up to 60 a second per visitor), one visitor at a time: the library makes
 its `VideoFrame` from the returned canvas before the next call, so one canvas MAY serve every visitor. A
 hook that throws is logged and skipped for that tick; three throws in a row end that visit (`"kicked"`).
+
+**Scenes.** With `scene`, every 33 ms the library reads the scene (objects' matrices and visibility,
+materials' state, geometries' and textures' versions) and sends what changed (8.3): rendering nothing for
+those visitors, it counts that reading toward the host's load. A room marks each visitor's body with
+`userData.visitor = <visit id>`; anything under `root` is shared, so what should not be belongs outside it.
 
 **Timing.** The library ticks from a Worker's timer: a page's own timers slow to once a second or less
 while its tab is in the background, and a host must go on rendering for its visitors. A page whose
@@ -528,6 +621,10 @@ slowly while its tab is hidden.
 | link grace period | 15 s |
 | lobby session kept after a drop (resume) | 30 s |
 | largest frame | 1 MiB |
+| scene edits (8.3) | at most one every 33 ms; gzipped ≤ 16 MiB, unpacked ≤ 64 MiB, nested ≤ 256; ≤ 64 MiB a second to a visitor; ≤ 32 MiB waiting on a link |
+| scene deltas | every 33 ms when anything moved; a key delta every second and on request |
+| scene contents | materials three.js draws itself; images ≤ 4096 px a side; segments ≤ 256; ≈ 4 million vertices, 100,000 objects |
+| scene resync requests | passed to the host's page at most every 2 s |
 | knock wait | 60 s |
 
 ## 11. Errors
@@ -538,8 +635,8 @@ codes 4400 bad `hello`, 4401 bad or missing token, 4409 replaced by a newer page
 **`error` codes the page can get** (from the visit-client, or passed through from the lobby): those of
 section 6.4 (`not_found`, `self_knock`, `not_available`, `full`, `not_ready`, `already_visiting`,
 `knock_pending`, `rate_limited`), `message_too_long`, `name_invalid`, `name_taken` (on `rename`; the
-office keeps its name), `not_yours` (answering a knock that is not yours), `no_such_visit` (`end` or
-`keyframe` for a visit you are not in), `offline` (an action while the lobby is down), `away` (an action
+office keeps its name), `not_yours` (answering a knock that is not yours), `no_such_visit` (`end`,
+`keyframe` or `scene_resync` for a visit you are not in), `offline` (an action while the lobby is down), `away` (an action
 while the office is out of the lobby on purpose: `join_lobby` first), `bad_message`.
 
 **Link application error codes:** 0 normal close (`bye`), 1 refused (bad ticket or endpoint), 2 protocol
@@ -557,8 +654,10 @@ match never opens: the visit ends `"link_failed"`.
 
 ## 13. Open questions
 
-- **Avatars.** Hosts know every visitor's pose, so they can draw visitors in their own room; whether
-  visitors should also see each other (and the host) is for a later version.
+- **Avatars.** Hosts know every visitor's pose, so they can draw visitors in their own room (and in a scene,
+  8.3, visitors see each other there too); whether visitors should also see the host is for a later version.
+- **Scenes from other engines.** Version 1 sends three.js scenes; a room in another engine sends video. glTF
+  could carry other engines' scenes the same way.
 - **Audio.** None in version 1.
 - **The version-1 group view.** Version-1 sims stream their own view to a group; whether version 2 keeps a
   "just watch" mode (a visit that never moves from its spawn) or retires it.
