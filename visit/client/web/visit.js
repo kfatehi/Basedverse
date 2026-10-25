@@ -13,9 +13,9 @@
 // one (a timewarp, as VR headsets do), so looking around never waits for the round trip.
 "use strict";
 (function () {
-  const VERSION = "0.3.0", PROTO = "basedverse-visit-local/1";
+  const VERSION = "0.3.1", PROTO = "basedverse-visit-local/1";
   const CODECS = ["avc1.42E01F", "vp8", "vp09.00.10.08"];   // the order a host prefers, among what a visitor decodes
-  const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, KEY_EVERY_MS = 2000, LOOK = 0.0025;
+  const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, KEY_EVERY_MS = 10000, LOOK = 0.0025;
   // The share of a visitor's view size a host renders at: a busy host steps down these before it lowers its
   // frame rate (a smaller picture costs no latency; fewer frames do).
   const SCALES = [1, 0.75, 0.5];
@@ -204,7 +204,7 @@
     _started(m) {
       if (m.role === "host") {
         const h = { id: m.id, channel: m.channel, visitor: m.peer || {}, pose: null, yaw0: 0, input: null, inputAt: 0,
-          decoders: null, viewport: null, encoder: null, codec: null, width: 0, height: 0, bps: 2000000, fps: this._fps(), scale: 0, scaledAt: 0,
+          decoders: null, viewport: null, encoder: null, codec: null, width: 0, height: 0, bps: 1000000, fps: this._fps(), scale: 0, scaledAt: 0,
           keyNext: true, lastKey: 0, nextAt: 0, fails: 0, configuring: false, scratch: null, since: performance.now(), meta: new Map() };
         if (m.state && m.state.pose) { h.pose = m.state.pose; h.yaw0 = m.state.yaw0 || 0; }   // back after this page reloaded
         this._hosted.set(m.channel, h);
@@ -364,8 +364,12 @@
         h.keptAt = now;
         this._send({ type: "pose", channel: h.channel, state: { pose: h.pose, yaw0: h.yaw0 } });
       }
-      if (h.encoder && h.encoder.state === "configured" && now >= h.nextAt) {
-        h.nextAt = now + 1000 / h.fps;
+      // Frames on an even beat: the next one a slot after this one was due (not after it happened, which a
+      // timer's lateness would push later and later), with a couple of ms' grace for that lateness; a host
+      // that fell behind starts the beat again rather than rush to catch up.
+      const slot = 1000 / h.fps;
+      if (h.encoder && h.encoder.state === "configured" && now >= h.nextAt - 2) {
+        h.nextAt = h.nextAt + slot < now ? now + slot : h.nextAt + slot;
         this._renderFor(h, now, input);
       }
     }

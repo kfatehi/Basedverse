@@ -34,10 +34,10 @@ const DIAL_TIMEOUT: Duration = Duration::from_secs(20);
 const GRACE: Duration = Duration::from_secs(15);
 const REDIAL: Duration = Duration::from_secs(2);
 const HANDSHAKE: Duration = Duration::from_secs(5);
-/// The most a link may have sent and not yet had acknowledged, queued data included: a quarter of a second
-/// of video at the highest bitrate, so a slow path backs the writer up (which then drops frames) instead of
-/// buffering seconds of them (QUIC's default is 10 MB).
-const SEND_WINDOW: u64 = 256 * 1024;
+/// The most a link may have sent and not yet had acknowledged, queued data included: enough for 6 Mbit/s over
+/// an 80 ms round trip, and little more, so a slow path backs the writer up (which then drops frames) instead
+/// of buffering seconds of them (QUIC's default is 10 MB; 256 KiB was still most of a second, tests/perf).
+const SEND_WINDOW: u64 = 64 * 1024;
 /// A frame this much older than the newest one waiting behind it is stale: the link is behind (microseconds,
 /// of the frames' own timestamps). A few frames handed over at once, as an encoder does, are not.
 const BEHIND_US: u64 = 100_000;
@@ -104,6 +104,7 @@ impl Links {
                 urls.iter().map(|u| u.parse().map_err(|e| anyhow!("relay {u}: {e}"))).collect::<Result<Vec<_>>>()?,
             ),
         };
+        // Cubic, QUIC's default, for congestion control: BBRv3 was tried (tests/perf) and was slower here.
         let transport = QuicTransportConfig::builder().send_window(SEND_WINDOW).build();
         let ep = Endpoint::builder(presets::Minimal).alpns(vec![ALPN.to_vec()]).relay_mode(relay_mode).transport_config(transport).bind().await?;
         info!(endpoint = %ep.id(), "link endpoint up");
@@ -346,7 +347,8 @@ async fn run(role: Role, visit: &str, est: Established, cmds: &mut mpsc::Receive
             None
         }
     };
-    let (mut bitrate, mut tick, mut path) = (Bitrate::new(), tokio::time::interval(Duration::from_secs(1)), None::<bool>);
+    let (mut bitrate, mut tick, mut path) = (Bitrate::new(), tokio::time::interval(Bitrate::EVERY), None::<bool>);
+    let mut stats_at = Instant::now();
     let ended = loop {
         tokio::select! {
             msg = ctl_rx.recv() => match msg {
@@ -378,6 +380,15 @@ async fn run(role: Role, visit: &str, est: Established, cmds: &mut mpsc::Receive
                 None => { conn.close(VarInt::from_u32(3), b"visit over"); break Ended::Closed }
             },
             _ = tick.tick() => {
+                if role == Role::Host {
+                    if let Some(bps) = bitrate.update(&conn) {
+                        let _ = core.send(Ev::Bitrate { visit: visit.to_string(), bps });
+                    }
+                }
+                if stats_at.elapsed() < Duration::from_secs(1) {
+                    continue;
+                }
+                stats_at = Instant::now();
                 // Which way the link goes (direct, or through a relay: slower, and rate-limited) and how long a
                 // round trip takes, for the page and the log.
                 if let Some(p) = conn.paths().iter().find(|p| p.is_selected()) {
@@ -387,9 +398,6 @@ async fn run(role: Role, visit: &str, est: Established, cmds: &mut mpsc::Receive
                         path = Some(relay);
                     }
                     let _ = core.send(Ev::LinkStats { visit: visit.to_string(), relay, rtt_ms: rtt.as_secs_f64() * 1000.0 });
-                }
-                if role == Role::Host {
-                    let _ = core.send(Ev::Bitrate { visit: visit.to_string(), bps: bitrate.update(&conn) });
                 }
             }
             est = next_arrival(&mut arrivals) => { conn.close(VarInt::from_u32(0), b"replaced"); break Ended::Replaced(est) }
@@ -474,33 +482,64 @@ async fn read_video(conn: Connection, visit: String, core: mpsc::UnboundedSender
     }
 }
 
-/// The bitrate a host should encode a visit at (../SPEC.md section 7.5), from the link's loss and
-/// round-trip time over the last second.
+/// The bitrate a host should encode a visit at (../SPEC.md section 7.5), as WebRTC's congestion control
+/// (GCC) decides it, every EVERY: down to 85% the moment queueing delay builds (the round trip rising above
+/// its floor: a buffer filling somewhere on the path); down by half the loss above 10% loss; held between
+/// 2% and 10% (Wi-Fi loses packets without being full); up 8% a second otherwise. From 1 Mbit/s, between
+/// 300 kbit/s and 6 Mbit/s. None: no change worth telling the page (under 5%).
 struct Bitrate {
-    bps: u64,
+    bps: f64,
+    told: f64,
     sent: u64,
     lost: u64,
-    min_rtt: Option<Duration>,
+    /// The lowest round trip in the last 10 s (the path's own, without queueing), and when each was seen.
+    floor: std::collections::VecDeque<(Instant, Duration)>,
 }
 
 impl Bitrate {
+    const EVERY: Duration = Duration::from_millis(500);
+    const MIN: f64 = 300_000.0;
+    const MAX: f64 = 6_000_000.0;
+
     fn new() -> Self {
-        Bitrate { bps: 2_000_000, sent: 0, lost: 0, min_rtt: None }
+        Bitrate { bps: 1_000_000.0, told: 0.0, sent: 0, lost: 0, floor: Default::default() }
     }
 
-    fn update(&mut self, conn: &Connection) -> u64 {
+    fn update(&mut self, conn: &Connection) -> Option<u64> {
         let s = conn.stats();
         let (sent, lost) = (s.sent_packets.saturating_sub(self.sent), s.lost_packets.saturating_sub(self.lost));
         (self.sent, self.lost) = (s.sent_packets, s.lost_packets);
-        let rtt = conn.paths().iter().find(|p| p.is_selected()).map(|p| p.rtt());
-        if let Some(r) = rtt {
-            self.min_rtt = Some(self.min_rtt.map_or(r, |m| m.min(r)));
-        }
         let loss = if sent > 0 { lost as f64 / sent as f64 } else { 0.0 };
-        // Slower by half again, and by more than 20 ms (a loopback link's microseconds are noise).
-        let slower = matches!((rtt, self.min_rtt), (Some(r), Some(m)) if r.as_secs_f64() > m.as_secs_f64() * 1.5 && r > m + Duration::from_millis(20));
-        let next = if loss > 0.02 || slower { self.bps * 7 / 10 } else { self.bps + 150_000 };
-        self.bps = next.clamp(300_000, 6_000_000);   // 6 Mbit/s: 720p at 60 frames a second
-        self.bps
+        let rtt = conn.paths().iter().find(|p| p.is_selected()).map(|p| p.rtt());
+        let mut queueing = false;
+        if let Some(r) = rtt {
+            let now = Instant::now();
+            while self.floor.front().is_some_and(|(t, _)| now.duration_since(*t) > Duration::from_secs(10)) {
+                self.floor.pop_front();
+            }
+            while self.floor.back().is_some_and(|(_, d)| *d >= r) {
+                self.floor.pop_back();
+            }
+            self.floor.push_back((now, r));
+            let base = self.floor.front().map_or(r, |(_, d)| *d);
+            // An eighth of the path's own round trip above it, and at least 8 ms (a LAN's are noise).
+            queueing = r > base + (base / 8).max(Duration::from_millis(8));
+        }
+        let step = Self::EVERY.as_secs_f64();
+        self.bps = if loss > 0.10 {
+            self.bps * (1.0 - 0.5 * loss)
+        } else if queueing {
+            self.bps * 0.85
+        } else if loss >= 0.02 {
+            self.bps
+        } else {
+            (self.bps * 1.08f64.powf(step)).max(self.bps + 30_000.0 * step)
+        }
+        .clamp(Self::MIN, Self::MAX);
+        if (self.bps - self.told).abs() < self.told * 0.05 {
+            return None;
+        }
+        self.told = self.bps;
+        Some(self.bps as u64)
     }
 }

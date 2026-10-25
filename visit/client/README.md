@@ -15,6 +15,7 @@ output in Docker volumes.
 tests/run-e2e.sh               # end to end: the real lobby, two visit-clients, two stand-in pages, in a container
                                # (tests/e2e.py BIN OTHER_BIN runs B on another build: two versions together)
 tests/run-browser.sh           # visit.js in two headless Chromes: knock, walk with WASD, reload, leave
+tests/perf/run-perf.sh         # performance under simulated networks (netem), in containers: a table against targets
 ```
 
 Releases are built for every platform by `../../.github/workflows/release.yml`, on a tag (the top README,

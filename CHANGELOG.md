@@ -9,6 +9,42 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.3.1 — 2026-10-25
+
+**Faster, measured.** A new test, `visit/client/tests/perf/run-perf.sh`, runs visits through simulated
+networks (a LAN, down the street, across the country, bad Wi-Fi, a relayed and a capped link, six visitors
+on one host) and times every frame from the input it shows. It found what 0.3.0 still had wrong, now fixed:
+
+- Nagle's algorithm on the page's connection to visit-client held small messages back: some 20 ms on
+  every input and every frame, even with no network at all. Off now (`TCP_NODELAY`), as browsers have it.
+- A host's frames drifted later each time (the next was timed from when the last went, not when it was
+  due): about 50 frames a second, not 60 (39 in a real browser). Now on an even beat.
+- The bitrate fell to its floor (0.3 Mbit/s) on lossy Wi-Fi, and reacted to a filling buffer too late:
+  now WebRTC's congestion control (GCC): held through Wi-Fi's 2–10% loss, cut the moment queueing builds,
+  from 1 Mbit/s, every 500 ms.
+- Up to 256 KiB could sit unacknowledged: most of a second of video behind a slow link. Now 64 KiB.
+- A keyframe every 2 s was a burst a capped link felt every 2 s: now every 10 s (and when asked), the link
+  being reliable.
+
+Input to frame, median / worst 5% (everything but the browsers' own encode, decode and paint):
+
+| network | 0.3.0 | 0.3.1 |
+|---|---|---|
+| no delay | 26 / 29 ms, 49 fps | 5 / 9 ms, 60 fps |
+| down the street (8 ms round trip) | 34 / 38 ms | 13 / 18 ms |
+| across the country (70 ms) | 96 / 101 ms | 75 / 81 ms |
+| bad Wi-Fi (30 ms, jitter, 1.5% loss) | 56 / 68 ms, stalls, 0.3 Mbit/s | 36 / 48 ms, 1 Mbit/s |
+| relayed, capped at 5 Mbit/s (83 ms) | 122 / 194 ms, stalls | 96 / 105–141 ms |
+| capped at 2 Mbit/s (26 ms) | 64 / 166 ms, stalls | 41 / 55 ms |
+| six visitors on one host (8 ms) | 32 / 37 ms | 13 / 18 ms |
+
+In two real (headless) browsers on one machine: input to screen 42 → 35 ms, 39 → 60 frames a second.
+
+### What an integration does
+
+1. Get visit-client 0.3.1: run `bin/setup` again and choose download, or download it from this release.
+   Nothing else changes.
+
 ## v0.3.0 — 2026-10-25
 
 **Latency, the cloud-gaming way, and a picture-in-picture.** Visits were laggy: input waited for ticks, a

@@ -9,6 +9,7 @@ machine's loopback; the visit-clients link directly (no relay).
 import asyncio
 import json
 import os
+import re
 import secrets
 import struct
 import sys
@@ -21,6 +22,7 @@ from websockets.asyncio.server import serve  # noqa: E402
 from websockets.exceptions import ConnectionClosed  # noqa: E402
 
 BIN = sys.argv[1]
+VERSION = re.search(r'^version = "(.*)"', open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Cargo.toml")).read(), re.M).group(1)
 BIN_B = sys.argv[2] if len(sys.argv) > 2 else BIN
 OLD_B = BIN_B != BIN   # B is an older visit-client (0.2): the checks of what only 0.3 does become checks it still works
 TMP = tempfile.mkdtemp()
@@ -146,7 +148,7 @@ async def main():
             check("A takes pages only from its --origins", "403" in str(e), True)
         a, b = await Page(7411, ta).open(), await Page(7412, tb).open()
         ra, rb = await a.expect("ready"), await b.expect("ready")
-        check("ready: the version, limits, no visits, not away", (ra["version"], ra["limits"]["fps"], ra["visits"], ra["away"]), ("0.3.0", 60, [], False))
+        check("ready: the version, limits, no visits, not away", (ra["version"], ra["limits"]["fps"], ra["visits"], ra["away"]), (VERSION, 60, [], False))
         both = lambda m: m["type"] == "lobby" and sum(o["ready"] for o in m["offices"]) == 2
         lob = await a.until(both)
         await b.until(both)

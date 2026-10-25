@@ -17,6 +17,7 @@ use axum::{
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
+    serve::ListenerExt,
     Json, Router,
 };
 use bytes::Bytes;
@@ -51,6 +52,11 @@ impl PageState {
 }
 
 pub async fn serve(listener: TcpListener, state: Arc<PageState>) -> std::io::Result<()> {
+    // Nagle's algorithm off: a small message (an input, a frame's tail) goes now, not after the last one's
+    // acknowledgement (which itself may wait 40 ms). Browsers turn it off on their side too.
+    let listener = listener.tap_io(|s| {
+        let _ = s.set_nodelay(true);
+    });
     let app = Router::new()
         .route("/visit.js", get(library))
         .route("/health", get(|| async { Json(json!({ "ok": true, "version": VERSION })) }))

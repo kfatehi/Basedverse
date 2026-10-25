@@ -154,8 +154,9 @@ lobby refused it for good (`proto_unsupported`, `name_invalid`).
 
 ## 5. Page ↔ visit-client: `basedverse-visit-local/1`
 
-One WebSocket, `ws://127.0.0.1:<port>/ws`. Text frames are JSON objects with a string `type`; binary
-frames carry video (5.4). The library implements all of this; a sim never sees it unless it writes its own
+One WebSocket, `ws://127.0.0.1:<port>/ws`, with Nagle's algorithm off at both ends (a visit-client sets
+`TCP_NODELAY`, as browsers do: without it a small message waits for the last one's acknowledgement, some
+20 ms). Text frames are JSON objects with a string `type`; binary frames carry video (5.4). The library implements all of this; a sim never sees it unless it writes its own
 library (for a native sim, say).
 
 ### 5.1 Handshake
@@ -366,8 +367,9 @@ keyframe, bit 1 meta), timestamp (u64 big-endian, microseconds), the meta (16 by
 a visitor that said `frame_meta`), the encoded chunk.
 
 **Newest wins; nothing queues.** The host's visit-client resets an older stream when a newer keyframe
-starts one (its unsent frames are stale), lets at most 256 KiB be sent and not yet acknowledged (so a slow
-path backs up the sender, not seconds of video), and drops every frame of a group that is more than
+starts one (its unsent frames are stale), lets at most 64 KiB be sent and not yet acknowledged (6 Mbit/s
+over an 80 ms round trip, and little more: a slow path backs up the sender, not seconds of video), and drops
+every frame of a group that is more than
 100 ms older than the newest frame waiting, asking its page for a keyframe. The visitor's visit-client reads
 streams in order of their keyframes' timestamps. When a newer stream starts it stops reading older ones
 (QUIC `STOP_SENDING`): a stalled group is abandoned rather than waited for, and no frame of an older group
@@ -375,11 +377,14 @@ follows a newer group's keyframe. Frames go to the page as they arrive (5.4).
 
 ### 7.5 Bitrate
 
-The host's visit-client measures each link (QUIC's round-trip time and loss) and once a second tells its
-page the bitrate to encode that visit at (`bitrate`): start at 2 Mbit/s; if more than 2% of packets were
-lost or the round-trip time rose more than 50% above the link's lowest, multiply by 0.7; otherwise add
-150 kbit/s; never below 300 kbit/s or above 6 Mbit/s. Both visit-clients also tell their pages the link's
-path and round-trip time (`link_stats`), and log the path whenever it changes.
+The host's visit-client sets each visit's bitrate as WebRTC's congestion control (GCC) does, every 500 ms,
+from the link's round trip (against its lowest in the last 10 s: the path's own, without queueing) and its
+loss over the last interval: down to 85% the moment queueing delay builds (the round trip more than an
+eighth of that floor above it, and at least 8 ms); down by half the loss above 10% loss; held between 2%
+and 10% (Wi-Fi loses packets without being full); up 8% a second otherwise. It starts at 1 Mbit/s, stays
+between 300 kbit/s and 6 Mbit/s, and tells its page (`bitrate`) when it moves by 5% or more. Both
+visit-clients also tell their pages the link's path and round-trip time (`link_stats`), and log the path
+whenever it changes.
 
 ### 7.6 Blips
 
@@ -405,9 +410,11 @@ and a visitor refused at the handshake ends it at once (`link_failed`).
   latency, fewer frames do), then lowers the frame rate (never below 10); it climbs back the other way when
   it fits.
 - **Encoder.** `latencyMode: "realtime"`, the machine's own encoder where it has one
-  (`hardwareAcceleration: "prefer-hardware"`), the bitrate from section 7.5, a keyframe every 2 s, when
-  a visitor asks (`keyframe`; at most every 500 ms, as keyframes cost the host far more than other frames)
-  and as the first frame after `video_config` changes or the page reconnects. No B-frames (the codecs
+  (`hardwareAcceleration: "prefer-hardware"`), the bitrate from section 7.5, a keyframe every 10 s (the
+  link is reliable: a keyframe is for a decoder starting or lost, not for loss, and each is a burst a slow
+  link feels), when a visitor asks (`keyframe`; at most every 500 ms, as keyframes cost the host far more
+  than other frames) and as the first frame after `video_config` changes or the page reconnects. Frames
+  keep an even beat: the next is due a frame's time after this one was due, not after it went. No B-frames (the codecs
   above have none in realtime mode): every frame can be shown as soon as it is decoded.
 
 ### 8.2 Input
@@ -508,11 +515,11 @@ slowly while its tab is hidden.
 | view size | the visitor's, at most 1280×720 |
 | frame rate | up to 60 per visit: the host's `fps` (10–60, default 60), lowered (after the size) while it does not fit |
 | render size | the visitor's view, then three-quarters, then half of it while the host is busy |
-| bitrate | 2 Mbit/s to start, 0.3–6 Mbit/s |
-| keyframe interval | 2 s, and on request (a visitor's requests passed on at most every 500 ms) |
+| bitrate | 1 Mbit/s to start, 0.3–6 Mbit/s, set every 500 ms |
+| keyframe interval | 10 s, and on request (a visitor's requests passed on at most every 500 ms) |
 | input rate | on every change, at most every 8 ms, and every 33 ms regardless; at most 120 a second accepted |
 | video behind | a frame more than 100 ms older than the newest waiting is dropped, to the next keyframe |
-| link send window | 256 KiB sent and not yet acknowledged |
+| link send window | 64 KiB sent and not yet acknowledged |
 | control messages on a link | at most 20 a second from either side; more are dropped |
 | lobby silence | a minute: then the connection is made again |
 | input staleness | 300 ms |
