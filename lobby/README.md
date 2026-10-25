@@ -9,7 +9,7 @@ versions side by side, each its own lobby (a client's first hello decides):
 - **version 2** ([../visit/SPEC.md](../visit/SPEC.md), section 6): visit-clients, for Visit, walking
   around each other's rooms.
 
-Either way the lobby only introduces the sims: the video never passes through it.
+Either way the lobby only introduces the sims: nothing of a room (video, or a scene) passes through it.
 
 - **[PROTOCOL.md](PROTOCOL.md)** — version 1's contract, complete: hand it to anyone (or any LLM)
   building a compatible sim.
@@ -59,7 +59,8 @@ visit-clients).
 
    It copies `lobby/` to `~/basedverse-lobby/` on the server (a tar stream over ssh: nothing to install
    there first) and runs `lobby/deploy/setup.sh` there. That installs Docker, writes the server's
-   `deploy/.env` (its public and private addresses from the EC2 metadata, and a fresh TURN secret),
+   `deploy/.env` (its public and private addresses from the EC2 metadata, or, on another server, from
+   checkip.amazonaws.com and `hostname -I`, and a fresh TURN secret),
    starts the lobby, Caddy and coturn, waits for the certificate, and prints the address:
 
    ```
@@ -100,5 +101,6 @@ Nobody signs in: anyone who reaches the server can join under a free name, see w
 Nothing of your room is visible until you let someone in. Then, in version 1, **everyone in your group
 sees your room, and anyone in the group can let more people in**: leave the group, or set yourself
 `busy`, to stop that. In version 2 each visitor is let in by you, and sees what your sim renders for
-them. Whatever your room shows, they see: if it shows your work (issue titles, what your agents are
-doing), so does the video.
+them; if your room shares its three.js scene, they are sent all of it: everything under `root`, whether
+in their view or not, and each object's `userData`. Whatever your room shows, they see: if it shows your
+work (issue titles, what your agents are doing), so does the video, or the scene.

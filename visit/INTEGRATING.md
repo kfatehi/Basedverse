@@ -14,7 +14,8 @@ Your sim draws an office (a "workroom") in a browser page. After this integratio
 
 - it shows up in a lobby where other workrooms are, and can knock on theirs or let them in;
 - **as a host**, it lets up to a few visitors walk around your room: for each one, your page renders your
-  room from where that visitor stands, and Visit streams it to them;
+  room from where that visitor stands, and Visit streams it to them (or, if your room is made with
+  three.js, Visit sends them your scene and their browser draws it: step 5);
 - **as a visitor**, it shows the room you are walking around, and sends your WASD and mouse to its host.
 
 You get two shared pieces you do not modify:
@@ -22,7 +23,7 @@ You get two shared pieces you do not modify:
 - **visit-client**: a program that runs beside your sim on the same machine and does all the networking
   (the lobby, the connections to other workrooms). It listens on 127.0.0.1 only and needs a token.
 - **visit.js**: the library your page loads from visit-client. It talks only to visit-client, calls your
-  hooks, encodes and decodes the video, captures input.
+  hooks, encodes and decodes the video, draws a three.js host's scene, captures input.
 
 You write: a launcher step (start visit-client with a token), a way to hand the token to your page, three
 host hooks, and a little UI (or use the ready-made panel). Your page never opens any connection to
@@ -324,7 +325,9 @@ visit.host({
 ```
 
 - **`root`**: your `THREE.Scene` (its background and fog come along), or a `Group` holding the part to share.
-  Everything under it is sent to visitors: keep anything your user would not show a guest outside it.
+  Everything under it is sent to visitors, whether they can see it or not, and so is each object's
+  `userData` (three.js puts it in the scene's JSON): keep anything your user would not show a guest outside
+  it, and out of `userData`.
 - **`three`**: the namespace your scene was made with (`THREE`, or what `import * as THREE` gave you). Its
   revision (`THREE.REVISION`) picks the three.js the visitor draws with: the same release, r125 to r186.
 - **`renderer`**: your own renderer, for its settings (shadows, tone mapping, colour space): the visitor's

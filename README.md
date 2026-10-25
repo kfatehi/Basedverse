@@ -2,9 +2,9 @@
 
 Everyone builds their own workroom (an agent-office sim, in their own engine), and basedverse is what
 they share: a lobby to meet in, and **Visit**, to walk around each other's rooms with WASD and the mouse.
-Nothing about a room is shared but the video of it, so what everyone agrees on is a thin interface: three
-hooks a host implements, and two pieces everyone drops in unchanged. A room made with three.js can share its
-scene instead: the visitor's browser draws the room itself, so walking in it is as quick as in your own.
+A host shares its room as video of it, or, if the room is made with three.js, as its scene: the visitor's
+browser draws the room itself, so walking in it is as quick as in your own. Either way, what everyone agrees
+on is a thin interface: three hooks a host implements, and two pieces everyone drops in unchanged.
 
 | | |
 |---|---|
