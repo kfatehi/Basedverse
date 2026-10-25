@@ -107,6 +107,7 @@ visit-client --lobby wss://lobby.example/ --name "Magic Room" --sim my-sim/1.0 \
 | `--idle-exit` | `VISIT_IDLE_EXIT` | 0 | exit after this many seconds with no page connected (0: never) |
 | `--origins` | `VISIT_ORIGINS` | none | the page origins allowed to connect (`http://localhost:3000`, comma-separated); none: any page with the token (section 3, point 4) |
 | `--relays` | `VISIT_RELAYS` | the lobby's | the relays for links: `none`, `default` (iroh's own), or URLs, comma-separated |
+| `--state-file` | `VISIT_STATE_FILE` | none | a file where it keeps whether the office is away (`leave_lobby`, 5.2), so a restart stays away; none: every start joins the lobby. A launcher SHOULD give one |
 
 A flag wins over its environment variable, and a variable set but blank counts as unset (its default), as a
 `.env` file has it. [`../.env.example`](../.env.example) is the template of them all.
@@ -114,7 +115,7 @@ A flag wins over its environment variable, and a variable set but blank counts a
 On start it prints **one JSON line** to stdout once it listens, then logs to stderr:
 
 ```json
-{"ready": true, "port": 7401, "version": "0.1.0", "proto": "basedverse-visit-local/1"}
+{"ready": true, "port": 7401, "version": "0.2.0", "proto": "basedverse-visit-local/1"}
 ```
 
 Exit codes: 0 asked to stop (SIGINT/SIGTERM, or idle-exit); 2 bad flags; 3 the port is taken; 4 the
@@ -134,6 +135,10 @@ lobby refused it for good (`proto_unsupported`, `name_invalid`).
   (section 6.1): within 30 s the office comes back with the same id, knocks and visits, and visits whose
   links stayed up never notice. Later than that, the lobby has ended the session and its visits, and the
   visit-client starts a new one (a new office id) and ends those visits' links.
+- **Away.** The page can take the office out of the lobby on purpose (`leave_lobby`) while the visit-client
+  goes on running: its visits end (`"gone"`), its knocks go, it says `bye` (no resume window) and stays out,
+  reconnecting to nothing, until the page sends `join_lobby`, which starts a new session (a new office
+  id). With `--state-file` it stays away across restarts too: a visit-client started away joins nothing.
 - **Stopping** the visit-client takes the office out of the lobby, which ends all its visits.
 - **`--idle-exit`** is for sims whose launcher starts the visit-client again whenever the page loads. It
   counts from the last page disconnect.
@@ -143,7 +148,7 @@ lobby refused it for good (`proto_unsupported`, `name_invalid`).
 | request | auth | answer |
 |---|---|---|
 | `GET /visit.js` | none | the library (JavaScript), the version built into this binary. `Access-Control-Allow-Origin: *` |
-| `GET /health` | none | `{"ok": true, "version": "0.1.0"}` |
+| `GET /health` | none | `{"ok": true, "version": "0.2.0"}` |
 | `GET /ws` (WebSocket upgrade) | `hello.token` (5.1) | the page connection |
 | anything else | — | 404 |
 
@@ -164,8 +169,8 @@ The page sends, within 5 s:
 The visit-client answers `ready` (or closes: 4401 bad token, 4400 bad `proto`):
 
 ```json
-{"type": "ready", "version": "0.1.0", "office": {"id": "o1a2b3c4", "name": "Magic Room"},
- "online": true, "status": "available", "max_visitors": 3,
+{"type": "ready", "version": "0.2.0", "office": {"id": "o1a2b3c4", "name": "Magic Room"},
+ "online": true, "away": false, "status": "available", "max_visitors": 3,
  "visits": [{"id": "v…", "channel": 1, "role": "host", "peer": {"id": "o…", "name": "Ada", "sim": {…}}}],
  "limits": {"max_width": 1280, "max_height": 720, "fps": 30}}
 ```
@@ -179,6 +184,8 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `status` | `status`: `"available"` \| `"busy"` | set the office's status (busy: no new knocks, visits carry on) |
 | `max_visitors` | `n` (0–8) | change how many visitors the office takes; lower than the current count ends no visit |
 | `rename` | `name` | ask the lobby for another name; taken (`name_taken`) or invalid, the office keeps its own |
+| `leave_lobby` | — | take the office out of the lobby, and keep it out (away, 4.2): nobody sees it or can knock; its visits end |
+| `join_lobby` | — | back into the lobby after `leave_lobby`: a new session |
 | `knock` | `to` (office id), `message`? (≤ 280) | ask to visit an office |
 | `answer` | `knock`, `accept` (bool), `message`? | let a knocker in, or not |
 | `end` | `visit` | end a visit: yours as a visitor (leave), or a visitor's to you (kick) |
@@ -195,7 +202,7 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | type | fields | when |
 |---|---|---|
 | `ready` | 5.1 | after `hello` |
-| `online` / `offline` | `office`, `knocking` / — | the lobby session came up (after a drop: the same office if it resumed), with this office's own knocks still waiting ([{`id`, `to`}]) / went down |
+| `online` / `offline` | `office`, `knocking` / `away`? | the lobby session came up (after a drop: the same office if it resumed), with this office's own knocks still waiting ([{`id`, `to`}]) / went down: `away: true` when the page took it out (`leave_lobby`), `false` when it is on its way back (`join_lobby`), absent when the lobby is out of reach |
 | `lobby` | `offices`: [{`id`, `name`, `status`, `sim`, `max_visitors`, `visitors`, `visiting`, `ready`}] | every change (6.3) |
 | `knock` | `id`, `from` {`id`, `name`, `sim`}, `message`, `expires_in` | someone wants to visit you |
 | `knock_sent` / `knock_cancelled` / `answered` | as in section 6 | your knock's fate; a knock on you withdrawn |
@@ -412,7 +419,7 @@ The normative surface; INTEGRATING.md shows it in use. Loaded with
 const v = await Visit.connect({ port, token, sim: { name, version } });
 
 // state, always current; "change" fires whenever any of it changes (never for the per-frame traffic)
-v.state        // "connecting" | "online" | "offline"
+v.state        // "connecting" | "online" | "offline" (the lobby out of reach) | "away" (out of it on purpose)
 v.office       // { id, name } while online
 v.status       // "available" | "busy"
 v.maxVisitors  // number
@@ -428,6 +435,8 @@ v.setStatus(status); v.setMaxVisitors(n); v.rename(name)
 v.knock(officeId, message); v.answer(knockId, accept, message)
 v.leave()          // end your visit
 v.kick(visitId)    // end someone's visit to you
+v.leaveLobby()     // away: out of the lobby, nobody sees you or can knock, your visits end (kept across restarts
+v.joinLobby()      //   with VISIT_STATE_FILE); and back
 
 // hosting: register once after connect (and again after each page load)
 v.host({
@@ -442,7 +451,7 @@ const view = v.view(element);   // { release(), canvas }
 
 // helpers
 Visit.walk(pose, input, dt, { speed, blocked })   // first-person walking with wall sliding, for move()
-Visit.panel(element, v)                          // an optional ready-made lobby panel: { element, release() }
+Visit.panel(element, v)                          // an optional ready-made lobby panel, with Go offline / Go online: { element, release() }
 ```
 
 **Poses** are the host's own: the library only stores them and passes them back. `Visit.walk` uses
@@ -492,14 +501,16 @@ codes 4400 bad `hello`, 4401 bad or missing token, 4409 replaced by a newer page
 section 6.4 (`not_found`, `self_knock`, `not_available`, `full`, `not_ready`, `already_visiting`,
 `knock_pending`, `rate_limited`), `message_too_long`, `name_invalid`, `name_taken` (on `rename`; the
 office keeps its name), `not_yours` (answering a knock that is not yours), `no_such_visit` (`end` or
-`keyframe` for a visit you are not in), `offline` (an action while the lobby is down), `bad_message`.
+`keyframe` for a visit you are not in), `offline` (an action while the lobby is down), `away` (an action
+while the office is out of the lobby on purpose: `join_lobby` first), `bad_message`.
 
 **Link application error codes:** 0 normal close (`bye`), 1 refused (bad ticket or endpoint), 2 protocol
 mismatch, 3 visit over.
 
 ## 12. Versions
 
-Three names, each changed only by something an older peer could not handle (additions keep the name):
+Three names, each changed only by something an older peer could not handle (additions keep the name;
+[../CHANGELOG.md](../CHANGELOG.md) lists every release's additions, and what an integration does about them):
 `basedverse-visit-local/1` (page ↔ visit-client), `basedverse-lobby/2` (visit-client ↔ lobby),
 `basedverse-visit/1` (the link's ALPN). The library and the visit-client ship together, and the
 visit-client serves its own library, so a page always runs the library its visit-client speaks. Between

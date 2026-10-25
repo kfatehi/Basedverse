@@ -117,7 +117,9 @@ async def main():
     async with serve(lobby.handler, "127.0.0.1", 0, max_size=lobby.LIMITS["frame"], process_request=lobby.health,
                      ping_interval=1, ping_timeout=1) as server:
         url = "ws://127.0.0.1:%d" % server.sockets[0].getsockname()[1]
-        (pa, ta), (pb, tb) = await start_client("A", 7411, url, "--origins", "http://room.test"), await start_client("B", 7412, url)
+        state = os.path.join(TMP, "A.state.json")   # where A keeps whether it is away
+        a_flags = ("--origins", "http://room.test", "--state-file", state)
+        (pa, ta), (pb, tb) = await start_client("A", 7411, url, *a_flags), await start_client("B", 7412, url)
 
         print("\npage connection")
         bad = await Page(7411, ta).open(token="0" * 64)
@@ -133,7 +135,7 @@ async def main():
             check("A takes pages only from its --origins", "403" in str(e), True)
         a, b = await Page(7411, ta).open(), await Page(7412, tb).open()
         ra, rb = await a.expect("ready"), await b.expect("ready")
-        check("ready: the version, limits, no visits", (ra["version"], ra["limits"]["fps"], ra["visits"]), ("0.1.0", 30, []))
+        check("ready: the version, limits, no visits, not away", (ra["version"], ra["limits"]["fps"], ra["visits"], ra["away"]), ("0.2.0", 30, [], False))
         both = lambda m: m["type"] == "lobby" and sum(o["ready"] for o in m["offices"]) == 2
         lob = await a.until(both)
         await b.until(both)
@@ -257,6 +259,43 @@ async def main():
                 if m and m["type"] == "error":
                     stray.append(m)
         check("and no error after it (the link ended on purpose: no redialling, no link_failed)", stray, [])
+
+        print("\naway: out of the lobby on purpose, and back")
+        await a.drain()
+        await b.drain()
+        await b.send(type="knock", to=ids["A"])
+        await a.send(type="answer", knock=(await a.expect("knock"))["id"], accept=True)
+        await a.until(lambda m: m["type"] == "visit_started")
+        await b.until(lambda m: m["type"] == "visit_started")
+        await a.send(type="leave_lobby")
+        off = await a.until(lambda m: m["type"] == "offline")
+        check("A leaves the lobby: its page hears offline, away", off.get("away"), True)
+        eb = await b.until(lambda m: m["type"] == "visit_ended")
+        check("B's visit to A ends, `gone`", eb["reason"], "gone")
+        lob = await b.until(lambda m: m["type"] == "lobby" and all(o["name"] != "A" for o in m["offices"]))
+        check("and B's lobby no longer has A (it said bye: no resume window)", [o["name"] for o in lob["offices"]], ["B"])
+        await a.send(type="knock", to=ids["B"])
+        check("away, A cannot knock: refused `away`", (await a.expect("error", skip=("lobby", "visit_ended")))["code"], "away")
+        check("A's state file says away", json.load(open(state)), {"away": True})
+        a2 = await Page(7411, ta).open()
+        ra2 = await a2.expect("ready")
+        check("a page connecting to A meanwhile: ready says away, not online", (ra2["away"], ra2["online"]), (True, False))
+        a = a2
+        pa.terminate()
+        await asyncio.wait_for(pa.wait(), 5)
+        pa, ta = await start_client("A", 7411, url, *a_flags)
+        a = await Page(7411, ta).open()
+        ra = await a.expect("ready")
+        await asyncio.sleep(1.5)
+        check("A restarted with its state file: still away, and not in the lobby",
+              (ra["away"], ra["online"], "a" in lobby.BY_NAME2), (True, False, False))
+        await a.send(type="join_lobby")
+        back = await a.until(lambda m: m["type"] == "offline")
+        check("A joins again: its page hears it is no longer away", back.get("away"), False)
+        on = await a.until(lambda m: m["type"] == "online")
+        lob = await b.until(lambda m: m["type"] == "lobby" and any(o["name"] == "A" and o["ready"] for o in m["offices"]))
+        check("then online, a new office, and B sees it (link published)", (on["office"]["name"], on["office"]["id"] != ids["A"]), ("A", True))
+        check("A's state file says not away", json.load(open(state)), {"away": False})
         await a.drain()
         pb.terminate()
         await asyncio.wait_for(pb.wait(), 5)

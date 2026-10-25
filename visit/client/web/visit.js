@@ -7,7 +7,7 @@
 //   v.host({ spawn, move, render, fps });   v.view(element);   Visit.panel(element, v);
 "use strict";
 (function () {
-  const VERSION = "0.1.0", PROTO = "basedverse-visit-local/1";
+  const VERSION = "0.2.0", PROTO = "basedverse-visit-local/1";
   const CODECS = ["avc1.42E01F", "vp8", "vp09.00.10.08"];   // the order a host prefers, among what a visitor decodes
   const MOVE_MS = 1000 / 30, INPUT_MS = 1000 / 30, STALE_MS = 300, KEY_EVERY_MS = 2000, LOOK = 0.0025;
   // What the host hears many times a second: none of it changes what the page shows, so none fires "change".
@@ -37,7 +37,7 @@
   class Client {
     constructor(port, token, sim) {
       Object.assign(this, { port, token, sim });
-      this.state = "connecting";
+      this.state = "connecting";   // then "online", "offline" (the lobby out of reach), or "away" (left on purpose)
       this.office = null;
       this.status = "available";
       this.maxVisitors = 3;
@@ -114,7 +114,7 @@
     close() { this._closed = true; this._loop.stop(); this._dropAll(); if (this._ws) this._ws.close(); }
 
     _ready(m) {
-      this.state = m.online ? "online" : "offline";
+      this.state = m.away ? "away" : m.online ? "online" : "offline";
       this.office = m.office && m.office.id ? m.office : null;
       this.status = m.status; this.maxVisitors = m.max_visitors;
       this._limits = m.limits || this._limits;
@@ -139,7 +139,10 @@
           this.state = "online"; this.office = m.office;
           if (Array.isArray(m.knocking)) this.knocking = m.knocking.map(k => ({ id: k.id, to: k.to }));
           break;
-        case "offline": this.state = "offline"; break;
+        case "offline":   // away: this office left the lobby on purpose, and sees nobody until it joins again
+          this.state = m.away ? "away" : "offline";
+          if (m.away) { this.offices = []; this.knocks = []; this.knocking = []; }
+          break;
         case "lobby":
           this.offices = (m.offices || []).map(o => ({ id: String(o.id), name: String(o.name), status: String(o.status), sim: o.sim || {},
             maxVisitors: Number(o.max_visitors) || 0, visitors: Number(o.visitors) || 0, visiting: o.visiting || null, ready: o.ready === true }));
@@ -175,6 +178,10 @@
     knock(officeId, message = "") { this._send({ type: "knock", to: officeId, message }); }
     answer(knockId, accept, message = "") { this.knocks = this.knocks.filter(k => k.id !== knockId); this._send({ type: "answer", knock: knockId, accept, message }); this._changed(); }
     leave() { if (this.visiting) this._send({ type: "end", visit: this.visiting.id }); }
+    // Out of the lobby (nobody sees this office or can knock; its visits end) and back. visit-client keeps
+    // it out across its restarts when it has a state file (VISIT_STATE_FILE).
+    leaveLobby() { this._send({ type: "leave_lobby" }); }
+    joinLobby() { this._send({ type: "join_lobby" }); }
     kick(visitId) { this._send({ type: "end", visit: visitId }); }
 
     // ---------- visits ----------
@@ -526,7 +533,8 @@
     function draw() {
       if (root.contains(document.activeElement) && document.activeElement.tagName === "INPUT") return;   // never under a typing hand
       const me = v.office, rows = [];
-      rows.push(`<div class="row hd"><span class="dot ${v.state === "online" ? esc(v.status) : ""}"></span><span class="grow">Visit${me ? " · " + esc(me.name) : ""}</span><span class="muted">${esc(v.state)}</span></div>`);
+      rows.push(`<div class="row hd"><span class="dot ${v.state === "online" ? esc(v.status) : ""}"></span><span class="grow">Visit${me ? " · " + esc(me.name) : ""}</span><span class="muted">${esc(v.state)}</span>${v.state === "online" ? `<button data-v="away" title="leave the lobby: nobody sees you or can knock until you come back">Go offline</button>` : ""}</div>`);
+      if (v.state === "away") rows.push(`<div class="row"><span class="grow muted">out of the lobby: nobody sees you or can knock</span><button class="go" data-v="back">Go online</button></div>`);
       if (v.state === "online") {
         rows.push(`<div class="row"><span class="grow">you are</span><select data-v="status">${["available", "busy"].map(s => `<option${s === v.status ? " selected" : ""}>${s}</option>`).join("")}</select>
           <select data-v="max" title="how many visitors at once">${[0, 1, 2, 3, 4, 5, 6, 7, 8].map(n => `<option value="${n}"${n === v.maxVisitors ? " selected" : ""}>${n} visitors</option>`).join("")}</select></div>`);
@@ -562,6 +570,8 @@
       else if (act === "in" || act === "out") v.answer(b.dataset.k, act === "in");
       else if (act === "leave") v.leave();
       else if (act === "kick") v.kick(b.dataset.x);
+      else if (act === "away") v.leaveLobby();
+      else if (act === "back") v.joinLobby();
     });
     root.addEventListener("change", e => {
       if (e.target.dataset.v === "status") v.setStatus(e.target.value);

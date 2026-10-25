@@ -3,7 +3,7 @@
 //! last welcome, so a drop shorter than the lobby's resume window keeps the office, its knocks and its
 //! visits. Everything the lobby says goes to the core; the core's messages go to the lobby. The lobby pings
 //! every 20 s: a connection silent for a minute (a laptop waking, a network gone) is given up and made
-//! again.
+//! again. Away (the page left the lobby on purpose), it says bye and stays out until it is asked back.
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
@@ -22,6 +22,10 @@ const SILENCE: Duration = Duration::from_secs(60);
 pub enum LobbyOut {
     /// A message for the lobby.
     Msg(Value),
+    /// Leave the lobby and stay out (away), until `Join`.
+    Leave,
+    /// Come back after `Leave`: a new session.
+    Join,
     /// Leave for good (the visit-client is stopping).
     Bye,
 }
@@ -35,9 +39,21 @@ pub struct Hello {
     pub max_visitors: u8,
 }
 
-pub async fn run(url: String, mut hello: Hello, mut out: mpsc::UnboundedReceiver<LobbyOut>, core: mpsc::UnboundedSender<Ev>) {
+/// Until `Bye`. `away`: start out of the lobby (as the page last left it), until `Join`.
+pub async fn run(url: String, mut hello: Hello, mut out: mpsc::UnboundedReceiver<LobbyOut>, core: mpsc::UnboundedSender<Ev>, mut away: bool) {
     let (mut resume, mut backoff, mut me) = (None::<String>, 1u64, None::<String>);
     loop {
+        if away {
+            info!("away: out of the lobby until the page asks to come back");
+            loop {
+                match out.recv().await {
+                    Some(LobbyOut::Join) => break,
+                    Some(LobbyOut::Bye) | None => return,
+                    Some(_) => {}   // nothing to send while away
+                }
+            }
+            (away, resume, backoff) = (false, None, 1);
+        }
         match tokio::time::timeout(CONNECT_TIMEOUT, connect_async(url.as_str())).await {
             Ok(Ok((ws, _))) => {
                 let (mut tx, mut rx) = ws.split();
@@ -97,6 +113,13 @@ pub async fn run(url: String, mut hello: Hello, mut out: mpsc::UnboundedReceiver
                                     }
                                     if tx.send(Message::Text(m.to_string().into())).await.is_err() { break }
                                 }
+                                Some(LobbyOut::Leave) => {   // the session ends at once: nothing to resume
+                                    let _ = tx.send(Message::Text(json!({ "type": "bye" }).to_string().into())).await;
+                                    let _ = tx.close().await;
+                                    away = true;
+                                    break;
+                                }
+                                Some(LobbyOut::Join) => {}
                                 Some(LobbyOut::Bye) | None => {
                                     let _ = tx.send(Message::Text(json!({ "type": "bye" }).to_string().into())).await;
                                     let _ = tx.close().await;
@@ -107,12 +130,27 @@ pub async fn run(url: String, mut hello: Hello, mut out: mpsc::UnboundedReceiver
                     }
                 }
                 let _ = core.send(Ev::LobbyDown);
+                if away {
+                    continue;
+                }
             }
             Ok(Err(e)) => warn!("cannot reach the lobby: {e}"),
             Err(_) => warn!("the lobby did not answer in {} s", CONNECT_TIMEOUT.as_secs()),
         }
         info!("connecting to the lobby again in {backoff} s");
-        tokio::time::sleep(Duration::from_secs(backoff)).await;
+        // Waiting to try again; asked to leave meanwhile, it stays out instead.
+        let wait = tokio::time::sleep(Duration::from_secs(backoff));
+        tokio::pin!(wait);
+        loop {
+            tokio::select! {
+                _ = &mut wait => break,
+                o = out.recv() => match o {
+                    Some(LobbyOut::Leave) => { away = true; break }
+                    Some(LobbyOut::Bye) | None => return,
+                    Some(_) => {}
+                },
+            }
+        }
         backoff = (backoff * 2).clamp(1, 30);
     }
 }

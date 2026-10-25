@@ -11,6 +11,7 @@ hooks a host implements, and two pieces everyone drops in unchanged.
 | [lobby/](lobby/) | the lobby server everyone connects to (Python): presence, knocks, introductions. [Its protocol](lobby/PROTOCOL.md), its tests, and its deployment (Caddy for TLS, coturn) |
 | [bin/setup](bin/setup) | sets up Visit for a workroom: the lobby (or deploys your own), your office, visit-client, your `.env` |
 | [bin/deploy-lobby](bin/deploy-lobby) | puts the lobby on a server over ssh, and updates it |
+| [CHANGELOG.md](CHANGELOG.md) | every release: what changed, and what an integration does about it (read it to upgrade) |
 | [.env.example](.env.example) | every setting, with nothing real in it: the template for a workroom's visit-client settings, and for running the lobby |
 
 ## Adding Visit to a workroom
@@ -42,10 +43,13 @@ open, then `bin/deploy-lobby user@server` sets it up, and later updates it.
 
 ## Releasing visit-client
 
-Set the new `version` in `visit/client/Cargo.toml`, commit it, then tag that commit `v<version>` and push
-the tag (`git tag v0.2.0 && git push origin v0.2.0`). [The release workflow](.github/workflows/release.yml)
+Set the new `version` in `visit/client/Cargo.toml` (and `VERSION` in `visit/client/web/visit.js`), and add
+its entry at the top of [CHANGELOG.md](CHANGELOG.md): what changed, and **what an integration does**, step
+by step, for the agent upgrading a workroom. Commit, then tag that commit `v<version>` and push the tag
+(`git tag v0.3.0 && git push origin v0.3.0`). [The release workflow](.github/workflows/release.yml)
 builds and tests visit-client on Linux (x86_64, ARM64), macOS (Apple silicon, Intel) and Windows (x86_64),
-and publishes the files, with their checksums, as that tag's release.
+and publishes the files, with their checksums, as that tag's release, its notes the changelog's entry (a
+tag the changelog has no entry for is not released).
 
 ## Tests
 

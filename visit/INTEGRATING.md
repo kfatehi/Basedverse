@@ -53,7 +53,7 @@ python3 ../Basedverse/bin/setup --env .env      # basedverse beside your project
 It asks them for the lobby (an address they have, or their own server, where it deploys one), the office's
 name, the sim's name and version, and the page's address; gets visit-client for this machine (downloaded
 from the newest release, or built); and writes `VISIT_LOBBY`, `VISIT_NAME`, `VISIT_SIM`, `VISIT_ORIGINS`,
-`VISIT_PORT`, `VISIT_MAX_VISITORS` and `VISIT_CLIENT_PATH` into the `.env`, keeping its other lines (and
+`VISIT_PORT`, `VISIT_MAX_VISITORS`, `VISIT_STATE_FILE` and `VISIT_CLIENT_PATH` into the `.env`, keeping its other lines (and
 adding it to `.gitignore` if they say so). Tell them what it will ask, wait until they say it is done, then
 read the `.env`. Run again, it offers what the `.env` already says.
 
@@ -70,6 +70,10 @@ from that section if not, and keep it out of version control), and fill in:
   ending with a letter or digit; in quotes if it has a space, so a shell can read the file too);
 - `VISIT_SIM`: your sim's **name and version**, e.g. `my-workroom/1.0`;
 - `VISIT_ORIGINS`: your page's **origin**, e.g. `http://localhost:3000` (step 2 says why).
+
+- `VISIT_STATE_FILE`: a file of the user's own (outside your repository, e.g.
+  `~/.local/state/basedverse/<office>.json`) where visit-client keeps whether your user has gone offline, so
+  a restart does not put them back in the lobby.
 
 The rest can stay blank, meaning their defaults (port 7401, 3 visitors at once). `VISIT_TOKEN_FILE` is
 for your launcher to set (step 2). Never put real values in `.env.example` itself: it is basedverse's
@@ -328,19 +332,24 @@ Visit.panel(document.getElementById("visit-panel"), visit);
 
 It lists the workrooms online (with whether each is available, how many visitors it has and takes), lets
 your user knock with a message, shows knocks on your door with **Let in** / **Not now**, shows your
-visitors (with **Kick**) and your visit (with **Leave**), and sets your status and max visitors.
+visitors (with **Kick**) and your visit (with **Leave**), sets your status and max visitors, and has
+**Go offline** / **Go online**.
 
 Or build your own from the state and actions: `visit.offices`, `visit.knocks`, `visit.visiting`,
 `visit.visitors`, `visit.knock(id, message)`, `visit.answer(knockId, true | false)`, `visit.leave()`,
-`visit.kick(visitId)`, `visit.setStatus("available" | "busy")`, `visit.setMaxVisitors(n)`; redraw on
-`"change"`. Rules your UI must follow:
+`visit.kick(visitId)`, `visit.setStatus("available" | "busy")`, `visit.setMaxVisitors(n)`,
+`visit.leaveLobby()`, `visit.joinLobby()`; redraw on `"change"`. Rules your UI must follow:
 
 - Offer **Knock** only for offices that are `ready`, `available`, not you, not full
   (`visitors < maxVisitors`), and not the one you are visiting.
 - Show each knock on your door with who, their message and the seconds left, and both answers.
 - Escape all names and messages before putting them in HTML: they come from strangers.
+- Give your user a way to **go offline and back** (`leaveLobby()` / `joinLobby()`), and show when they
+  are: `visit.state === "away"`. Away, nobody sees them or can knock, and their visits end; with
+  `VISIT_STATE_FILE` they stay away until they come back, restarts included. Do not stop visit-client for
+  this: it keeps your page connected while away, so the switch works.
 
-**Check:** your user can see other workrooms, knock, and answer a knock.
+**Check:** your user can see other workrooms, knock, answer a knock, and go offline and back.
 
 ## Step 8 — Test it on one machine
 
@@ -383,6 +392,8 @@ Then, in order:
       there is a way to leave.
 - [ ] The lobby: offices, knocks, answers, visitors (kick), your visit (leave), status and max visitors
       all work, with the knock rules of step 7; names and messages are escaped.
+- [ ] Your user can go offline and back (the panel, or `leaveLobby()` / `joinLobby()`), and stays offline
+      across a restart (`VISIT_STATE_FILE`).
 - [ ] Step 8 passes, reloads included.
 
 ## Troubleshooting
@@ -396,11 +407,24 @@ Then, in order:
 | connect closes with 4409 | another page of yours connected after this one; only the newest page is live |
 | `state` stays `"offline"` | visit-client cannot reach the lobby: a wrong `VISIT_LOBBY`, or no network; its stderr says why |
 | you never become `ready` in the lobby | visit-client could not start its connection endpoint; its stderr says why |
+| actions refused `away` | your user went offline (`visit.state` is `"away"`): `joinLobby()` brings them back |
 | knocks refused `not_ready` | you or the door have not published a link yet; wait a few seconds |
 | a visit ends `link_failed` | the two machines could not connect, even through the relay; check the relay is up |
 | the visitor sees a black or frozen view | `render` returned a canvas that was not drawn (cleared, or a different canvas), or threw (see the console) |
 | visitors walk through walls | your `blocked` does not cover them, or your `move` ignores it |
 | visitors' view slows to a crawl while your tab is in the background | your page's Content-Security-Policy forbids `blob:` workers, so the library's timer is the page's own (slowed in the background): allow `worker-src blob:` |
+
+## Upgrading
+
+basedverse's [../CHANGELOG.md](../CHANGELOG.md) lists every release: what changed, and **what an
+integration does about it**. To upgrade a workroom that works, read it from the version you have
+(`visit-client --version`) up to the newest, then:
+
+1. Pull basedverse (`git pull` in its checkout).
+2. Get the new visit-client: run setup again (it keeps the `.env`'s answers; choose download), or step 1.
+3. Do each "what an integration does" of the versions you skipped, in order, and add any new setting it
+   names to the `.env` (setup adds its own).
+4. Run step 8 again.
 
 ## Don't
 

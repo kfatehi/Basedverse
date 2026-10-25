@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Set up Visit for a workroom. It asks for the lobby (an address you have, or one deployed on your own
 server), the office's name, the sim, and the workroom page's address; gets visit-client for this machine;
-and writes it all into the workroom's .env, as the VISIT_* settings of .env.example. Run again, it offers
+and writes it all into the workroom's .env, as the VISIT_* settings of .env.example (with a state file
+of the user's own, where visit-client remembers whether they went offline). Run again, it offers
 what the .env already says. Given flags, it asks only for what they leave out; with --yes, nothing.
 
   python3 bin/setup --env ../my-workroom/.env        (Windows: py bin\\setup --env ..\\my-workroom\\.env)
@@ -310,6 +311,16 @@ def get_client(args, ask, env):
     return dest.as_posix()
 
 
+def default_state(name):
+    """Where visit-client keeps whether the office is away: the user's own state directory, out of any repository."""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "office"
+    if WINDOWS:
+        base = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local")
+    else:
+        base = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state")
+    return (base / "basedverse" / (slug + ".json")).as_posix()
+
+
 # -- the rest ----------------------------------------------------------------------------------------
 def gitignored(env_path, ask):
     """Warn (or, asked, fix) when the .env is in a git repository that does not ignore it."""
@@ -374,10 +385,13 @@ def main():
     mv = args.max_visitors if args.max_visitors is not None else None
     mv = str(check_given(mv, max_check, "--max-visitors") if mv is not None else ask.ask("Visitors at once (0-8)", env.get("VISIT_MAX_VISITORS", "") or "3", max_check, "--max-visitors"))
 
+    state = env.get("VISIT_STATE_FILE") or default_state(name)
+    Path(state).expanduser().parent.mkdir(parents=True, exist_ok=True)
+
     client = get_client(args, ask, env)
 
     values = {"VISIT_LOBBY": lobby, "VISIT_NAME": name, "VISIT_SIM": sim, "VISIT_ORIGINS": allowed,
-              "VISIT_PORT": port, "VISIT_MAX_VISITORS": mv}
+              "VISIT_PORT": port, "VISIT_MAX_VISITORS": mv, "VISIT_STATE_FILE": state}
     if client:
         values["VISIT_CLIENT_PATH"] = client
     write_env(env_path, values)

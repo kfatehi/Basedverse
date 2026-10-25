@@ -3,6 +3,7 @@
 //! sections 4-8). Everything else talks to it through `Ev`s.
 use std::{
     collections::{BTreeMap, HashMap},
+    path::PathBuf,
     time::{Duration, Instant},
 };
 
@@ -92,6 +93,9 @@ pub struct Core {
     page_gone: Instant,
     idle_exit: u64,
     online: bool,
+    /// The page took this office out of the lobby (leave_lobby), until join_lobby: kept in `state_file`.
+    away: bool,
+    state_file: Option<PathBuf>,
     office: Value,
     status: String,
     max_visitors: u8,
@@ -109,7 +113,8 @@ pub struct Core {
 const LIMITS: fn() -> Value = || json!({ "max_width": 1280, "max_height": 720, "fps": 30 });
 
 impl Core {
-    pub fn new(lobby: mpsc::UnboundedSender<LobbyOut>, me: mpsc::UnboundedSender<Ev>, relays: Option<Relays>, max_visitors: u8, idle_exit: u64) -> Core {
+    pub fn new(lobby: mpsc::UnboundedSender<LobbyOut>, me: mpsc::UnboundedSender<Ev>, relays: Option<Relays>, max_visitors: u8, idle_exit: u64,
+               away: bool, state_file: Option<PathBuf>) -> Core {
         Core {
             lobby,
             me,
@@ -120,6 +125,8 @@ impl Core {
             page_gone: Instant::now(),
             idle_exit,
             online: false,
+            away,
+            state_file,
             office: Value::Null,
             status: "available".into(),
             max_visitors,
@@ -232,7 +239,7 @@ impl Core {
         self.page = Some(Page { id, text, frames });
         let visits: Vec<Value> = self.visits.values().filter(|v| v.up).map(started).collect();
         self.to_page(json!({
-            "type": "ready", "version": VERSION, "office": self.office, "online": self.online, "status": self.status,
+            "type": "ready", "version": VERSION, "office": self.office, "online": self.online, "away": self.away, "status": self.status,
             "max_visitors": self.max_visitors, "visits": visits, "limits": LIMITS(),
         }));
         if let Some(view) = self.lobby_view.clone() {
@@ -282,6 +289,8 @@ impl Core {
                 }
                 None => self.page_error("bad_message", "n must be 0 to 8", Some("max_visitors")),
             },
+            "leave_lobby" => self.set_away(true),
+            "join_lobby" => self.set_away(false),
             "knock" | "answer" => {
                 if t == "answer" {   // answered: no longer waiting, so not shown again to a page that reconnects
                     if let Some(k) = m.get("knock").and_then(Value::as_str) {
@@ -392,7 +401,42 @@ impl Core {
             let _ = self.lobby.send(LobbyOut::Msg(m));
         } else {
             let re = m.get("type").and_then(Value::as_str).map(str::to_string);
-            self.page_error("offline", "the lobby is not reachable right now", re.as_deref());
+            if self.away {
+                self.page_error("away", "this office is out of the lobby: join_lobby to come back", re.as_deref());
+            } else {
+                self.page_error("offline", "the lobby is not reachable right now", re.as_deref());
+            }
+        }
+    }
+
+    /// In or out of the lobby, as the page asks. Out: its visits end, its knocks go, the lobby hears bye,
+    /// and it stays out (across restarts too, with a state file) until asked back.
+    fn set_away(&mut self, away: bool) {
+        if away == self.away {
+            return;
+        }
+        self.away = away;
+        self.save_state();
+        if away {
+            info!("leaving the lobby: the page asked");
+            self.end_all("gone");
+            self.knocks.clear();
+            self.lobby_view = None;
+            self.online = false;
+            let _ = self.lobby.send(LobbyOut::Leave);
+        } else {
+            info!("joining the lobby again: the page asked");
+            let _ = self.lobby.send(LobbyOut::Join);
+        }
+        self.to_page(json!({ "type": "offline", "away": away }));
+    }
+
+    fn save_state(&self) {
+        let Some(path) = &self.state_file else { return };
+        let tmp = path.with_extension("tmp");
+        let body = json!({ "away": self.away }).to_string();
+        if let Err(e) = std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, path)) {
+            warn!("could not keep the away state in {}: {e}", path.display());
         }
     }
 
@@ -403,6 +447,9 @@ impl Core {
     }
 
     async fn lobby_msg(&mut self, m: Value) {
+        if self.away {
+            return;   // the last words of a session it has left
+        }
         let t = m.get("type").and_then(Value::as_str).unwrap_or("").to_string();
         match t.as_str() {
             "welcome" => {

@@ -179,6 +179,15 @@ async def main():
         await b.js("document.getElementById('leave').click()")
         check("B leaves: its stage goes", await b.until("!v.visiting && document.getElementById('stage').hidden"), True)
         check("and A has no visitors", await a.until("v.visitors.length === 0"), True)
+
+        print("\ngoing offline from the panel, and back")
+        await a.js("document.querySelector('.visit-panel button[data-v=away]').click()")
+        check("A clicks Go offline: A is away", await a.until("v.state === 'away' && v.state"), "away")
+        check("and B's lobby no longer lists A", await b.until("!v.offices.some(o => o.name === 'A')"), True)
+        check("A's panel offers Go online, and lists nobody", await a.until("!!document.querySelector('.visit-panel button[data-v=back]') && v.offices.length === 0"), True)
+        await a.js("document.querySelector('.visit-panel button[data-v=back]').click()")
+        check("A clicks Go online: online again", await a.until("v.state === 'online' && v.state"), "online")
+        check("and B sees A again, ready to visit", await b.until("v.offices.some(o => o.name === 'A' && o.ready)"), True)
         check("no errors in either page", (a.errors, b.errors), ([], []))
         for p in (pa, pb):
             p.terminate()
