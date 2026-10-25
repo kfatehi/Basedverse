@@ -38,6 +38,12 @@ TARGETS = {   # (system, machine) -> the release's build for it
 WINDOWS = os.name == "nt"
 EXE = "visit-client.exe" if WINDOWS else "visit-client"
 
+# Piped or redirected on Windows, Python writes in the ANSI code page (cp1252), which has no ⚠ or ✓:
+# a character it cannot write comes out as "?" instead of stopping setup with a UnicodeEncodeError.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(errors="replace")
+
 
 def die(msg):
     sys.exit("setup: " + msg)
