@@ -1,11 +1,11 @@
 //! The links between visit-clients (../SPEC.md section 7): one QUIC connection per visit, made with iroh.
 //! The visitor dials and proves the visit with its ticket; the host admits it only if the ticket matches
 //! and the dialler is the endpoint the lobby named. A link that drops is redialled for a grace period.
-//! Inputs travel as datagrams, video (or a scene's deltas) as one stream per group of pictures, a scene's
-//! edits on a stream of their own, everything else on the control stream. Video is newest-wins, as in cloud
-//! gaming: a link that falls behind drops frames (and starts again from a keyframe) rather than queue them, and
-//! a newer group of pictures cuts off the older's rest. A scene's edits are never dropped one by one: a link
-//! too far behind drops them all, and the host's page sends its whole scene again.
+//! Inputs travel as datagrams, the host's scene's deltas as one stream per key delta and those after it, its
+//! edits on a stream of their own, everything else on the control stream. Deltas are newest-wins, as video is
+//! in cloud gaming: a link that falls behind drops them (and starts again from a key delta) rather than queue
+//! them, and a newer key delta cuts off the older stream's rest. A scene's edits are never dropped one by one:
+//! a link too far behind drops them all, and the host's page sends its whole scene again.
 use std::{
     collections::HashMap,
     sync::{
@@ -31,21 +31,20 @@ use crate::{
     frames::{self, Frame},
 };
 
-pub const ALPN: &[u8] = b"basedverse-visit/1";
+pub const ALPN: &[u8] = b"basedverse-visit/2";
 const DIAL_TIMEOUT: Duration = Duration::from_secs(20);
 const GRACE: Duration = Duration::from_secs(15);
 const REDIAL: Duration = Duration::from_secs(2);
 const HANDSHAKE: Duration = Duration::from_secs(5);
 /// The most a link may have sent and not yet had acknowledged, queued data included: enough for 6 Mbit/s over
-/// an 80 ms round trip, and little more, so a slow path backs the writer up (which then drops frames) instead
+/// an 80 ms round trip, and little more, so a slow path backs the writer up (which then drops deltas) instead
 /// of buffering seconds of them (QUIC's default is 10 MB; 256 KiB was still most of a second, tests/perf).
 const SEND_WINDOW: u64 = 64 * 1024;
-/// A frame this much older than the newest one waiting behind it is stale: the link is behind (microseconds,
-/// of the frames' own timestamps). A few frames handed over at once, as an encoder does, are not.
+/// A delta this much older than the newest one waiting behind it is stale: the link is behind (microseconds,
+/// of the deltas' own timestamps).
 const BEHIND_US: u64 = 100_000;
-/// What a link's streams start with, once both sides said `streams: 2` in the handshake (visit-client 0.4 and
-/// later): a group of pictures (or of scene deltas), or a scene's edits.
-const STREAM_VIDEO: u8 = 0;
+/// What each of a link's streams starts with: a key delta and those after it, or a scene's edits.
+const STREAM_DELTAS: u8 = 0;
 const STREAM_SCENE: u8 = 1;
 /// The most of a scene's edits (gzipped) that may wait to go: past it, a link is far slower than the room
 /// changes, and what waits is dropped (the host's page then sends the whole scene again).
@@ -60,7 +59,7 @@ pub enum LinkCmd {
     Ctl(Value),
     /// The visitor's input (sent as a datagram).
     Input(Value),
-    /// An encoded frame of the host's view, or a delta of its scene.
+    /// A delta of the host's scene.
     Frame(Frame),
     /// An edit of the host's scene, gzipped JSON (../SPEC.md section 8.3).
     Scene(Bytes),
@@ -86,10 +85,6 @@ pub struct Established {
     conn: Connection,
     send: SendStream,
     recv: RecvStream,
-    /// The other side reads frames' meta (its handshake said `frame_meta`; visit-client 0.3 and later).
-    meta: bool,
-    /// Both sides said `streams: 2`: each stream starts with what it is (STREAM_VIDEO, STREAM_SCENE).
-    typed: bool,
 }
 
 /// A visit a host is waiting to be dialled for.
@@ -192,7 +187,7 @@ async fn admit(incoming: Incoming, expected: Ledger) -> Result<()> {
         let ledger = expected.lock().unwrap();
         match ledger.get(&visit) {
             Some(x)
-                if hello.get("proto").and_then(Value::as_str) == Some("basedverse-visit/1")
+                if hello.get("proto").and_then(Value::as_str) == Some("basedverse-visit/2")
                     && ct_eq(hello.get("ticket").and_then(Value::as_str).unwrap_or(""), &x.ticket)
                     && conn.remote_id() == x.endpoint =>
             {
@@ -204,10 +199,8 @@ async fn admit(incoming: Incoming, expected: Ledger) -> Result<()> {
             }
         }
     };
-    frames::write_msg(&mut send, &json!({ "ok": true, "streams": 2 })).await?;
-    let meta = hello.get("frame_meta").and_then(Value::as_bool).unwrap_or(false);
-    let typed = hello.get("streams").and_then(Value::as_u64) == Some(2);
-    tx.send(Established { conn, send, recv, meta, typed }).await.map_err(|_| anyhow!("visit {visit} is over"))
+    frames::write_msg(&mut send, &json!({ "ok": true })).await?;
+    tx.send(Established { conn, send, recv }).await.map_err(|_| anyhow!("visit {visit} is over"))
 }
 
 /// The host turned the link down (code 1): its visit, ticket or endpoint did not match. Redialling is no use.
@@ -225,7 +218,7 @@ impl std::error::Error for Refused {}
 async fn dial(ep: &Endpoint, addr: &EndpointAddr, visit: &str, ticket: &str) -> Result<Established> {
     let conn = ep.connect(addr.clone(), ALPN).await?;
     let (mut send, mut recv) = conn.open_bi().await?;
-    frames::write_msg(&mut send, &json!({ "proto": "basedverse-visit/1", "visit": visit, "ticket": ticket, "frame_meta": true, "streams": 2 })).await?;
+    frames::write_msg(&mut send, &json!({ "proto": "basedverse-visit/2", "visit": visit, "ticket": ticket })).await?;
     let ok = tokio::time::timeout(HANDSHAKE, frames::read_msg(&mut recv)).await.ok().and_then(Result::ok).flatten();
     if ok.as_ref().and_then(|v| v.get("ok")).and_then(Value::as_bool) != Some(true) {
         if matches!(conn.close_reason(), Some(ConnectionError::ApplicationClosed(c)) if c.error_code.into_inner() == 1) {
@@ -233,8 +226,7 @@ async fn dial(ep: &Endpoint, addr: &EndpointAddr, visit: &str, ticket: &str) -> 
         }
         bail!("the host did not answer the handshake");
     }
-    let typed = ok.as_ref().and_then(|v| v.get("streams")).and_then(Value::as_u64) == Some(2);
-    Ok(Established { conn, send, recv, meta: false, typed })   // the host sends the video: whether it reads meta is moot
+    Ok(Established { conn, send, recv })
 }
 
 /// Waits for a Close from the core (or for the core to drop the link), discarding anything else: what is
@@ -350,29 +342,28 @@ async fn next_arrival(arrivals: &mut Option<&mut mpsc::Receiver<Established>>) -
 
 /// One connection of a visit's link, until it ends.
 async fn run(role: Role, visit: &str, est: Established, cmds: &mut mpsc::Receiver<LinkCmd>, core: &mpsc::UnboundedSender<Ev>, mut arrivals: Option<&mut mpsc::Receiver<Established>>) -> Ended {
-    let Established { conn, mut send, recv, meta, typed } = est;
+    let Established { conn, mut send, recv } = est;
     let (ctl_tx, mut ctl_rx) = mpsc::channel::<Value>(64);
     let mut tasks: Vec<JoinHandle<()>> = vec![tokio::spawn(read_ctl(recv, ctl_tx))];
     let (need_key, newest) = (Arc::new(AtomicBool::new(true)), Arc::new(AtomicU64::new(0)));
-    let video = match role {
+    let deltas = match role {
         Role::Host => {
             let (tx, rx) = mpsc::channel::<Frame>(32);
-            tasks.push(tokio::spawn(write_video(conn.clone(), rx, need_key.clone(), newest.clone(), meta, typed, visit.to_string(), core.clone())));
+            tasks.push(tokio::spawn(write_deltas(conn.clone(), rx, need_key.clone(), newest.clone(), visit.to_string(), core.clone())));
             Some(tx)
         }
         Role::Visitor => {
-            tasks.push(tokio::spawn(read_streams(conn.clone(), typed, visit.to_string(), core.clone())));
+            tasks.push(tokio::spawn(read_streams(conn.clone(), visit.to_string(), core.clone())));
             None
         }
     };
     let scene = (role == Role::Host).then(|| {
         let (tx, rx) = mpsc::unbounded_channel::<(u64, Bytes)>();
         let q = Arc::new(SceneQueue { bytes: AtomicUsize::new(0), gen: AtomicU64::new(0) });
-        tasks.push(tokio::spawn(write_scene(conn.clone(), rx, q.clone(), typed, visit.to_string(), core.clone())));
+        tasks.push(tokio::spawn(write_scene(conn.clone(), rx, q.clone(), visit.to_string(), core.clone())));
         (tx, q)
     });
-    let (mut bitrate, mut tick, mut path) = (Bitrate::new(), tokio::time::interval(Bitrate::EVERY), None::<bool>);
-    let mut stats_at = Instant::now();
+    let (mut tick, mut path) = (tokio::time::interval(Duration::from_secs(1)), None::<bool>);
     let ended = loop {
         tokio::select! {
             msg = ctl_rx.recv() => match msg {
@@ -388,9 +379,9 @@ async fn run(role: Role, visit: &str, est: Established, cmds: &mut mpsc::Receive
             cmd = cmds.recv() => match cmd {
                 Some(LinkCmd::Ctl(v)) => if frames::write_msg(&mut send, &v).await.is_err() { break ending(&conn) },
                 Some(LinkCmd::Input(v)) => { let _ = conn.send_datagram(Bytes::from(serde_json::to_vec(&v).unwrap_or_default())); }
-                Some(LinkCmd::Frame(f)) => if let Some(tx) = &video {
+                Some(LinkCmd::Frame(f)) => if let Some(tx) = &deltas {
                     newest.fetch_max(f.ts, Ordering::SeqCst);
-                    // The writer cannot keep up: drop frames until the next keyframe, and ask for one.
+                    // The writer cannot keep up: drop deltas until the next key delta, and ask for one.
                     if tx.try_send(f).is_err() && !need_key.swap(true, Ordering::SeqCst) {
                         let _ = core.send(Ev::WantKey { visit: visit.to_string() });
                     }
@@ -414,15 +405,6 @@ async fn run(role: Role, visit: &str, est: Established, cmds: &mut mpsc::Receive
                 None => { conn.close(VarInt::from_u32(3), b"visit over"); break Ended::Closed }
             },
             _ = tick.tick() => {
-                if role == Role::Host {
-                    if let Some(bps) = bitrate.update(&conn) {
-                        let _ = core.send(Ev::Bitrate { visit: visit.to_string(), bps });
-                    }
-                }
-                if stats_at.elapsed() < Duration::from_secs(1) {
-                    continue;
-                }
-                stats_at = Instant::now();
                 // Which way the link goes (direct, or through a relay: slower, and rate-limited) and how long a
                 // round trip takes, for the page and the log.
                 if let Some(p) = conn.paths().iter().find(|p| p.is_selected()) {
@@ -452,10 +434,10 @@ async fn read_ctl(mut recv: RecvStream, tx: mpsc::Sender<Value>) {
     }
 }
 
-/// The host's side of the video: each keyframe starts a new stream, cutting off what is left of the older
-/// one (reset, not finished: its unsent frames are stale). A frame BEHIND_US older than the newest one
-/// waiting means the link is behind: the rest of that group is dropped, and the page asked for a keyframe.
-async fn write_video(conn: Connection, mut rx: mpsc::Receiver<Frame>, need_key: Arc<AtomicBool>, newest: Arc<AtomicU64>, meta: bool, typed: bool, visit: String, core: mpsc::UnboundedSender<Ev>) {
+/// The host's side of the deltas: each key delta starts a new stream, cutting off what is left of the older
+/// one (reset, not finished: its unsent deltas are stale). A delta BEHIND_US older than the newest one waiting
+/// means the link is behind: the rest of that stream's are dropped, and the page asked for a key delta.
+async fn write_deltas(conn: Connection, mut rx: mpsc::Receiver<Frame>, need_key: Arc<AtomicBool>, newest: Arc<AtomicU64>, visit: String, core: mpsc::UnboundedSender<Ev>) {
     let mut cur: Option<SendStream> = None;
     while let Some(f) = rx.recv().await {
         if f.key {
@@ -463,22 +445,22 @@ async fn write_video(conn: Connection, mut rx: mpsc::Receiver<Frame>, need_key: 
                 let _ = old.reset(VarInt::from_u32(0));
             }
             match conn.open_uni().await {
-                Ok(mut s) => cur = (!typed || s.write_all(&[STREAM_VIDEO]).await.is_ok()).then_some(s),
-                Err(e) => return debug!("cannot open a video stream: {e}"),
+                Ok(mut s) => cur = s.write_all(&[STREAM_DELTAS]).await.is_ok().then_some(s),
+                Err(e) => return debug!("cannot open a delta stream: {e}"),
             }
             need_key.store(cur.is_none(), Ordering::SeqCst);
         } else if need_key.load(Ordering::SeqCst) {
             continue;
         } else if newest.load(Ordering::SeqCst).saturating_sub(f.ts) > BEHIND_US {
-            debug!(%visit, behind_ms = (newest.load(Ordering::SeqCst) - f.ts) / 1000, "the link is behind: dropping to the next keyframe");
+            debug!(%visit, behind_ms = (newest.load(Ordering::SeqCst) - f.ts) / 1000, "the link is behind: dropping to the next key delta");
             need_key.store(true, Ordering::SeqCst);
             let _ = core.send(Ev::WantKey { visit: visit.clone() });
             continue;
         }
         if let Some(s) = cur.as_mut() {
-            trace!(key = f.key, ts = f.ts, len = f.data.len(), "frame out");
-            if let Err(e) = s.write_all(&f.to_link(meta)).await {
-                debug!("a video stream failed: {e}");
+            trace!(key = f.key, ts = f.ts, len = f.data.len(), "delta out");
+            if let Err(e) = s.write_all(&f.to_link()).await {
+                debug!("a delta stream failed: {e}");
                 cur = None;
                 need_key.store(true, Ordering::SeqCst);
             }
@@ -496,50 +478,45 @@ struct SceneQueue {
 /// The host's side of a scene: its edits in order on one stream of their own (reliable: each builds on the
 /// last), opened with the first. A stream that fails, or a round dropped, has the host's page send its whole
 /// scene again.
-async fn write_scene(conn: Connection, mut rx: mpsc::UnboundedReceiver<(u64, Bytes)>, q: Arc<SceneQueue>, typed: bool, visit: String, core: mpsc::UnboundedSender<Ev>) {
+async fn write_scene(conn: Connection, mut rx: mpsc::UnboundedReceiver<(u64, Bytes)>, q: Arc<SceneQueue>, visit: String, core: mpsc::UnboundedSender<Ev>) {
     let mut cur: Option<SendStream> = None;
     while let Some((gen, gz)) = rx.recv().await {
         if gen == q.gen.load(Ordering::SeqCst) {
-            if !typed {
-                warn!(%visit, "a scene for a visitor that cannot take one: dropped");
-            } else {
-                if cur.is_none() {
-                    match conn.open_uni().await {
-                        Ok(mut s) => cur = s.write_all(&[STREAM_SCENE]).await.is_ok().then_some(s),
-                        Err(e) => return debug!("cannot open the scene stream: {e}"),
-                    }
+            if cur.is_none() {
+                match conn.open_uni().await {
+                    Ok(mut s) => cur = s.write_all(&[STREAM_SCENE]).await.is_ok().then_some(s),
+                    Err(e) => return debug!("cannot open the scene stream: {e}"),
                 }
-                let ok = match cur.as_mut() {
-                    Some(s) => frames::write_scene_msg(s, &gz).await.is_ok(),
-                    None => false,
-                };
-                if !ok {
-                    debug!(%visit, "the scene stream failed: the page sends the scene again");
-                    cur = None;
-                    q.gen.fetch_add(1, Ordering::SeqCst);
-                    let _ = core.send(Ev::SceneResync { visit: visit.clone() });
-                }
+            }
+            let ok = match cur.as_mut() {
+                Some(s) => frames::write_scene_msg(s, &gz).await.is_ok(),
+                None => false,
+            };
+            if !ok {
+                debug!(%visit, "the scene stream failed: the page sends the scene again");
+                cur = None;
+                q.gen.fetch_add(1, Ordering::SeqCst);
+                let _ = core.send(Ev::SceneResync { visit: visit.clone() });
             }
         }
         q.bytes.fetch_sub(gz.len(), Ordering::SeqCst);
     }
 }
 
-/// The visitor's side: each stream the host opens is a group of pictures (or of scene deltas), or its scene's
-/// edits (with typed streams its first byte says which; without, every stream is video). A newer group of
-/// pictures abandons the older (its reader stopped), so a stalled one is never waited for.
-async fn read_streams(conn: Connection, typed: bool, visit: String, core: mpsc::UnboundedSender<Ev>) {
-    let (mut video, mut scene): (Option<JoinHandle<()>>, Option<JoinHandle<()>>) = (None, None);
+/// The visitor's side: each stream the host opens is a key delta and those after it, or its scene's edits;
+/// its first byte says which. A newer key delta's stream abandons the older (its reader stopped), so a stalled
+/// one is never waited for.
+async fn read_streams(conn: Connection, visit: String, core: mpsc::UnboundedSender<Ev>) {
+    let (mut deltas, mut scene): (Option<JoinHandle<()>>, Option<JoinHandle<()>>) = (None, None);
     while let Ok(mut stream) = conn.accept_uni().await {
-        let mut kind = [STREAM_VIDEO];
-        if typed && !matches!(tokio::time::timeout(HANDSHAKE, stream.read_exact(&mut kind)).await, Ok(Ok(()))) {
+        let mut kind = [STREAM_DELTAS];
+        if !matches!(tokio::time::timeout(HANDSHAKE, stream.read_exact(&mut kind)).await, Ok(Ok(()))) {
             continue;
         }
         let (core, visit) = (core.clone(), visit.clone());
         match kind[0] {
-            STREAM_VIDEO => {
-                debug!(%visit, "a new group of pictures");
-                if let Some(old) = video.replace(tokio::spawn(read_video(stream, visit, core))) {
+            STREAM_DELTAS => {
+                if let Some(old) = deltas.replace(tokio::spawn(read_deltas(stream, visit, core))) {
                     old.abort();
                 }
             }
@@ -551,22 +528,22 @@ async fn read_streams(conn: Connection, typed: bool, visit: String, core: mpsc::
             other => debug!(%visit, other, "a stream of a kind this version does not know: ignored"),
         }
     }
-    for t in [video, scene].into_iter().flatten() {
+    for t in [deltas, scene].into_iter().flatten() {
         t.abort();
     }
 }
 
-async fn read_video(mut stream: RecvStream, visit: String, core: mpsc::UnboundedSender<Ev>) {
+async fn read_deltas(mut stream: RecvStream, visit: String, core: mpsc::UnboundedSender<Ev>) {
     loop {
         match frames::read_link_frame(&mut stream).await {
             Ok(Some(frame)) => {
-                trace!(%visit, key = frame.key, delta = frame.delta, ts = frame.ts, len = frame.data.len(), "frame in");
+                trace!(%visit, key = frame.key, ts = frame.ts, len = frame.data.len(), "delta in");
                 if core.send(Ev::LinkFrame { visit: visit.clone(), frame }).is_err() {
                     return;
                 }
             }
             Ok(None) => return,
-            Err(e) => return debug!(%visit, "a video stream broke off: {e:#}"),
+            Err(e) => return debug!(%visit, "a delta stream broke off: {e:#}"),
         }
     }
 }
@@ -610,67 +587,5 @@ async fn read_scene(mut stream: RecvStream, visit: String, core: mpsc::Unbounded
                 let _ = core.send(Ev::SceneLost { visit: visit.clone() });
             }
         }
-    }
-}
-
-/// The bitrate a host should encode a visit at (../SPEC.md section 7.5), as WebRTC's congestion control
-/// (GCC) decides it, every EVERY: down to 85% the moment queueing delay builds (the round trip rising above
-/// its floor: a buffer filling somewhere on the path); down by half the loss above 10% loss; held between
-/// 2% and 10% (Wi-Fi loses packets without being full); up 8% a second otherwise. From 1 Mbit/s, between
-/// 300 kbit/s and 6 Mbit/s. None: no change worth telling the page (under 5%).
-struct Bitrate {
-    bps: f64,
-    told: f64,
-    sent: u64,
-    lost: u64,
-    /// The lowest round trip in the last 10 s (the path's own, without queueing), and when each was seen.
-    floor: std::collections::VecDeque<(Instant, Duration)>,
-}
-
-impl Bitrate {
-    const EVERY: Duration = Duration::from_millis(500);
-    const MIN: f64 = 300_000.0;
-    const MAX: f64 = 6_000_000.0;
-
-    fn new() -> Self {
-        Bitrate { bps: 1_000_000.0, told: 0.0, sent: 0, lost: 0, floor: Default::default() }
-    }
-
-    fn update(&mut self, conn: &Connection) -> Option<u64> {
-        let s = conn.stats();
-        let (sent, lost) = (s.sent_packets.saturating_sub(self.sent), s.lost_packets.saturating_sub(self.lost));
-        (self.sent, self.lost) = (s.sent_packets, s.lost_packets);
-        let loss = if sent > 0 { lost as f64 / sent as f64 } else { 0.0 };
-        let rtt = conn.paths().iter().find(|p| p.is_selected()).map(|p| p.rtt());
-        let mut queueing = false;
-        if let Some(r) = rtt {
-            let now = Instant::now();
-            while self.floor.front().is_some_and(|(t, _)| now.duration_since(*t) > Duration::from_secs(10)) {
-                self.floor.pop_front();
-            }
-            while self.floor.back().is_some_and(|(_, d)| *d >= r) {
-                self.floor.pop_back();
-            }
-            self.floor.push_back((now, r));
-            let base = self.floor.front().map_or(r, |(_, d)| *d);
-            // An eighth of the path's own round trip above it, and at least 8 ms (a LAN's are noise).
-            queueing = r > base + (base / 8).max(Duration::from_millis(8));
-        }
-        let step = Self::EVERY.as_secs_f64();
-        self.bps = if loss > 0.10 {
-            self.bps * (1.0 - 0.5 * loss)
-        } else if queueing {
-            self.bps * 0.85
-        } else if loss >= 0.02 {
-            self.bps
-        } else {
-            (self.bps * 1.08f64.powf(step)).max(self.bps + 30_000.0 * step)
-        }
-        .clamp(Self::MIN, Self::MAX);
-        if (self.bps - self.told).abs() < self.told * 0.05 {
-            return None;
-        }
-        self.told = self.bps;
-        Some(self.bps as u64)
     }
 }

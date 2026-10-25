@@ -55,10 +55,10 @@ class Client:
         await self.ws.close()
 
 
-async def join(name, link=True, **extra):
-    """A version-2 office, its link published unless link=False."""
+async def join(name, link=True, proto=None, **extra):
+    """A version-2 office (or `proto`'s), its link published unless link=False."""
     c = Client(await connect(URL))
-    await c.send(type="hello", proto=P2, name=name, sim={"name": "test", "version": "1"}, **extra)
+    await c.send(type="hello", proto=proto or P2, name=name, sim={"name": "test", "version": "1"}, **extra)
     c.welcome = await c.expect("welcome")
     c.id, c.name = c.welcome["id"], name
     if link:
@@ -367,12 +367,47 @@ async def t_knock_timeout_and_health():
         lobby.LIMITS2["knock_ttl"] = saved
 
 
+async def t_version_3():
+    """basedverse-lobby/3 (Visit 0.5, three.js rooms only): a lobby of its own; a link withdrawn and published
+    again (its page stopped hosting, and started again)."""
+    old = await join("Old")
+    a, b = await join("Neu A", proto=lobby.PROTO3), await join("Neu B", proto=lobby.PROTO3)
+    check("a version-3 office is welcomed as such", a.welcome["proto"], lobby.PROTO3)
+    await a.send(type="status", status="available")
+    lob = await a.last_lobby()
+    check("version 3 sees only version 3", sorted(o["name"] for o in lob["offices"]), ["Neu A", "Neu B"])
+    await old.send(type="status", status="available")
+    lob = await old.last_lobby()
+    check("and version 2 only version 2", [o["name"] for o in lob["offices"]], ["Old"])
+    await old.send(type="knock", to=a.id)
+    check("a knock across: there is no such office", (await old.expect("error"))["code"], "not_found")
+    await a.send(type="link", endpoint=None, addr=None)
+    lob = await b.last_lobby()
+    check("a link withdrawn: not ready", office(lob, "Neu A")["ready"], False)
+    await b.send(type="knock", to=a.id)
+    check("and not knockable", (await b.expect("error"))["code"], "not_ready")
+    await a.send(type="knock", to=b.id)
+    check("nor can it knock", (await a.expect("error"))["code"], "not_ready")
+    await a.send(type="link", **a.link)
+    check("published again: ready", office(await b.last_lobby(), "Neu A")["ready"], True)
+    await b.send(type="knock", to=a.id)
+    await b.expect("knock_sent")
+    k = await a.expect("knock")
+    await a.send(type="link", endpoint=None, addr=None)
+    await a.quiet()
+    await a.send(type="answer", knock=k["id"], accept=True)
+    check("letting in after withdrawing its link: refused, not_ready", (await a.expect("error"))["code"], "not_ready")
+    check("and the knocker told", ((await b.expect("answered"))["reason"]), "not_ready")
+    for c in (old, a, b):
+        await c.send(type="bye")
+
+
 async def main():
     global URL
     async with serve(lobby.handler, "127.0.0.1", 0, max_size=lobby.LIMITS["frame"], process_request=lobby.health) as server:
         URL = "ws://127.0.0.1:%d" % server.sockets[0].getsockname()[1]
         for t in (t_hello, t_hello_rules_and_separation, t_knock_refusals, t_visit, t_end_and_full, t_resume, t_resume_replays_visits, t_rename,
-                  t_resume_window_and_bye, t_knock_timeout_and_health):
+                  t_resume_window_and_bye, t_knock_timeout_and_health, t_version_3):
             print("\n" + t.__name__[2:])
             try:
                 await t()

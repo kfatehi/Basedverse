@@ -2,9 +2,9 @@
 
 Everyone builds their own workroom (an agent-office sim, in their own engine), and basedverse is what
 they share: a lobby to meet in, and **Visit**, to walk around each other's rooms with WASD and the mouse.
-Nothing about a room is shared but the video of it, so what everyone agrees on is a thin interface: three
-hooks a host implements, and two pieces everyone drops in unchanged. A room made with three.js can share its
-scene instead: the visitor's browser draws the room itself, so walking in it is as quick as in your own.
+Every room is made with three.js: a host shares its scene, and the visitor's browser draws the room itself,
+so walking in it is as quick as in your own. What everyone agrees on is a thin interface: a host's scene and
+two hooks, and two pieces everyone drops in unchanged.
 
 | | |
 |---|---|
@@ -26,7 +26,8 @@ whoever runs your lobby):
 The guide takes it from there. Early on, it has the agent ask you to run `bin/setup` in a terminal: it
 asks you for the lobby (an address you have, or your own server, where it deploys one), your office's name
 and your page's address, gets visit-client for your machine, and writes your workroom's `.env`. Then the
-agent writes the launcher, the token handoff, the three hooks and the UI, and tests it on one machine.
+agent writes the launcher, the token handoff, the scene and hooks, and the UI, and tests it on one machine.
+Your workroom must be made with three.js (r125 to r186): that is what every room shares.
 By hand, that is:
 
 1. **Get this repository** (`git clone https://github.com/sarmiena/Basedverse`) anywhere; beside your
@@ -59,8 +60,8 @@ tag the changelog has no entry for is not released).
 | `python3 lobby/server/test_lobby.py`, `python3 lobby/server/test_lobby2.py` | the lobby, versions 1 and 2 (they need `websockets`: `lobby/server/requirements.txt`) |
 | `visit/client/cargo test` | visit-client's unit tests, in Docker |
 | `visit/client/tests/run-e2e.sh` | the lobby, two visit-clients and two stand-in pages, in Docker |
-| `visit/client/tests/run-browser.sh` | visit.js in two headless Chromes on this machine (it needs `google-chrome`): video, and a three.js room's scene |
-| `visit/client/tests/perf/run-perf.sh` | visits through simulated networks (delay, jitter, loss, rate caps; several visitors), each in its own container: input to frame, frame rate, stalls, against targets |
+| `visit/client/tests/run-browser.sh` | visit.js in two headless Chromes on this machine (it needs `google-chrome`): a three.js room's scene, drawn by its visitor |
+| `visit/client/tests/perf/run-perf.sh` | visits through simulated networks (delay, jitter, loss, rate caps; several visitors), each in its own container: the host's answer, updates, stalls, bandwidth (and with `BROWSERS=1`, real browsers drawing), against targets |
 
 ## License
 

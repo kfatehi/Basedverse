@@ -2,18 +2,18 @@
 # Visit under the networks people have, on this machine: a lobby, a host and its visitors, each in a
 # container of its own with the network a scenario gives it (Linux's netem: delay, jitter, loss, a rate cap),
 # real visit-clients (a release build), and fake pages in place of browsers (node.py). Each scenario's
-# visitors time every frame from the input it shows; report.py turns that into a table against targets.
+# visitors time every scene delta from the input it answers; report.py turns that into a table against targets.
 #
 #   tests/perf/run-perf.sh                 every scenario (about 4 minutes)
 #   tests/perf/run-perf.sh metro wifi      just these
 #   BROWSERS=1 tests/perf/run-perf.sh      the browser scenarios: a headless Chromium beside each visit-client,
-#                                          running the test room's busy scene (browser_node.py): visit.js's
-#                                          own encoding, decoding and drawing too (about 6 minutes)
+#                                          running the test room (browser_node.py): visit.js's own scene
+#                                          reading, sending and drawing too (about 6 minutes)
 #   SECONDS_EACH=30 OUT=/some/dir ...      longer measurements; where the results go (default: a temp dir)
 #
-# Without BROWSERS it measures visit-client and the network: input to frame, frames a second, stalls,
-# bitrate, but not a browser's own encode, decode and paint. With it, input to screen, all of it (the
-# browsers render on the processor, not a GPU: a real machine's render and encode are quicker).
+# Without BROWSERS it measures visit-client and the network: input to the host's answer, updates a second,
+# stalls, bandwidth. With it, the browsers' own work too, and input to screen (drawn here; the browsers render
+# on the processor, not a GPU: a real machine draws quicker).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../../.." && pwd)"
@@ -34,13 +34,12 @@ busy|6|delay 4ms 1ms|delay 4ms 1ms
 "
 # name | visitors | the host's way out | each visitor's way out | the test room's options (room.html)
 BROWSER_SCENARIOS="
-lan|1|||scene=busy
-metro|1|delay 4ms 1ms|delay 4ms 1ms|scene=busy
-wifi|1|delay 15ms 4ms loss 1.5%|delay 15ms 4ms loss 1.5%|scene=busy
-tight|1|delay 10ms 1ms rate 2mbit limit 40|delay 10ms 1ms|scene=busy
-heavy-host|1|delay 4ms 1ms|delay 4ms 1ms|scene=busy&cost=14
-two-visitors|2|delay 4ms 1ms|delay 4ms 1ms|scene=busy
-plain|1|delay 4ms 1ms|delay 4ms 1ms|scene=plain
+lan|1|||movers=50
+metro|1|delay 4ms 1ms|delay 4ms 1ms|movers=50
+wifi|1|delay 15ms 4ms loss 1.5%|delay 15ms 4ms loss 1.5%|movers=50
+tight|1|delay 10ms 1ms rate 2mbit limit 40|delay 10ms 1ms|movers=50
+busy-scene|1|delay 4ms 1ms|delay 4ms 1ms|movers=500
+two-visitors|2|delay 4ms 1ms|delay 4ms 1ms|movers=50
 "
 if [ -n "${BROWSERS:-}" ]; then SCENARIOS="$BROWSER_SCENARIOS"; fi
 want=" $* "
@@ -62,7 +61,7 @@ node() {   # node NAME DIR ROLE ARGS...
   if [ -n "${BROWSERS:-}" ]; then
     docker run -d --name "vp-$name" --network "$net" --cap-add NET_ADMIN -u 0 --shm-size 512m -e PYTHONPATH=/perf \
       -v "$out/visit-client":/bin/visit-client:ro -v "$here":/perf:ro -v "$here/..":/tests:ro -v "$dir":/out \
-      visit-perf-browser python3 -u /perf/browser_node.py "$@" --room "$room" ${CODEC:+--codec "$CODEC"} >/dev/null
+      visit-perf-browser python3 -u /perf/browser_node.py "$@" --room "$room" >/dev/null
   else
     docker run -d --name "vp-$name" --network "$net" --cap-add NET_ADMIN -u 0 \
       -v "$out/visit-client":/bin/visit-client:ro -v "$here/node.py":/node.py:ro -v "$dir":/out \

@@ -1,17 +1,17 @@
 # Visit — walk around each other's workrooms
 
-**Status: built and tested on one machine (visit-client, visit.js, the lobby's version 2), and the live lobby speaks version 2. Not yet between two machines over the internet.**
+**Status: built and tested on one machine (visit-client, visit.js, the lobby's version 3). Not yet between two machines over the internet.**
 
-Everyone builds their own workroom, in their own engine, and Visit lets you walk around each other's
-with WASD and the mouse. Your inputs go to the host's sim; the host's sim renders its room from where you
-stand and streams it back as video. Nothing about a room is shared but that, so the only thing everyone
-agrees on is a thin interface: three hooks a host implements (`spawn`, `move`, `render`), and two shared
+Everyone builds their own workroom, with three.js, and Visit lets you walk around each other's with WASD
+and the mouse. The host sends its room's scene, as data; your browser draws it, with the host's very three.js
+release, as quickly as your own room, and walks you in it at once while the host decides where you may go.
+What everyone agrees on is a thin interface: a host's scene and two hooks (`spawn`, `move`), and two shared
 pieces everyone drops in unchanged.
 
 | doc | for |
 |---|---|
 | [INTEGRATING.md](INTEGRATING.md) | adding Visit to a workroom. Written for the coding agent doing it: hand it this file and say "integrate this into my workroom". |
-| [SPEC.md](SPEC.md) | the contract: the local client, the page connection, the lobby (`basedverse-lobby/2`), the link between machines, video and input, security, limits, errors, versions. For whoever builds or changes the shared pieces. |
+| [SPEC.md](SPEC.md) | the contract: the local client, the page connection, the lobby (`basedverse-lobby/3`), the link between machines, scenes and input, security, limits, errors, versions. For whoever builds or changes the shared pieces. |
 
 ## Giving it to someone
 
@@ -39,8 +39,9 @@ visit/
   [iroh](https://iroh.computer): direct when the two machines can reach each other, through a relay when
   they cannot), and the visits. It survives page reloads, listens on 127.0.0.1 only, and takes a token.
 - **visit.js**: the library in the workroom's page, served by its own visit-client (so the two always
-  match). It talks only to that visit-client: it calls the host hooks, encodes and decodes the video
-  (WebCodecs), and captures the visitor's input. Optionally, a ready-made lobby panel.
+  match). It talks only to that visit-client: it sends the room's scene to its visitors and moves them with the
+  host hooks, draws the scene of the room it visits (with that room's three.js, checked against its hash), and
+  captures the visitor's input. Optionally, a ready-made lobby panel and stage.
 - **The lobby** ([../lobby/](../lobby/)): presence, knocks, and introducing visit-clients to each other.
   It speaks version 1 (browser sims streaming their own view to a group, as today) and version 2
   (visit-clients) side by side.

@@ -1,29 +1,22 @@
 // visit.js: the Visit library (../../SPEC.md section 9; ../../INTEGRATING.md shows it in use). Served by
 // visit-client at /visit.js, so a page always runs the library its visit-client speaks. It talks only to
-// that visit-client, on 127.0.0.1: it keeps the lobby's state, calls a host's hooks (spawn, move, render),
-// encodes what they render and decodes what a host sends (WebCodecs), and captures a visitor's input. A room
-// made with three.js can send its scene instead of video: the visitor's browser draws it (SPEC 8.3).
+// that visit-client, on 127.0.0.1: it keeps the lobby's state, sends this room's three.js scene to its
+// visitors (moving them with its hooks, spawn and move), draws the scene of the room it visits, and captures
+// a visitor's input (SPEC 8).
 //
 //   const v = await Visit.connect({ port, token, sim: { name, version } });
-//   v.host({ spawn, move, render, fps, fov, scene: { root, three, renderer, near, far }, walk: { speed } });
+//   v.host({ spawn, move, fov, scene: { root, three, renderer, near, far }, walk: { speed } });
 //   Visit.stage(v);   Visit.panel(element, v);
 //
-// Latency, as cloud gaming keeps it down: a visitor's input goes the moment it changes, and the host moves and
-// renders that visitor at once (up to 60 frames a second), not on its next tick; a busy host shrinks the
-// picture before it drops frames; video is newest-wins all the way (visit-client drops what a link cannot
-// carry); and the visitor's view turns with its mouse at once, shifting the last frame until the host's next
-// one (a timewarp, as VR headsets do), so looking around never waits for the round trip.
+// A room takes part once it hosts its scene: every room is three.js, and a visitor's browser draws the room it
+// visits itself, with that very three.js release. Walking and looking are as quick as in its own room (the
+// visitor's page walks at once and the host corrects it), and a host renders and encodes nothing for anyone.
 "use strict";
 (function () {
-  const VERSION = "0.4.0", PROTO = "basedverse-visit-local/1";
-  const CODECS = ["avc1.42E01F", "vp8", "vp09.00.10.08"];   // the order a host prefers, among what a visitor decodes
-  const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, KEY_EVERY_MS = 10000, LOOK = 0.0025;
-  // The share of a visitor's view size a host renders at: a busy host steps down these before it lowers its
-  // frame rate (a smaller picture costs no latency; fewer frames do).
-  const SCALES = [1, 0.75, 0.5];
-  const HAS_META = 2, META = 16;   // frames' flags bit 1: 16 bytes of meta after the timestamp (SPEC 5.4)
+  const VERSION = "0.5.0", PROTO = "basedverse-visit-local/2";
+  const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, LOOK = 0.0025;
   // What the host hears many times a second: none of it changes what the page shows, so none fires "change".
-  const QUIET = new Set(["input", "bitrate", "keyframe", "decoders", "viewport", "video_config", "link_stats", "scenes", "scene", "scene_lost", "scene_resync"]);
+  const QUIET = new Set(["input", "keyframe", "link_stats", "scene", "scene_lost", "scene_resync"]);
   // A timer from a Worker: a page's own timers slow to once a second (or less) while its tab is in the
   // background, and a host must go on rendering for its visitors.
   function ticker(ms, fn) {
@@ -37,24 +30,14 @@
     }
   }
   const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-  const even = n => Math.max(2, Math.floor(n / 2) * 2);
 
-  // The size to encode a visitor's view at: its own, scaled down to fit the limits, in even numbers.
-  function fit(width, height, maxW, maxH) {
-    if (!(width > 0 && height > 0)) return [maxW, maxH];
-    const k = Math.min(1, maxW / width, maxH / height);
-    return [even(width * k), even(height * k)];
-  }
-
-  // ---------- scenes: a three.js room, sent as itself and drawn by the visitor's own browser (SPEC 8.3) ----------
-  // A host whose room is three.js sends its scene instead of video, to a visitor whose page can draw it: once
-  // whole (three.js's own JSON, gzipped), then what changes in it (edits: gzipped JSON, in order, never dropped)
-  // and where its moving things are (deltas: binary, newest wins, as video). The visitor draws it with the very
-  // three.js release the host runs, fetched from a CDN and checked against the hashes below (Subresource
-  // Integrity): nothing else ever runs from it, and what the host sends is only ever read as data (cleanScene).
-  // The visitor walks at once, predicted here, and the host's answer corrects it; so walking and looking never
-  // wait for the round trip, and the host renders and encodes nothing for this visitor.
-  const SCENE = 4, DELTA = 8;   // frames' flags bits 2 (a scene edit, page to visit-client) and 3 (a delta) (SPEC 5.4)
+  // ---------- scenes: a three.js room, sent as itself and drawn by the visitor's own browser (SPEC 8) ----------
+  // A host sends its scene once whole (three.js's own JSON, gzipped), then what changes in it (edits: gzipped
+  // JSON, in order, never dropped) and where its moving things are (deltas: binary, newest wins). The visitor
+  // draws it with the very three.js release the host runs, fetched from a CDN and checked against the hashes
+  // below (Subresource Integrity): nothing else ever runs from it, and what the host sends is only ever read as
+  // data (cleanScene). The visitor walks at once, predicted here, and the host's answer corrects it.
+  const KEY = 1, EDIT = 2;   // frames' flags: bit 0 a key delta; bit 1 a scene edit (page to visit-client) (SPEC 5.4)
   // How often a host sends its scene's changes, and the places of everything that has moved, regardless; how far
   // behind the host's clock a visitor shows moving things (two updates: always one to move toward); the most
   // pixels a visitor's view draws (it is stretched past that).
@@ -437,8 +420,8 @@
   }
 
   class Client {
-    constructor(port, token, sim, { scenes = true, threeBase = null } = {}) {
-      Object.assign(this, { port, token, sim, _sceneOk: scenes !== false, _threeBase: threeBase });
+    constructor(port, token, sim, { threeBase = null } = {}) {
+      Object.assign(this, { port, token, sim, _threeBase: threeBase });
       this.state = "connecting";   // then "online", "offline" (the lobby out of reach), or "away" (left on purpose)
       this.office = null;
       this.status = "available";
@@ -451,16 +434,13 @@
       this.visitors = [];      // { id, visitor, pose }
       this._on = {};
       this._hosted = new Map();   // channel -> a visit to this office
-      this._hooks = null;
-      this._limits = { max_width: 1280, max_height: 720, fps: 60 };
-      // A visitor's numbers, about once a second (the "stats" event): input to screen and the link's round
-      // trip in ms, the link's path ("direct" or "relay"), frames drawn a second. null while not visiting.
-      // "mode": "scene" while drawing the host's scene here (latency is then input to screen here), else null.
-      this.stats = { latency: null, rtt: null, path: null, fps: 0, mode: null };
-      this._decoders = null;
-      this._scenesCaps = null;    // the three.js revisions this page draws scenes of (none: video only)
-      this._sync = null;          // what this room last sent of its scene (SceneSync), while a visitor gets it
-      this._viewer = null;        // the visit this office is on: { channel, decoder, waitKey, config }
+      this._hooks = null;         // until visit.host(): this office is not in the lobby to be visited, nor knocks
+      // A visitor's numbers, about once a second (the "stats" event): input to screen (drawn here) and the
+      // link's round trip in ms, the link's path ("direct" or "relay"), frames drawn a second. null while not
+      // visiting.
+      this.stats = { latency: null, rtt: null, path: null, fps: 0 };
+      this._sync = null;          // what this room last sent of its scene (SceneSync), while it has visitors
+      this._viewer = null;        // the visit this office is on: { channel, scene, sceneQ, count }
       this._view = null;          // where it is shown: { element, canvas, ... }
       this._closed = false;
       this._fails = 0;
@@ -526,21 +506,10 @@
       this.state = m.away ? "away" : m.online ? "online" : "offline";
       this.office = m.office && m.office.id ? m.office : null;
       this.status = m.status; this.maxVisitors = m.max_visitors;
-      this._limits = m.limits || this._limits;
       this.knocks = []; this.knocking = [];
       for (const v of m.visits || []) this._started(v);
-      this._sendScenes();   // before what it decodes: a host decides on a scene first
-      this._sendDecoders();
+      if (this._hooks) this._sendHost();   // a visit-client that came back: this page hosts, again
       this._changed();
-    }
-
-    async _sendDecoders() {
-      if (!this._decoders) {
-        const ok = await Promise.all(CODECS.map(codec => typeof VideoDecoder === "undefined" ? null
-          : VideoDecoder.isConfigSupported({ codec }).then(r => r.supported ? codec : null, () => null)));
-        this._decoders = ok.filter(Boolean);
-      }
-      this._send({ type: "decoders", codecs: this._decoders });
     }
 
     _message(m) {
@@ -573,13 +542,12 @@
         case "visit_started": this._started(m); break;
         case "visit_ended": this._ended(m); break;
         case "host_paused": case "host_resumed":
-          if (this.visiting && this._viewer && this._viewer.channel === m.channel) { this.visiting.paused = m.type === "host_paused"; this._overlay(); }
+          if (this.visiting && this._viewer && this._viewer.channel === m.channel) this.visiting.paused = m.type === "host_paused";
           break;
-        case "video_config": this._configureDecoder(m); break;
         case "link_stats":
           if (this._viewer && this._viewer.channel === m.channel) { this.stats.rtt = Number(m.rtt_ms); this.stats.path = String(m.path); }
           break;
-        case "decoders": case "viewport": case "keyframe": case "bitrate": case "input": case "scenes": case "scene_resync": this._hostMessage(m); break;
+        case "keyframe": case "input": case "scene_resync": this._hostMessage(m); break;
         case "scene": this._sceneEdit(m); break;
         case "scene_lost": if (this._viewer && this._viewer.channel === m.channel) this._sceneResync(this._viewer); break;
         case "error": this._emit("error", { code: m.code, message: m.message, ref: m.ref }); break;
@@ -603,16 +571,14 @@
     _started(m) {
       if (m.role === "host") {
         const h = { id: m.id, channel: m.channel, visitor: m.peer || {}, pose: null, yaw0: 0, input: null, inputAt: 0,
-          decoders: null, viewport: null, encoder: null, codec: null, width: 0, height: 0, bps: 1000000, fps: this._fps(), scale: 0, scaledAt: 0,
-          keyNext: true, lastKey: 0, nextAt: 0, fails: 0, configuring: false, scratch: null, since: performance.now(), meta: new Map(),
-          mode: null, three: null, sceneSent: false, posed: null };   // mode: "scene" or "video", once the visitor says what it draws
+          keyNext: true, fails: 0, sceneSent: false, posed: null };
         if (m.state && m.state.pose) { h.pose = m.state.pose; h.yaw0 = m.state.yaw0 || 0; }   // back after this page reloaded
         this._hosted.set(m.channel, h);
         this._spawn(h);
       } else {
         this.visiting = { id: m.id, host: m.peer || {}, paused: false };
-        this._viewer = { channel: m.channel, decoder: null, waitKey: true, config: null, fov: null, meta: new Map(), last: null, lastMeta: null, count: 0, scene: null, sceneQ: null };
-        this._sendViewport();
+        this._viewer = { channel: m.channel, count: 0, scene: null, sceneQ: null, since: performance.now(), loading: false, failed: false };
+        this._placeholder();
       }
       this._visitorsList();
       this._emit("visit_started", { id: m.id, role: m.role, peer: m.peer });
@@ -620,14 +586,13 @@
 
     _ended(m) {
       const h = this._hosted.get(m.channel);
-      if (h && h.id === m.id) { this._dropHosted(h); this._hosted.delete(m.channel); }
+      if (h && h.id === m.id) this._hosted.delete(m.channel);
       if (this.visiting && this.visiting.id === m.id) { this._dropViewer(); this.visiting = null; }
       this._visitorsList();
       this._emit("visit_ended", { id: m.id, reason: m.reason });
     }
 
     _dropAll() {
-      for (const h of this._hosted.values()) this._dropHosted(h);
       this._hosted.clear();
       this._dropViewer();
       this.visiting = null;
@@ -637,21 +602,25 @@
     _visitorsList() { this.visitors = [...this._hosted.values()].map(h => ({ id: h.id, visitor: h.visitor, pose: h.pose })); }
 
     // ---------- hosting ----------
-    // `scene` (optional): { root, three, renderer, near, far }, the room's three.js scene (or the part of it to
-    // share), the THREE namespace it was made with, its renderer and its camera's range: visitors whose page draws
-    // scenes get it instead of video. `walk` (optional): { speed }, when `move` walks with Visit.walk at that
-    // speed: the visitor's page then walks at once, before the host's answer.
+    // `scene`: { root, three, renderer, near, far }, the room's three.js scene (or the part of it to share), the
+    // THREE namespace it was made with, its renderer and its visitors' camera range. `fov`: that camera's vertical
+    // field of view, in degrees. `walk` (optional): { speed }, when `move` walks with Visit.walk at that speed:
+    // the visitor's page then walks at once, before the host's answer. Until this is called, this office is not
+    // in the lobby to be visited, and cannot knock: every room takes part with its scene.
     host(hooks) {
-      if (!hooks || typeof hooks.spawn !== "function" || typeof hooks.move !== "function" || typeof hooks.render !== "function") {
-        throw new Error("visit.host needs spawn, move and render functions");
-      }
+      if (!hooks || typeof hooks.spawn !== "function" || typeof hooks.move !== "function") throw new Error("visit.host needs spawn and move functions");
       const sc = hooks.scene;
-      if (sc && !(sc.root && sc.root.isObject3D && sc.three && sc.three.REVISION)) throw new Error("visit.host: scene needs { root, three }: the three.js scene and the THREE it was made with");
+      if (!sc || !(sc.root && sc.root.isObject3D && sc.three && sc.three.REVISION)) {
+        throw new Error("visit.host needs scene: { root, three }: the room's three.js scene, and the THREE it was made with");
+      }
+      const revs = Object.keys(THREE_FILES);
+      if (!THREE_FILES[String(sc.three.REVISION)]) throw new Error(`visit.host: three.js r${sc.three.REVISION} is not one this visit.js knows (r${revs[0]} to r${revs[revs.length - 1]})`);
       this._hooks = hooks;
       this._sync = null;
-      for (const h of this._hosted.values()) { h.fps = this._fps(); this._spawn(h); h.sceneSent = false; this._chooseMode(h); }
+      for (const h of this._hosted.values()) { this._spawn(h); h.sceneSent = false; }
+      this._sendHost();
     }
-    _fps() { return Math.max(10, Math.min(this._limits.fps || 60, (this._hooks && this._hooks.fps) || 60)); }
+    _sendHost() { this._send({ type: "host", three: String(this._hooks.scene.three.REVISION) }); }
 
     _spawn(h) {
       if (!this._hooks || h.pose) return;
@@ -662,102 +631,16 @@
     _hostMessage(m) {
       const h = this._hosted.get(m.channel);
       if (!h) return;
-      if (m.type === "input") { h.input = m; h.inputAt = performance.now(); this._step(h, h.inputAt); }   // at once: the next frame shows it
-      else if (m.type === "keyframe") h.keyNext = true;
-      else if (m.type === "scenes") { h.three = Array.isArray(m.three) ? m.three.map(String) : []; this._chooseMode(h); }
-      else if (m.type === "scene_resync") { if (h.mode === "scene") h.sceneSent = false; }
-      else if (m.type === "decoders") { h.decoders = m.codecs || []; if (h.mode === "video") this._configureEncoder(h); else this._chooseMode(h); }
-      else if (m.type === "viewport") { h.viewport = [m.width, m.height]; if (h.mode === "video") this._configureEncoder(h); }
-      else if (m.type === "bitrate" && h.encoder && Math.abs(m.bps - h.bps) / h.bps > 0.15) {
-        h.bps = m.bps;
-        try { h.encoder.configure(this._encoderConfig(h)); } catch (e) { console.warn("visit: bitrate change refused", e); }
-      }
+      if (m.type === "input") { h.input = m; h.inputAt = performance.now(); this._step(h, h.inputAt); }   // at once: the next delta has it
+      else if (m.type === "keyframe") h.keyNext = true;   // a key delta: where everything that moves is
+      else if (m.type === "scene_resync") h.sceneSent = false;
     }
 
-    _encoderConfig(h) {
-      return Object.assign({ codec: h.codec, width: h.width, height: h.height, bitrate: h.bps, framerate: h.fps, latencyMode: "realtime",
-        hardwareAcceleration: h.accel || "no-preference" }, h.codec.startsWith("avc1") ? { avc: { format: "annexb" } } : {});
-    }
-
-    // A codec this visitor decodes and this page encodes, at the visitor's view size; then its settings
-    // to the visitor, and a keyframe first.
-    async _configureEncoder(h) {
-      if (typeof VideoEncoder === "undefined" || h.mode !== "video") return;
-      if (h.configuring) { h.again = true; return; }   // new settings arrived meanwhile: once this is done, again
-      h.configuring = true;
-      try {
-        const [fw, fh] = fit(...(h.viewport || [0, 0]), this._limits.max_width, this._limits.max_height), k = SCALES[h.scale] || 1;
-        const [width, height] = [even(fw * k), even(fh * k)];
-        const wanted = (h.decoders && h.decoders.length ? h.decoders : ["vp8"]).filter(c => CODECS.includes(c));
-        let codec = null, accel = null;
-        // The machine's own video encoder where it has one: far less of the host's processor than software.
-        found: for (const c of wanted) {
-          for (const hw of ["prefer-hardware", "no-preference"]) {
-            const probe = { codec: c, width, height, bitrate: h.bps, framerate: h.fps, latencyMode: "realtime", hardwareAcceleration: hw };
-            if (c.startsWith("avc1")) probe.avc = { format: "annexb" };
-            try { if ((await VideoEncoder.isConfigSupported(probe)).supported) { codec = c; accel = hw; break found; } } catch (e) { /* next */ }
-          }
-        }
-        if (this._hosted.get(h.channel) !== h) return;   // the visit ended meanwhile
-        if (!codec) return console.warn("visit: no codec both sides support for", h.visitor.name);
-        if (h.encoder && h.codec === codec && h.width === width && h.height === height) return;
-        if (h.encoder) { try { h.encoder.close(); } catch (e) { /* already closed */ } }
-        Object.assign(h, { codec, width, height, accel });
-        h.encoder = new VideoEncoder({
-          output: chunk => this._sendChunk(h, chunk),
-          error: e => {
-            console.warn("visit: encoder error", e);
-            h.encoder = null; h.codec = null;
-            setTimeout(() => { if (this._hosted.get(h.channel) === h) this._configureEncoder(h); }, 500);
-          },
-        });
-        h.encoder.configure(this._encoderConfig(h));
-        h.keyNext = true;
-        const fov = this._hooks && Number(this._hooks.fov);   // the camera's vertical field of view: the visitor turns its picture by it
-        this._send({ type: "video_config", channel: h.channel, codec, width, height, fov: fov > 0 ? fov : null });
-      } finally {
-        h.configuring = false;
-        if (h.again && this._hosted.get(h.channel) === h) { h.again = false; this._configureEncoder(h); }
-      }
-    }
-
-    // An encoded frame to visit-client, with its meta: the visitor's input it reflects (its time, and the look
-    // it was drawn at), for the visitor's latency figure and its turning between frames.
-    _sendChunk(h, chunk) {
-      const meta = h.meta.get(chunk.timestamp);
-      h.meta.delete(chunk.timestamp);
-      if (!this._ws || this._ws.readyState !== 1) return;
-      const at = meta ? 11 + META : 11, buf = new ArrayBuffer(at + chunk.byteLength), dv = new DataView(buf);
-      dv.setUint16(0, h.channel);
-      dv.setUint8(2, (chunk.type === "key" ? 1 : 0) | (meta ? HAS_META : 0));
-      dv.setBigUint64(3, BigInt(Math.max(0, Math.round(chunk.timestamp))));
-      if (meta) { dv.setFloat64(11, meta[0]); dv.setFloat32(19, meta[1]); dv.setFloat32(23, meta[2]); }
-      chunk.copyTo(new Uint8Array(buf, at));
-      this._ws.send(buf);
-    }
-
-    _dropHosted(h) { if (h.encoder) { try { h.encoder.close(); } catch (e) { /* closed */ } h.encoder = null; } }
-
-    // ---------- scenes: hosting ----------
-    // Scene or video, for one visitor: its scene when this room gave visit.host() a three.js scene of a revision
-    // the visitor draws (its page said which, in `scenes`), else video.
-    _chooseMode(h) {
-      if (!this._hooks) return;   // decided once the room says how it hosts (host())
-      const sc = this._hooks.scene;
-      if (sc && Array.isArray(h.three) && h.three.includes(String(sc.three.REVISION))) {
-        if (h.mode !== "scene") { this._dropHosted(h); h.codec = null; h.mode = "scene"; h.sceneSent = false; }
-      } else if ((h.three || h.decoders) && h.mode !== "video") {   // it said what it draws (or, before 0.4, only what it decodes)
-        h.mode = "video";
-        if (h.decoders) this._configureEncoder(h);
-      }
-    }
-
-    // Every SCENE_MS, for the visitors that get the scene: what changed in it (one edit for them all), where its
+    // Every SCENE_MS, for this room's visitors: what changed in its scene (one edit for them all), where its
     // moving things and each visitor are (a delta each), and the whole scene to any visitor starting.
     _sceneTick(now) {
-      const hs = [...this._hosted.values()].filter(h => h.mode === "scene" && h.pose);
-      if (!hs.length || !this._hooks || !this._hooks.scene) { this._sync = null; return; }
-      const t0 = performance.now();
+      const hs = [...this._hosted.values()].filter(h => h.pose);
+      if (!hs.length || !this._hooks) { this._sync = null; return; }
       try {
         if (!this._sync || this._sync.cfg !== this._hooks.scene) {   // a new scene, or numbered anew: everyone gets it whole
           this._sync = new SceneSync(this._hooks.scene);
@@ -774,10 +657,9 @@
         }
         for (const h of hs) if (!h.sceneSent) { this._sendScene([h], sync.snapshot(h, this._hooks)); h.sceneSent = true; h.keyNext = true; }
       } catch (e) { console.error("visit: could not send the scene", e); }
-      if (this._busy) this._busy.spent += performance.now() - t0;
     }
 
-    // A scene edit to these visitors, gzipped, after any before it (SPEC 5.4: flags SCENE).
+    // A scene edit to these visitors, gzipped, after any before it (SPEC 5.4: flags EDIT).
     _sendScene(hs, edit) {
       let text;
       try { text = JSON.stringify(edit); } catch (e) { return console.warn("visit: a scene edit that does not turn into JSON", e); }
@@ -789,7 +671,7 @@
           if (!this._ws || this._ws.readyState !== 1) return;
           const buf = new Uint8Array(11 + gz.byteLength);
           new DataView(buf.buffer).setUint16(0, ch);
-          buf[2] = SCENE;
+          buf[2] = EDIT;
           buf.set(gz, 11);
           this._ws.send(buf);
         }
@@ -801,7 +683,7 @@
     _sendDelta(h, body, key, now) {
       if (!this._ws || this._ws.readyState !== 1) return;
       const buf = new Uint8Array(11 + 37 + body.bytes.byteLength), dv = new DataView(buf.buffer), p = h.pose;
-      dv.setUint16(0, h.channel); dv.setUint8(2, DELTA | (key ? 1 : 0)); dv.setBigUint64(3, BigInt(Math.round(now * 1000)));
+      dv.setUint16(0, h.channel); dv.setUint8(2, key ? KEY : 0); dv.setBigUint64(3, BigInt(Math.round(now * 1000)));
       dv.setUint8(11, 1);
       dv.setFloat64(12, h.input ? Number(h.input.t) || 0 : 0);
       dv.setFloat32(20, h.input ? now - h.inputAt : 0);
@@ -811,33 +693,22 @@
       this._ws.send(buf);
     }
 
-    // ---------- scenes: visiting ----------
-    _sendScenes() {
-      if (!this._scenesCaps) {
-        let gl = false;
-        try {
-          const c = this._sceneOk !== false && document.createElement("canvas").getContext("webgl2");
-          gl = !!c;
-          if (c) { const x = c.getExtension("WEBGL_lose_context"); if (x) x.loseContext(); }
-        } catch (e) { /* no WebGL 2: video */ }
-        this._scenesCaps = gl ? Object.keys(THREE_FILES) : [];
-      }
-      this._send({ type: "scenes", three: this._scenesCaps });
-    }
-
     // Edits apply one after another, in order (the first, the whole scene, waits for three.js to load).
     _sceneEdit(m) {
       const w = this._viewer;
       if (!w || w.channel !== m.channel || !isObj(m.edit)) return;
       const whole = m.edit.type === "scene";
+      if (whole) w.loading = true;
       w.sceneQ = (w.sceneQ || Promise.resolve()).then(() => this._viewer !== w ? null : whole ? this._sceneStart(w, m.edit) : this._sceneApply(w, m.edit))
+        .finally(() => { if (whole) w.loading = false; })
         .catch(e => {
           if (this._viewer !== w) return;
-          if (whole) {   // this page cannot draw it: video from now on (the host hears it draws no scenes)
-            console.warn("visit: cannot draw this room's scene; asking for video instead", e);
+          if (whole) {   // this page cannot draw it (three.js would not load, say): it says so where the room would be
+            console.warn("visit: cannot draw this room's scene", e);
+            w.failed = true;
             this._sceneDrop(w);
-            this._scenesCaps = [];
-            this._sendScenes();
+            this._placeholder(`cannot draw ${(this.visiting && this.visiting.host.name) || "this"}'s room: ${e.message || e}`);
+            this._emit("error", { code: "scene", message: String(e.message || e) });
           } else { console.warn("visit: a scene edit that did not apply; asking for the whole scene again", e); this._sceneResync(w); }
         });
     }
@@ -857,8 +728,6 @@
       const T = await loadThree(e.three, this._threeBase);
       if (this._viewer !== w) return;
       this._sceneDrop(w);
-      if (w.decoder) { try { w.decoder.close(); } catch (x) { /* closed */ } w.decoder = null; }
-      if (w.last) { w.last.close(); w.last = null; }
       const budget = { vertices: 0, objects: 0 }, loader = new T.ObjectLoader();
       let root = loader.parse(cleanScene(e.json, budget));
       if (!root.isScene) { const sc = new T.Scene(); sc.add(root); root = sc; }
@@ -888,7 +757,6 @@
       w.scene = s;
       this._sceneOwn(s);
       this._sceneAttach(w);
-      this.stats.mode = "scene";
       this._send({ type: "keyframe", channel: w.channel });   // where its moving things are now
       const loop = () => {
         if (w.scene !== s) return;
@@ -1163,30 +1031,29 @@
       for (const map of [s.geos, s.mats, s.texs]) for (const x of map.values()) { try { x.dispose(); } catch (e) { /* gone */ } }
       try { s.renderer.dispose(); s.renderer.forceContextLoss(); } catch (e) { /* gone */ }
       if (this._view && this._view.gl === s.canvas) this._view.detach(); else s.canvas.remove();
-      this.stats.mode = null;
     }
 
 
-    // 60 times a second: a visitor's input (when it is due), every hosted visitor moved and (when its frame is
-    // due) rendered, and once a second the stats and how hard rendering is working this page.
+    // 60 times a second: a visitor's input (when it is due), every visitor moved, and (every SCENE_MS) what
+    // changed in this room's scene sent; once a second the stats.
     _tick() {
       const now = performance.now();
       if (this._view) this._sendInput(now, this._view.pending);
+      const w = this._viewer;
+      if (w && !w.scene && !w.loading && !w.failed && now - (w.askedAt || w.since) > 3000) { w.askedAt = now; this._sceneResync(w); }   // no scene yet: ask again
       if (this._viewer && now - (this._statsAt || 0) >= 1000) {
         this._statsAt = now;
         this.stats.fps = this._viewer.count; this._viewer.count = 0;
         this._emit("stats", this.stats);
       }
       if (!this._hooks || !this._hosted.size) return;
-      this._busy = this._busy || { since: now, spent: 0, due: 0, skipped: 0 };
       for (const h of [...this._hosted.values()]) this._step(h, now);
       if (now - (this._sceneAt || 0) >= SCENE_MS - 2) { this._sceneAt = now; this._sceneTick(now); }
       this._visitorsList();
-      if (now - this._busy.since >= 1000) { this._adapt(now); this._busy = { since: now, spent: 0, due: 0, skipped: 0 }; }
     }
 
-    // One visitor: moved up to now from its latest input, and rendered if its next frame is due. Every tick,
-    // and at once when its input comes, so what the visitor does is in the very next frame.
+    // One visitor: moved up to now from its latest input. Every tick, and at once when its input comes, so the
+    // next delta has where it went.
     _step(h, now) {
       if (!this._hooks) return;
       if (!h.pose) { this._spawn(h); if (!h.pose) return; }
@@ -1203,61 +1070,6 @@
         h.keptAt = now;
         this._send({ type: "pose", channel: h.channel, state: { pose: h.pose, yaw0: h.yaw0 } });
       }
-      if (h.mode === "scene") return;   // its page draws the room: where it stands goes in the scene's deltas
-      // Frames on an even beat: the next one a slot after this one was due (not after it happened, which a
-      // timer's lateness would push later and later), with a couple of ms' grace for that lateness; a host
-      // that fell behind starts the beat again rather than rush to catch up.
-      const slot = 1000 / h.fps;
-      if (h.encoder && h.encoder.state === "configured" && now >= h.nextAt - 2) {
-        h.nextAt = h.nextAt + slot < now ? now + slot : h.nextAt + slot;
-        this._renderFor(h, now, input);
-      }
-    }
-
-    // Busy: rendering for visitors took more than a quarter of this page's time, or the encoder could not
-    // keep up (a tenth of the frames due skipped: a software encoder at full size, say). A smaller picture
-    // first (down to half the view's size), then fewer frames (down to 10 a second); back up the other way
-    // when it fits.
-    _adapt(now) {
-      const share = this._busy.spent / (now - this._busy.since), skipped = this._busy.due ? (this._busy.skipped || 0) / this._busy.due : 0;
-      for (const h of this._hosted.values()) {
-        if (share > 0.25 || skipped > 0.1) {
-          if (h.scale < SCALES.length - 1) { if (now - h.scaledAt > 2000) { h.scale++; h.scaledAt = now; this._configureEncoder(h); } }
-          else h.fps = Math.max(10, Math.round(h.fps * 0.8));
-        } else if (share < 0.12 && skipped < 0.02) {
-          if (h.fps < this._fps()) h.fps = Math.min(this._fps(), h.fps + 5);
-          else if (h.scale > 0 && now - h.scaledAt > 5000) { h.scale--; h.scaledAt = now; this._configureEncoder(h); }
-        }
-      }
-    }
-
-    _renderFor(h, now, input) {
-      this._busy = this._busy || { since: now, spent: 0, due: 0, skipped: 0 };
-      this._busy.due = (this._busy.due || 0) + 1;
-      if (h.encoder.encodeQueueSize > 2) { this._busy.skipped = (this._busy.skipped || 0) + 1; return; }   // the encoder is behind: skip
-      if (this._ws.bufferedAmount > 5e5) { h.keyNext = true; return; }                  // the connection is behind: skip, and start clean
-      const t0 = performance.now();
-      let canvas;
-      try { canvas = this._hooks.render(h.pose, h.width, h.height); h.fails = 0; }
-      catch (e) { return this._hookFailed(h, "render", e); }
-      if (!canvas) return;
-      if (canvas.width !== h.width || canvas.height !== h.height) {   // not the size asked: scaled to it
-        h.scratch = h.scratch && h.scratch.width === h.width && h.scratch.height === h.height ? h.scratch : new OffscreenCanvas(h.width, h.height);
-        h.scratch.getContext("2d").drawImage(canvas, 0, 0, h.width, h.height);
-        canvas = h.scratch;
-      }
-      const key = h.keyNext || now - h.lastKey > KEY_EVERY_MS;
-      let frame;
-      try {
-        const ts = Math.round(now * 1000);
-        frame = new VideoFrame(canvas, { timestamp: ts });
-        if (h.meta.size > 32) h.meta.clear();   // chunks the encoder dropped: never answered
-        h.meta.set(ts, [Number(input && input.t) || 0, Number(input && input.yaw) || 0, Number(input && input.pitch) || 0]);
-        h.encoder.encode(frame, { keyFrame: key });
-        if (key) { h.keyNext = false; h.lastKey = now; }
-      } catch (e) { console.warn("visit: could not encode a frame", e); }
-      finally { if (frame) frame.close(); }
-      this._busy.spent += performance.now() - t0;
     }
 
     _hookFailed(h, hook, e) {
@@ -1296,8 +1108,6 @@
         view.yaw -= e.movementX * LOOK;
         view.pitch = Math.max(-1.4, Math.min(1.4, view.pitch - e.movementY * LOOK));
         changed();
-        // The picture turns now, from the last frame; the host's next one fills in what came into view.
-        if (!view.raf) view.raf = requestAnimationFrame(() => { view.raf = 0; this._paint(); });
       };
       addEventListener("keydown", down); addEventListener("keyup", up); addEventListener("blur", blur);
       canvas.addEventListener("click", click); document.addEventListener("mousemove", look);
@@ -1338,7 +1148,6 @@
       this._view = view;
       this._sizeView();
       if (this._viewer && this._viewer.scene) this._sceneAttach(this._viewer);   // a scene being drawn: here now
-      if (this._viewer) { this._viewer.waitKey = true; this._send({ type: "keyframe", channel: this._viewer.channel }); }
       return { release: () => view.release(), setActive: on => view.setActive(on), get active() { return view.active; }, canvas };
     }
 
@@ -1348,10 +1157,21 @@
       const r = v.element.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
       v.canvas.width = Math.max(2, Math.round(r.width * dpr)); v.canvas.height = Math.max(2, Math.round(r.height * dpr));
       v.resizeAt = 0;
-      this._sendViewport();
+      if (!(this._viewer && this._viewer.scene)) this._placeholder();
     }
-    _sendViewport() { if (this._view && this.visiting) this._send({ type: "viewport", width: this._view.canvas.width, height: this._view.canvas.height }); }
 
+    // Where the room visited will be, until its scene is drawn: what is happening, in words.
+    _placeholder(text) {
+      const v = this._view;
+      if (!v) return;
+      const { canvas, ctx } = v;
+      ctx.fillStyle = "#000"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      const say = text || (this.visiting && !(this._viewer && this._viewer.scene) ? `walking into ${this.visiting.host.name || "their"}'s room…` : "");
+      if (!say) return;
+      const px = Math.max(14, Math.round(canvas.height / 30));
+      ctx.fillStyle = "#e6edf3"; ctx.font = `${px}px system-ui, sans-serif`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(say, canvas.width / 2, canvas.height / 2);
+    }
     // The visitor's input: the state of its keys and look, whole each time (the newest wins; none is ever
     // queued). When it changes, now (at most every 8 ms; a change sooner goes on the next tick); and every
     // 33 ms regardless, so a host knows it is still held. `t` is this page's clock, which the host's frames
@@ -1369,96 +1189,19 @@
         run: k("ShiftLeft") || k("ShiftRight"), yaw: v.yaw, pitch: v.pitch, t: now });
     }
 
-    _configureDecoder(m) {
-      const w = this._viewer;
-      if (!w || w.channel !== m.channel || typeof VideoDecoder === "undefined") return;
-      this._sceneDrop(w);   // the host sends video after all
-      const same = w.config && w.config.codec === m.codec && w.config.codedWidth === m.width && w.config.codedHeight === m.height;
-      if (same && w.decoder && w.decoder.state === "configured") return;   // told again: nothing to change
-      if (w.decoder) { try { w.decoder.close(); } catch (e) { /* closed */ } }
-      w.fov = Number(m.fov) > 0 ? Number(m.fov) : null;
-      w.config = { codec: m.codec, codedWidth: m.width, codedHeight: m.height, optimizeForLatency: true };
-      w.decoder = new VideoDecoder({
-        output: f => this._draw(f),
-        error: e => { console.warn("visit: decoder error", e); this._configureDecoder(m); this._send({ type: "keyframe", channel: m.channel }); },
-      });
-      w.decoder.configure(w.config);
-      w.waitKey = true;
-    }
-
+    // A delta of the scene of the room visited (SPEC 5.4).
     _frame(buf) {
       const w = this._viewer;
       if (!w || buf.byteLength < 11) return;
-      const dv = new DataView(buf), channel = dv.getUint16(0), flags = dv.getUint8(2), key = (flags & 1) === 1;
-      const hasMeta = (flags & HAS_META) !== 0, at = hasMeta ? 11 + META : 11;
-      if (channel === w.channel && (flags & DELTA)) return this._sceneDelta(w, dv, key);
-      if (channel !== w.channel || !w.decoder || w.decoder.state !== "configured" || buf.byteLength < at) return;
-      if (w.waitKey && !key) return;
-      if (w.decoder.decodeQueueSize > 3) { w.waitKey = true; return this._send({ type: "keyframe", channel }); }   // behind: newest wins
-      w.waitKey = false;
-      const ts = Number(dv.getBigUint64(3));
-      if (hasMeta) {
-        if (w.meta.size > 32) w.meta.clear();
-        w.meta.set(ts, { t: dv.getFloat64(11), yaw: dv.getFloat32(19), pitch: dv.getFloat32(23) });
-      }
-      try { w.decoder.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: ts, data: new Uint8Array(buf, at) })); }
-      catch (e) { w.waitKey = true; this._send({ type: "keyframe", channel }); }
-    }
-
-    // A decoded frame: kept (the last one, for turning between frames), its age measured, and drawn.
-    _draw(frame) {
-      const w = this._viewer;
-      if (!w) return frame.close();
-      const meta = w.meta.get(frame.timestamp);
-      w.meta.delete(frame.timestamp);
-      if (w.last) w.last.close();
-      w.last = frame; w.lastMeta = meta || null; w.count++;
-      const at = performance.now();
-      keep(this._samples.drawn, at);
-      if (meta && meta.t > 0) {   // input to screen, on this page's own clock: the time of the input this frame shows
-        const ms = at - meta.t;
-        if (ms >= 0 && ms < 10000) { this.stats.latency = this.stats.latency == null ? ms : this.stats.latency * 0.9 + ms * 0.1; keep(this._samples.latency, ms); }
-      }
-      this.frames = (this.frames || 0) + 1;
-      this._paint();
-    }
-
-    // The last frame, letterboxed, shifted by how far the visitor has turned since the host drew it (the host
-    // said its camera's field of view, and the frame which look it drew): turning is instant, whatever the
-    // round trip; what came into view at the edge arrives with the host's next frame.
-    _paint() {
-      const v = this._view, w = this._viewer;
-      if (!v || !w || !w.last) return;
-      const f = w.last, { canvas, ctx } = v, k = Math.min(canvas.width / f.displayWidth, canvas.height / f.displayHeight);
-      const dw = f.displayWidth * k, dh = f.displayHeight * k;
-      let sx = 0, sy = 0;
-      if (w.lastMeta && w.fov) {
-        const focal = (dh / 2) / Math.tan(w.fov * Math.PI / 360);
-        sx = Math.max(-dw / 3, Math.min(dw / 3, Math.tan(v.yaw - w.lastMeta.yaw) * focal));       // turned left: the picture moves right
-        sy = Math.max(-dh / 3, Math.min(dh / 3, Math.tan(v.pitch - w.lastMeta.pitch) * focal));   // looked up: it moves down
-      }
-      ctx.fillStyle = "#000"; ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(f, (canvas.width - dw) / 2 + sx, (canvas.height - dh) / 2 + sy, dw, dh);
-      if (this.visiting && this.visiting.paused) this._overlay();
-    }
-
-    // The host's page is reloading: its room holds its last frame, and says so.
-    _overlay() {
-      const v = this._view;
-      if (!v || !this.visiting || !this.visiting.paused) return;
-      const { canvas, ctx } = v, s = Math.max(14, Math.round(canvas.height / 30));
-      ctx.fillStyle = "rgba(0,0,0,0.55)"; ctx.fillRect(0, canvas.height / 2 - s, canvas.width, s * 2);
-      ctx.fillStyle = "#fff"; ctx.font = `${s}px system-ui, sans-serif`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillText(`${this.visiting.host.name || "The host"}'s room is reloading…`, canvas.width / 2, canvas.height / 2);
+      const dv = new DataView(buf);
+      if (dv.getUint16(0) === w.channel) this._sceneDelta(w, dv, (dv.getUint8(2) & KEY) !== 0);
     }
 
     _dropViewer() {
       const w = this._viewer;
       this._sceneDrop(w);
-      if (w && w.decoder) { try { w.decoder.close(); } catch (e) { /* closed */ } }
-      if (w && w.last) w.last.close();
       this._viewer = null;
-      this.stats = { latency: null, rtt: null, path: null, fps: 0, mode: null };
+      this.stats = { latency: null, rtt: null, path: null, fps: 0 };
       if (this._view) {
         const { canvas, ctx } = this._view;
         ctx.fillStyle = "#000"; ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -1609,7 +1352,7 @@
     }
     function stats() {
       const x = v.stats;
-      nums.textContent = !v.visiting ? "" : [x.mode === "scene" && "drawn here", x.path, x.rtt != null && `link ${Math.round(x.rtt)} ms`,
+      nums.textContent = !v.visiting ? "" : [x.path, x.rtt != null && `link ${Math.round(x.rtt)} ms`,
         x.latency != null && `input to screen ${Math.round(x.latency)} ms`, x.fps ? `${x.fps} fps` : ""].filter(Boolean).join(" · ");
     }
     root.addEventListener("click", e => {
@@ -1627,10 +1370,10 @@
 
   window.Visit = {
     version: VERSION,
-    // `scenes: false`: this page never draws a host's scene (video only). `threeBase`: where to fetch three.js
-    // from instead of the CDN ("{r}" the revision; the same files, checked against the same hashes).
-    connect({ port, token, sim = {}, scenes = true, threeBase = null }) {
-      const c = new Client(port, token, sim, { scenes, threeBase });
+    // `threeBase`: where to fetch three.js from instead of the CDN ("{r}" the revision; the same files, checked
+    // against the same hashes).
+    connect({ port, token, sim = {}, threeBase = null }) {
+      const c = new Client(port, token, sim, { threeBase });
       return c._open().then(() => c, e => { c.close(); throw e; });
     },
     walk,

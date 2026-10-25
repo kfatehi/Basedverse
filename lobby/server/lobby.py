@@ -7,9 +7,10 @@ when a network blocks that), and this server only introduces the peers.
 One process, all state in memory. A restart empties the lobby; every client reconnects and says hello
 again. Nobody signs in: a client picks a name, first come first served, like IRC.
 
-It also speaks version 2 (basedverse-lobby/2, ../../visit/SPEC.md section 6) on the same port: visit-clients,
-not browsers, agreeing visits (one office walking around another's room) and swapping the addresses their
-visit-clients connect to each other by. Version-2 offices are a separate lobby; the first hello decides.
+It also speaks versions 2 and 3 (basedverse-lobby/2 and /3, ../../visit/SPEC.md section 6) on the same port:
+visit-clients, not browsers, agreeing visits (one office walking around another's room) and swapping the
+addresses their visit-clients connect to each other by. Each version's offices are a lobby of their own (3:
+Visit 0.5 and later, three.js rooms only; 2: Visit 0.2 to 0.4); the first hello decides.
 
     python3 lobby.py     listens on LOBBY_HOST:LOBBY_PORT (default 0.0.0.0:8765), plain ws://.
                          In production Caddy terminates TLS in front of it (lobby/deploy/).
@@ -355,6 +356,8 @@ def depart(me):
 # dropped connection's session is kept LIMITS2["resume"] seconds, so a visit-client that reconnects in
 # time comes back as the same office, with its knocks and visits.
 PROTO2 = "basedverse-lobby/2"
+PROTO3 = "basedverse-lobby/3"   # the same, for Visit 0.5 on: a lobby of its own (they cannot visit Visit 0.4 rooms)
+PROTOS2 = (PROTO2, PROTO3)
 RELAY_URLS = [u.strip() for u in os.environ.get("RELAY_URLS", "").split(",") if u.strip()]
 LIMITS2 = {
     "name": 24, "message": 280, "frame": 64 * 1024, "knocks_per_minute": 6,
@@ -376,7 +379,8 @@ class Office2:
         self.status = "available"
         self.sim = {}
         self.max_visitors = 3
-        self.link = None             # {"endpoint", "addr"} once published
+        self.proto = PROTO2          # which lobby it is in: it sees, and visits, only offices of the same
+        self.link = None             # {"endpoint", "addr"} once published (and until withdrawn)
         self.visiting = None         # the visit it is on, as a visitor
         self.hosting = set()         # the visits to it, as a host
         self.knocked = collections.deque()
@@ -400,16 +404,17 @@ def error2(office, code, text, ref=None):
     tell2(office, dict({"type": "error", "code": code, "message": text}, **({"ref": ref} if ref else {})))
 
 
-def lobby_view2():
+def lobby_view2(proto):
     return {"type": "lobby", "offices": [
         {"id": o.id, "name": o.name, "status": o.status, "sim": o.sim, "max_visitors": o.max_visitors,
          "visitors": len(o.hosting), "visiting": VISITS2[o.visiting]["host"] if o.visiting else None,
          "ready": o.link is not None}
-        for o in sorted(OFFICES2.values(), key=lambda o: o.name.casefold())]}
+        for o in sorted(OFFICES2.values(), key=lambda o: o.name.casefold()) if o.proto == proto]}
 
 
 def announce2():
-    broadcast([o.ws for o in OFFICES2.values() if o.ws is not None], json.dumps(lobby_view2()))
+    for proto in PROTOS2:
+        broadcast([o.ws for o in OFFICES2.values() if o.ws is not None and o.proto == proto], json.dumps(lobby_view2(proto)))
 
 
 def start_visit(host, visitor):
@@ -452,6 +457,9 @@ def expire2(kid):
 
 def on2_link(me, m):
     endpoint, addr = m.get("endpoint"), m.get("addr")
+    if endpoint is None and addr is None:   # withdrawn (version 3: its page stopped hosting): not ready, until again
+        me.link = None
+        return announce2()
     if not isinstance(endpoint, str) or not 0 < len(endpoint) <= 200 or not isinstance(addr, dict):
         return error2(me, "bad_message", "link needs an endpoint (string) and an addr (object)", "link")
     if len(json.dumps(addr)) > LIMITS2["link_addr"]:
@@ -488,6 +496,8 @@ def text_field2(m, key, office, ref):
 
 def on2_knock(me, m):
     target = OFFICES2.get(m.get("to"))
+    if target and target.proto != me.proto:   # in the other lobby: not one this office can see
+        target = None
     msg = text_field2(m, "message", me, "knock")
     if msg is None:
         return
@@ -544,6 +554,9 @@ def on2_answer(me, m):
     if len(me.hosting) >= me.max_visitors:
         tell2(knocker, {"type": "answered", "knock": k["id"], "accept": False, "reason": "full", "message": msg})
         return error2(me, "full", "you have all the visitors you take", "answer")
+    if not me.link or not knocker.link:   # withdrawn meanwhile (version 3: a page that stopped hosting)
+        tell2(knocker, {"type": "answered", "knock": k["id"], "accept": False, "reason": "not_ready", "message": msg})
+        return error2(me, "not_ready", "%s cannot be visited right now" % ("you" if not me.link else knocker.name), "answer")
     tell2(knocker, {"type": "answered", "knock": k["id"], "accept": True, "message": msg})
     start_visit(me, knocker)
 
@@ -584,7 +597,7 @@ def welcome2(me, resumed):
     RESUMES2[me.resume] = me.id
     visits = [v["id"] for v in VISITS2.values() if me.id in (v["host"], v["visitor"])]
     knocking = [{"id": k["id"], "to": k["to"]} for k in KNOCKS2.values() if k["from"] == me.id]
-    tell2(me, {"type": "welcome", "proto": PROTO2, "id": me.id, "name": me.name, "relays": RELAY_URLS,
+    tell2(me, {"type": "welcome", "proto": me.proto, "id": me.id, "name": me.name, "relays": RELAY_URLS,
                "resume": me.resume, "resumed": resumed, "visits": visits, "knocking": knocking, "limits": dict(LIMITS2)})
 
 
@@ -599,7 +612,7 @@ def hello2(ws, m):
     """The session a version-2 hello opens or resumes, or None after an error (the connection stays open)."""
     probe = Office2(ws)   # stands in for the session until there is one, to answer errors on
     old = OFFICES2.get(RESUMES2.get(m.get("resume")))
-    if old:
+    if old and old.proto == m.get("proto"):
         if old.ws is not None and old.ws is not ws:   # its old connection is not known to be dead yet: it is
             asyncio.ensure_future(old.ws.close(4000, "resumed on another connection"))
         if old.held:
@@ -607,7 +620,7 @@ def hello2(ws, m):
             old.held = None
         old.ws = ws
         welcome2(old, True)
-        tell2(old, lobby_view2())
+        tell2(old, lobby_view2(old.proto))
         for kid, k in KNOCKS2.items():
             if k["to"] == old.id:
                 tell2(old, knock_msg(kid))
@@ -631,7 +644,7 @@ def hello2(ws, m):
         return None
     me = probe
     me.id = "o" + secrets.token_hex(4)
-    me.name, me.status, me.max_visitors = name, m.get("status", "available"), max_visitors
+    me.name, me.status, me.max_visitors, me.proto = name, m.get("status", "available"), max_visitors, m["proto"]
     me.sim = {k: str(sim[k])[:40] for k in ("name", "version") if isinstance(sim.get(k), str)}
     OFFICES2[me.id], BY_NAME2[name.casefold()] = me, me.id
     welcome2(me, False)
@@ -674,8 +687,8 @@ async def handler2(ws, raw):
             if m is not None:
                 if m["type"] != "hello":
                     error2(probe, "hello_first", "say hello first", m["type"])
-                elif m.get("proto") != PROTO2:
-                    error2(probe, "proto_unsupported", "this lobby speaks %s and %s" % (PROTO, PROTO2), "hello")
+                elif m.get("proto") not in PROTOS2:
+                    error2(probe, "proto_unsupported", "this lobby speaks %s, %s and %s" % (PROTO, PROTO2, PROTO3), "hello")
                 else:
                     me = hello2(ws, m)
                     if me:
@@ -730,7 +743,7 @@ def is_v2(raw):
         m = json.loads(raw)
     except (ValueError, TypeError):
         return False
-    return isinstance(m, dict) and m.get("proto") == PROTO2
+    return isinstance(m, dict) and m.get("proto") in PROTOS2
 
 
 def client_ip(ws):

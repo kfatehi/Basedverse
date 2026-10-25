@@ -1,4 +1,4 @@
-//! The lobby session (../SPEC.md section 6): one WebSocket to the lobby, `basedverse-lobby/2`. It
+//! The lobby session (../SPEC.md section 6): one WebSocket to the lobby, `basedverse-lobby/3`. It
 //! reconnects by itself (1 s, 2 s, 4 s, ... up to 30 s) and resumes its session with the secret from the
 //! last welcome, so a drop shorter than the lobby's resume window keeps the office, its knocks and its
 //! visits. Everything the lobby says goes to the core; the core's messages go to the lobby. The lobby pings
@@ -14,7 +14,7 @@ use tracing::{info, warn};
 
 use crate::core::Ev;
 
-pub const PROTO: &str = "basedverse-lobby/2";
+pub const PROTO: &str = "basedverse-lobby/3";
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const SILENCE: Duration = Duration::from_secs(60);
 

@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """visit-client end to end: the real lobby (in-process), two real visit-clients (A hosts, B visits) and
-two stand-in pages speaking basedverse-visit-local/1 (../../SPEC.md section 5). Everything on this
+two stand-in pages speaking basedverse-visit-local/2 (../../SPEC.md section 5). Everything on this
 machine's loopback; the visit-clients link directly (no relay).
 
-    python3 e2e.py path/to/visit-client [B's]   (run-e2e.sh runs it in a container; a second binary runs B,
-                                                 to try two versions together; E2E_A=an older one runs A)
+    python3 e2e.py path/to/visit-client   (run-e2e.sh runs it in a container)
 """
 import asyncio
 import gzip
@@ -24,10 +23,6 @@ from websockets.exceptions import ConnectionClosed  # noqa: E402
 
 BIN = sys.argv[1]
 VERSION = re.search(r'^version = "(.*)"', open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "Cargo.toml")).read(), re.M).group(1)
-BIN_B = sys.argv[2] if len(sys.argv) > 2 else BIN
-OLD_B = BIN_B != BIN   # B is an older visit-client (0.3): the checks of what only 0.4 does become checks it still works
-BIN_A = os.environ.get("E2E_A") or BIN
-OLD_A = BIN_A != BIN   # A is the older one: the same, the other way round
 TMP = tempfile.mkdtemp()
 fails = 0
 
@@ -48,7 +43,7 @@ class Page:
     async def open(self, token=None, origin="http://room.test"):
         self.ws = await connect("ws://127.0.0.1:%d/ws" % self.port, max_size=4 << 20, origin=origin)
         self.texts, self.frames = asyncio.Queue(), asyncio.Queue()
-        await self.send(type="hello", proto="basedverse-visit-local/1", token=token or self.token, sim={"name": "e2e", "version": "1"})
+        await self.send(type="hello", proto="basedverse-visit-local/2", token=token or self.token, sim={"name": "e2e", "version": "1"})
         self.pump = asyncio.create_task(self._pump())
         return self
 
@@ -63,7 +58,7 @@ class Page:
     async def send(self, **m):
         await self.ws.send(json.dumps(m))
 
-    async def expect(self, type_, timeout=10, skip=("lobby", "bitrate", "online", "knock_sent", "link_stats")):
+    async def expect(self, type_, timeout=10, skip=("lobby", "online", "knock_sent", "link_stats")):
         """The next message of this type, passing over the kinds in `skip`; any other first is a failure."""
         while True:
             m = await asyncio.wait_for(self.texts.get(), timeout)
@@ -107,30 +102,23 @@ async def start_client(name, port, url, *extra, binary=None):
                                              stdout=asyncio.subprocess.PIPE, stderr=log,
                                              env=dict(os.environ, RUST_LOG=os.environ.get("RUST_LOG", "visit_client=debug,iroh=warn")))
     ready = json.loads(await asyncio.wait_for(p.stdout.readline(), 10))
-    check("%s prints its ready line" % name, (ready["ready"], ready["port"], ready["proto"]), (True, port, "basedverse-visit-local/1"))
+    check("%s prints its ready line" % name, (ready["ready"], ready["port"], ready["proto"]), (True, port, "basedverse-visit-local/2"))
     return p, token
 
 
 def frame(channel, key, ts, payload):
+    """A page's scene delta: channel, flags (bit 0 a key delta), timestamp, the delta."""
     return struct.pack(">HBQ", channel, 1 if key else 0, ts) + payload
 
 
-def frame_meta(channel, key, ts, meta, payload):
-    return struct.pack(">HBQ", channel, (1 if key else 0) | 2, ts) + meta + payload
-
-
 def scene_edit(channel, edit, raw=None):
-    """A page's scene edit: the scene flag, then the edit, gzipped JSON (or `raw` bytes as they are)."""
-    return struct.pack(">HBQ", channel, 4, 0) + (raw if raw is not None else gzip.compress(json.dumps(edit).encode()))
+    """A page's scene edit: the edit flag (bit 1), then the edit, gzipped JSON (or `raw` bytes as they are)."""
+    return struct.pack(">HBQ", channel, 2, 0) + (raw if raw is not None else gzip.compress(json.dumps(edit).encode()))
 
 
 def unframe(b):
     channel, flags, ts = struct.unpack(">HBQ", b[:11])
-    return (channel, bool(flags & 1), ts, b[27:]) if flags & 2 else (channel, bool(flags & 1), ts, b[11:])
-
-
-def meta_of(b):
-    return b[11:27] if struct.unpack(">B", b[2:3])[0] & 2 else None
+    return (channel, bool(flags & 1), ts, b[11:])
 
 
 async def main():
@@ -140,7 +128,7 @@ async def main():
         url = "ws://127.0.0.1:%d" % server.sockets[0].getsockname()[1]
         state = os.path.join(TMP, "A.state.json")   # where A keeps whether it is away
         a_flags = ("--origins", "http://room.test", "--state-file", state)
-        (pa, ta), (pb, tb) = await start_client("A", 7411, url, *a_flags, binary=BIN_A), await start_client("B", 7412, url, binary=BIN_B)
+        (pa, ta), (pb, tb) = await start_client("A", 7411, url, *a_flags), await start_client("B", 7412, url)
 
         print("\npage connection")
         bad = await Page(7411, ta).open(token="0" * 64)
@@ -156,12 +144,20 @@ async def main():
             check("A takes pages only from its --origins", "403" in str(e), True)
         a, b = await Page(7411, ta).open(), await Page(7412, tb).open()
         ra, rb = await a.expect("ready"), await b.expect("ready")
-        check("ready: the version, limits, no visits, not away", (ra["version"] if not OLD_A else VERSION, ra["limits"]["fps"], ra["visits"], ra["away"]), (VERSION, 60, [], False))
+        check("ready: the version, no visits, not away", (ra["version"], ra["visits"], ra["away"]), (VERSION, [], False))
+        lob = await a.until(lambda m: m["type"] == "lobby" and len(m["offices"]) == 2)
+        check("both offices in the lobby, neither ready: no page hosts its scene yet", sorted((o["name"], o["ready"]) for o in lob["offices"]), [("A", False), ("B", False)])
+        await b.send(type="knock", to=next(o["id"] for o in lob["offices"] if o["name"] == "A"))
+        check("knocking before hosting: refused, not_hosting", (await b.expect("error"))["code"], "not_hosting")
+        await b.send(type="host", three="r128")
+        check("a revision that is not digits: refused", (await b.expect("error"))["code"], "bad_message")
+        await a.send(type="host", three="128")
+        await b.send(type="host", three="128")
         both = lambda m: m["type"] == "lobby" and sum(o["ready"] for o in m["offices"]) == 2
         lob = await a.until(both)
         await b.until(both)
         ids = {o["name"]: o["id"] for o in lob["offices"]}
-        check("both offices in the lobby, each with its link published", sorted(ids), ["A", "B"])
+        check("each page hosts its scene: both ready (links published)", sorted(ids), ["A", "B"])
         await a.drain()
         await b.drain()
         await asyncio.sleep(4)   # idle through four of the lobby's pings
@@ -192,15 +188,11 @@ async def main():
               ("host", "visitor", True, "B", "A"))
         cha, chb, vid = sa["channel"], sb["channel"], sa["id"]
 
-        print("\nvisitor to host: decoders, viewport, input, keyframe")
-        await b.send(type="decoders", codecs=["avc1.42E01F", "vp8"])
-        await b.send(type="viewport", width=1600, height=900)
-        d, vp = await a.expect("decoders"), await a.expect("viewport")
-        check("A's page hears what B decodes and B's view size, on A's channel", (d["channel"], d["codecs"], vp["width"], vp["height"]), (cha, ["avc1.42E01F", "vp8"], 1600, 900))
+        print("\nvisitor to host: input, key deltas, the link")
         await b.send(type="input", forward=1, strafe=-1, run=True, yaw=0.5, pitch=9, t=12345.5)
         i = await a.expect("input")
         check("B's input reaches A's page, clamped", (i["channel"], i["forward"], i["strafe"], i["run"], i["yaw"], i["pitch"]), (cha, 1, -1, True, 0.5, 1.4))
-        check("with B's time on it, for A's frames to carry back", i["t"], 12345.5)
+        check("with B's time on it, for A's deltas to carry back", i["t"], 12345.5)
         await a.drain()
         for _ in range(5):
             await b.send(type="keyframe", channel=chb)
@@ -210,25 +202,55 @@ async def main():
             m = a.texts.get_nowait()
             if m and m["type"] == "keyframe":
                 keys.append(m["channel"])
-        check("B asking for a keyframe five times at once: A's page is asked once (they cost its machine)", keys, [cha])
+        check("B asking for a key delta five times at once: A's page is asked once", keys, [cha])
         sa_stats = await a.until(lambda m: m["type"] == "link_stats", timeout=4)
         sb_stats = await b.until(lambda m: m["type"] == "link_stats", timeout=4)
         check("both pages hear the link's path and round trip, about once a second: direct here",
               (sa_stats["channel"], sa_stats["path"], sb_stats["channel"], sb_stats["path"], 0 <= sb_stats["rtt_ms"] < 100), (cha, "direct", chb, "direct", True))
 
-        print("\nhost to visitor: video")
-        await a.send(type="video_config", channel=cha, codec="vp8", width=1280, height=720)
-        vc = await b.expect("video_config")
-        check("A's encoder settings reach B, on B's channel", (vc["channel"], vc["codec"], vc["width"]), (chb, "vp8", 1280))
-        sent = [frame(cha, n % 10 == 0, 1000 * n, secrets.token_bytes(200 + n)) for n in range(25)]
-        for f in sent:   # paced, as a page encoding its room sends them
+        print("\nhost to visitor: the scene")
+        await a.drain()
+        await b.drain()
+        whole = {"type": "scene", "three": "128", "json": {"metadata": {"version": 4.5}, "object": {"type": "Scene", "uuid": "u-1"}}, "ids": [["u-1", 1]]}
+        edits = [whole] + [{"type": "edit", "props": [{"uuid": "m", "opacity": n / 10}]} for n in range(5)]
+        for e in edits:
+            await a.ws.send(scene_edit(cha, e))
+        got = [await b.expect("scene") for _ in edits]
+        check("A's scene and its edits reach B's page whole, in order, on B's channel (gzipped on the way, unpacked for the page)",
+              [(g["channel"], g["edit"]) for g in got], [(chb, e) for e in edits])
+        big = {"type": "edit", "blob": secrets.token_hex(750_000)}
+        await a.ws.send(scene_edit(cha, big))
+        check("a 1.5 MB edit (a big room's whole scene) arrives whole", (await b.expect("scene", timeout=20))["edit"] == big, True)
+        bomb = gzip.compress(b" " * (65 << 20))
+        await a.ws.send(scene_edit(cha, None, raw=bomb))
+        check("a zip bomb (%d KB that would unpack to 65 MB): dropped, and B's page told the scene is lost" % (len(bomb) // 1024),
+              (await b.expect("scene_lost", timeout=20))["channel"], chb)
+        for raw in (gzip.compress(b'{"type": "edit", '), gzip.compress(b"[1, 2]"), b"not gzip at all"):
+            await a.ws.send(scene_edit(cha, None, raw=raw))
+            await b.expect("scene_lost")
+        check("cut-short JSON, an array, not gzip: each dropped, scene_lost", True, True)
+        await a.ws.send(scene_edit(cha, {"type": "edit", "after": True}))
+        check("and the next edit after them still arrives", (await b.expect("scene"))["edit"], {"type": "edit", "after": True})
+        for _ in range(3):
+            await b.send(type="scene_resync", channel=chb)
+        await asyncio.sleep(0.4)
+        asked = []
+        while not a.texts.empty():
+            m = a.texts.get_nowait()
+            if m and m["type"] == "scene_resync":
+                asked.append(m["channel"])
+        check("B asking for the whole scene three times at once: A's page is asked once", asked, [cha])
+        await a.ws.send(scene_edit(9999, {"type": "edit"}))
+        await b.send(type="scene_resync", channel=9999)
+        check("an edit for no visit is dropped; a resync for none is refused", (await b.expect("error"))["code"], "no_such_visit")
+        sent = [frame(cha, n % 10 == 0, 1000 * n, secrets.token_bytes(40 + n)) for n in range(25)]
+        for f in sent:   # paced, as a page sends them (every 33 ms, here faster)
             await a.ws.send(f)
             await asyncio.sleep(0.01)
         got = [unframe(await asyncio.wait_for(b.frames.get(), 5)) for _ in range(25)]
-        check("25 frames, in order, keyframes marked, on B's channel",
-              [(g[0], g[1], g[2], g[3]) for g in got], [(chb,) + unframe(f)[1:] for f in sent])
-        # Three groups of pictures at once: a newer group abandons the older, so nothing older than a
-        # keyframe ever follows it, and the newest group arrives whole.
+        check("25 deltas, in order, key deltas marked, on B's channel", [(g[0], g[1], g[2], g[3]) for g in got], [(chb,) + unframe(f)[1:] for f in sent])
+        # Three key deltas' streams at once: a newer abandons the older, so nothing older than a key delta ever
+        # follows it, and the newest stream arrives whole.
         burst = [frame(cha, n % 4 == 0, 50_000 + 1000 * n, b"burst %d" % n) for n in range(12)]
         for f in burst:
             await a.ws.send(f)
@@ -239,98 +261,39 @@ async def main():
         except asyncio.TimeoutError:
             pass
         ts = [g[2] for g in got]
-        check("a burst: never an older frame after a newer one", ts == sorted(ts), True)
-        check("and the newest group of pictures whole", ts[-4:], [58_000, 59_000, 60_000, 61_000])
-        meta = struct.pack(">dff", 4242.25, 0.5, -0.25)
-        await a.ws.send(frame_meta(cha, False, 70_000, meta, b"with meta"))
-        got = await asyncio.wait_for(b.frames.get(), 5)
-        check("a frame with meta (the input it shows, the look it was drawn at) reaches B whole",
-              (unframe(got)[3], meta_of(got) and struct.unpack(">dff", meta_of(got))), (b"with meta", (4242.25, 0.5, -0.25)))
-        bitrate = await a.until(lambda m: m["type"] == "bitrate", timeout=4)
-        check("A's page is told a bitrate for the visit", (bitrate["channel"], 300_000 <= bitrate["bps"] <= 6_000_000), (cha, True))
-
-        print("\nscenes")
-        await a.drain()
-        await b.drain()
-        await b.send(type="scenes", three=["128", "170"])
-        if OLD_B:
-            check("an older B does not know `scenes`: refused, there and then (and A hears nothing: video it is)", (await b.expect("error"))["code"], "unknown_type")
-        elif OLD_A:
-            await asyncio.sleep(1)
-            heard = []
-            while not a.texts.empty():
-                m = a.texts.get_nowait()
-                if m:
-                    heard.append(m["type"])
-            check("an older A's page never hears `scenes` (video it is)", "scenes" in heard, False)
-        else:
-            sc = await a.expect("scenes")
-            check("A's page hears which three.js revisions B draws, on A's channel", (sc["channel"], sc["three"]), (cha, ["128", "170"]))
-            await b.send(type="scenes", three=["r128"])
-            check("a revision that is not digits: refused", (await b.expect("error"))["code"], "bad_message")
-            whole = {"type": "scene", "three": "128", "json": {"metadata": {"version": 4.5}, "object": {"type": "Scene", "uuid": "u-1"}}, "ids": [["u-1", 1]]}
-            edits = [whole] + [{"type": "edit", "props": [{"uuid": "m", "opacity": n / 10}]} for n in range(5)]
-            for e in edits:
-                await a.ws.send(scene_edit(cha, e))
-            got = [await b.expect("scene") for _ in edits]
-            check("A's scene and its edits reach B's page whole, in order, on B's channel (gzipped on the way, unpacked for the page)",
-                  [(g["channel"], g["edit"]) for g in got], [(chb, e) for e in edits])
-            big = {"type": "edit", "blob": secrets.token_hex(750_000)}
-            await a.ws.send(scene_edit(cha, big))
-            check("a 1.5 MB edit (a big room's whole scene) arrives whole", (await b.expect("scene", timeout=20))["edit"] == big, True)
-            bomb = gzip.compress(b" " * (65 << 20))
-            await a.ws.send(scene_edit(cha, None, raw=bomb))
-            check("a zip bomb (%d KB that would unpack to 65 MB): dropped, and B's page told the scene is lost" % (len(bomb) // 1024),
-                  (await b.expect("scene_lost", timeout=20))["channel"], chb)
-            for raw in (gzip.compress(b'{"type": "edit", '), gzip.compress(b"[1, 2]"), b"not gzip at all"):
-                await a.ws.send(scene_edit(cha, None, raw=raw))
-                await b.expect("scene_lost")
-            check("cut-short JSON, an array, not gzip: each dropped, scene_lost", True, True)
-            await a.ws.send(scene_edit(cha, {"type": "edit", "after": True}))
-            check("and the next edit after them still arrives", (await b.expect("scene"))["edit"], {"type": "edit", "after": True})
-            await a.ws.send(struct.pack(">HBQ", cha, 8 | 1, 300_000) + b"a key delta")
-            got = await asyncio.wait_for(b.frames.get(), 5)
-            check("a scene delta travels as a frame does, its flags kept (delta, key)", (got[2], got[11:]), (9, b"a key delta"))
-            for _ in range(3):
-                await b.send(type="scene_resync", channel=chb)
-            await asyncio.sleep(0.4)
-            asked = []
-            while not a.texts.empty():
-                m = a.texts.get_nowait()
-                if m and m["type"] == "scene_resync":
-                    asked.append(m["channel"])
-            check("B asking for the whole scene three times at once: A's page is asked once", asked, [cha])
-            await a.ws.send(scene_edit(9999, {"type": "edit"}))
-            await b.send(type="scene_resync", channel=9999)
-            check("an edit for no visit is dropped; a resync for none is refused", (await b.expect("error"))["code"], "no_such_visit")
+        check("a burst: never an older delta after a newer one", ts == sorted(ts), True)
+        check("and the newest key delta's stream whole", ts[-4:], [58_000, 59_000, 60_000, 61_000])
 
         print("\nreloads")
         await a.send(type="pose", channel=cha, state={"pose": {"x": 1.5, "z": 2}, "yaw0": 0})
         await asyncio.sleep(0.2)
         await a.close()
         check("A's page goes: B hears its host paused", (await b.expect("host_paused"))["channel"], chb)
+        lob = await b.until(lambda m: m["type"] == "lobby" and any(o["name"] == "A" and not o["ready"] for o in m["offices"]))
+        check("and A, with no page hosting, is not ready to be visited (the visit goes on)", [o["ready"] for o in lob["offices"] if o["name"] == "A"], [False])
         a = await Page(7411, ta).open()
         ra = await a.expect("ready")
         check("A's page back: ready lists the visit", [(v["id"], v["role"], v["channel"]) for v in ra["visits"]], [(vid, "host", cha)])
         check("with where B stood, as A's page last said", ra["visits"][0].get("state"), {"pose": {"x": 1.5, "z": 2}, "yaw0": 0})
-        if not OLD_B and not OLD_A:
-            check("which scenes B draws again, first (A's page decides on them before video)", (await a.expect("scenes"))["three"], ["128", "170"])
-        d2, vp2 = await a.expect("decoders"), await a.expect("viewport")
-        check("and what B decodes and its view size again, to encode for", (d2["codecs"], vp2["width"]), (["avc1.42E01F", "vp8"], 1600))
         check("and B hears its host resumed", (await b.expect("host_resumed"))["channel"], chb)
+        await a.send(type="host", three="128")
+        lob = await b.until(lambda m: m["type"] == "lobby" and any(o["name"] == "A" and o["ready"] for o in m["offices"]))
+        check("A's page hosts again: ready again", [o["ready"] for o in lob["offices"] if o["name"] == "A"], [True])
         await a.ws.send(frame(cha, True, 99_000, b"after the reload"))
-        check("frames flow again", unframe(await asyncio.wait_for(b.frames.get(), 5))[3], b"after the reload")
+        check("deltas flow again", unframe(await asyncio.wait_for(b.frames.get(), 5))[3], b"after the reload")
         await b.close()
         b = await Page(7412, tb).open()
         rb = await b.expect("ready")
         check("B's page back: still visiting", [(v["id"], v["role"]) for v in rb["visits"]], [(vid, "visitor")])
-        check("with A's encoder settings again", (await b.expect("video_config"))["codec"], "vp8")
-        check("and A is asked for a keyframe to start B's decoder", (await a.until(lambda m: m["type"] == "keyframe"))["channel"], cha)
+        check("and A is asked for its whole scene again, for B's new page (at most every 2 s: this one waited, and went)",
+              (await a.until(lambda m: m["type"] == "scene_resync", timeout=5))["channel"], cha)
+        await b.send(type="host", three="128")
         c = await Page(7411, ta).open()
         await c.expect("ready")
         await asyncio.sleep(0.3)
         check("a second page on A takes over; the first is closed 4409", a.ws.close_code, 4409)
         a = c
+        await a.send(type="host", three="128")
 
         print("\nthe lobby connection drops and resumes")
         await a.drain()
@@ -341,7 +304,7 @@ async def main():
         on = await b.until(lambda m: m["type"] == "online", timeout=10)
         check("then online again as the same office", on["office"]["id"], ids["B"])
         await a.ws.send(frame(cha, True, 200_000, b"still linked"))
-        check("the visit never noticed: frames still flow", unframe(await asyncio.wait_for(b.frames.get(), 5))[3], b"still linked")
+        check("the visit never noticed: deltas still flow", unframe(await asyncio.wait_for(b.frames.get(), 5))[3], b"still linked")
 
         print("\nending")
         await b.send(type="end", visit=vid)
@@ -379,9 +342,10 @@ async def main():
         a = a2
         pa.terminate()
         await asyncio.wait_for(pa.wait(), 5)
-        pa, ta = await start_client("A", 7411, url, *a_flags, binary=BIN_A)
+        pa, ta = await start_client("A", 7411, url, *a_flags)
         a = await Page(7411, ta).open()
         ra = await a.expect("ready")
+        await a.send(type="host", three="128")
         await asyncio.sleep(1.5)
         check("A restarted with its state file: still away, and not in the lobby",
               (ra["away"], ra["online"], "a" in lobby.BY_NAME2), (True, False, False))

@@ -31,7 +31,7 @@ use crate::{
     ct_eq, VERSION,
 };
 
-pub const PROTO: &str = "basedverse-visit-local/1";
+pub const PROTO: &str = "basedverse-visit-local/2";
 /// How many frames may wait for a page. Messages have a queue of their own, never dropped: a page that
 /// falls behind loses frames (and then waits for a keyframe), never what it is told.
 pub const FRAME_QUEUE: usize = 256;
@@ -91,7 +91,7 @@ async fn page(mut sock: WebSocket, st: Arc<PageState>) {
         _ => Value::Null,
     };
     if hello.get("type").and_then(Value::as_str) != Some("hello") || hello.get("proto").and_then(Value::as_str) != Some(PROTO) {
-        return close(&mut sock, 4400, "say hello, basedverse-visit-local/1").await;
+        return close(&mut sock, 4400, "say hello, basedverse-visit-local/2").await;
     }
     if !ct_eq(hello.get("token").and_then(Value::as_str).unwrap_or(""), &st.token) {
         warn!("a page gave a wrong token");

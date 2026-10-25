@@ -9,6 +9,67 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.5.0 — 2026-10-25
+
+**Every room is three.js, and video is gone.** A room takes part with its scene: the host sends it, and
+every visitor's browser draws it, as 0.4 did for three.js rooms. A room that is not three.js can no longer
+take part, visiting included: an office is in the lobby to be visited, and can knock, only once its page
+hosts its scene. Visit loses its video encoding, decoding, codecs and bitrate control: less code, and a
+smaller attack surface (no browser decodes video from a stranger). **Protocol names changed**
+(`basedverse-visit-local/2`, `basedverse-lobby/3`, `basedverse-visit/2`): every workroom upgrades, and the
+lobby too. A 0.5 office and an older one are in separate lobbies (the lobby speaks both), and never meet.
+
+Measured (`tests/perf/run-perf.sh`): a visitor walks and looks at once, drawn by its own browser; what the
+network shapes is the host's answer (where the host has the visitor, and where its room's moving things are):
+
+| network | the host's answer, median / worst 5% | bandwidth (50 moving things) |
+|---|---|---|
+| no delay | 3 / 8 ms | 0.41 Mbit/s |
+| down the street (8 ms round trip) | 12 / 17 ms | |
+| across the country (70 ms) | 75 / 80 ms | |
+| bad Wi-Fi (30 ms, jitter, 1.5% loss) | 35 / 45 ms | |
+| relayed, capped at 5 Mbit/s (80 ms) | 88 / 93 ms (video: 96 / 141 ms, stalls) | |
+| capped at 2 Mbit/s (22 ms) | 32 / 37 ms (video: 41 / 55 ms) | |
+| six visitors on one host (8 ms) | 12 / 17 ms | |
+
+In real (headless, processor-drawn) browsers: input to screen 14 ms median, 21–24 ms worst 5%, 57–58 frames
+a second; the host spends 0.4 ms per update on its scene, 30 a second.
+
+### What changed
+
+- visit.js: `v.host` takes `scene` (required), `spawn`, `move`, `fov` and `walk`; `render` and `fps` are
+  gone, and `Visit.connect`'s `scenes`; a page sends `host` when it registers, and its office is not in the
+  lobby to be visited, nor knocks, until it has. `v.stats` loses `mode`. A visitor's page that has no scene 3 s
+  into a visit asks for it again.
+- visit-client: the page message `host`; `knock` refused `not_hosting` before it; the office's link published
+  only while a page hosts (withdrawn when it goes); no `decoders`, `viewport`, `video_config`, `bitrate`,
+  `scenes`, frame meta or `limits`; links carry only a scene's deltas and edits; a visitor's request for the
+  whole scene sooner than every 2 s waits, and goes (it was dropped).
+- The lobby: version 3 (version 2 with a link that can be withdrawn), its own lobby beside versions 1 and 2.
+- [visit/SPEC.md](visit/SPEC.md) throughout (sections 7 and 8 rewritten); [visit/INTEGRATING.md](visit/INTEGRATING.md)
+  "Before you start", step 5 (rewritten), step 6, the checklist, troubleshooting.
+
+### What an integration does
+
+1. **If your room is not made with three.js (r125 to r186), stop**: from 0.5 it cannot take part. Tell your
+   user (staying on 0.4 keeps it working, by video, with other 0.4 rooms only).
+2. **The lobby first** (whoever runs it): update it, `bin/deploy-lobby`. It speaks versions 1, 2 and 3 side by
+   side, so rooms still on 0.4 keep meeting each other until they upgrade. A 0.5 visit-client facing an older
+   lobby exits at once (code 4, `proto_unsupported` in its log).
+3. Get visit-client 0.5.0 (`bin/setup` again, download; or this release).
+4. In `visit.host({ ... })`: `scene: { root, three, renderer, near, far }` is required (0.4's step 2: if you
+   did it, you have it); give `fov`; `walk: { speed }` if your `move` is `Visit.walk` at that speed. **Remove
+   `render` and `fps`**, and the second renderer and camera you kept for `render`: nothing calls them. Mark
+   your visitors' bodies `userData.visitor = entry.id`, if you draw them (0.4's step 2).
+5. If you passed `scenes` to `Visit.connect`, remove it.
+6. Call `visit.host` right after `connect`, on every page load, as before: until it is called, your office is
+   not in the lobby to be visited, and cannot knock.
+7. If your page has a Content-Security-Policy: `connect-src https://cdn.jsdelivr.net` and `script-src blob:`
+   (0.4's step 3), now for every visit.
+8. Check ([visit/INTEGRATING.md](visit/INTEGRATING.md), step 8): both offices `ready`; a visit draws the
+   host's room, walking and turning are instant, its moving things move, the visitor does not see its own
+   body; reload the host's page and the visitor's, mid-visit.
+
 ## v0.4.0 — 2026-10-25
 
 **A three.js room sends its scene, not video, and the visitor's browser draws it.** Video asks the host's

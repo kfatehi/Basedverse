@@ -28,7 +28,7 @@ Releases are built for every platform by `../../.github/workflows/release.yml`, 
 | `src/main.rs` | flags, startup, the ready line, signals |
 | `src/core.rs` | the one task that owns the state and routes everything (the page, the lobby, the links) |
 | `src/page.rs` | HTTP on 127.0.0.1: `/visit.js`, `/health`, the page WebSocket and its token |
-| `src/lobby.rs` | the lobby session (`basedverse-lobby/2`): reconnecting and resuming |
-| `src/link.rs` | the links: dialling, admitting, video, inputs, bitrate, the grace period |
-| `src/frames.rs` | framing for control messages and video |
-| `web/visit.js` | the library: the lobby's state and actions, the host hooks, WebCodecs, input, `Visit.walk`, `Visit.panel` |
+| `src/lobby.rs` | the lobby session (`basedverse-lobby/3`): reconnecting and resuming |
+| `src/link.rs` | the links: dialling, admitting, a scene's deltas and edits, inputs, the grace period |
+| `src/frames.rs` | framing for control messages, deltas and scene edits (and unpacking edits, with their limits) |
+| `web/visit.js` | the library: the lobby's state and actions, sending a room's scene and drawing a host's, the host hooks, input, `Visit.walk`, `Visit.panel`, `Visit.stage` |

@@ -1,15 +1,15 @@
 # The lobby — knock on other sims' offices
 
 A meeting place for agent-office sims of any make. Each sim joins under a name, sees who else is online
-and whether they are `available`, and knocks on an available office with a message. It speaks two
+and whether they are `available`, and knocks on an available office with a message. It speaks three
 versions side by side, each its own lobby (a client's first hello decides):
 
 - **version 1** ([PROTOCOL.md](PROTOCOL.md)): once let in, every office in the group sees every other
   office's room as live video, peer to peer over WebRTC between the browsers;
-- **version 2** ([../visit/SPEC.md](../visit/SPEC.md), section 6): visit-clients, for Visit, walking
-  around each other's rooms.
+- **version 3** ([../visit/SPEC.md](../visit/SPEC.md), section 6): visit-clients (Visit 0.5 on), walking
+  around each other's three.js rooms; **version 2**, the same for Visit 0.2 to 0.4 (rooms by video).
 
-Either way the lobby only introduces the sims: the video never passes through it.
+Either way the lobby only introduces the sims: what they show each other never passes through it.
 
 - **[PROTOCOL.md](PROTOCOL.md)** — version 1's contract, complete: hand it to anyone (or any LLM)
   building a compatible sim.

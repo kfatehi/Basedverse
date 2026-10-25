@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """One office of a perf run with a real browser: what node.py does, but the page is the test workroom
-(../room.html, its busy scene) in a headless Chromium in this same container, so visit.js encodes, decodes
-and draws for real. This drives that Chromium (its debugging protocol, on this container's own loopback).
+(../room.html, three.js, with ?movers=N moving cubes) in a headless Chromium in this same container, so visit.js
+sends and draws scenes for real. This drives that Chromium (its debugging protocol, on its own loopback).
 
-- host: lets every knock in; records each encoded frame's size (keyframes apart), and once a second its
-  visitors' frame rate, render scale and bitrate, and how much of the page's time rendering for them takes;
+- host: lets every knock in; records once a second how long each of its scene updates took (reading the scene
+  for changes, and sending them), and its visitors;
 - visitor: knocks, then walks and turns steadily (W held, the look turning 0.004 rad every 8 ms, as a mouse
-  would), and after a warm-up records each frame drawn and its input to screen (visit.js's own measure).
+  would), and after a warm-up records each frame it draws, its input to screen (drawn here), and each delta's
+  input to the host's answer.
 
-    browser_node.py host|visitor NAME --lobby URL [--host NAME] [--seconds 20] [--net ...] [--room "scene=busy&cost=4"]
+    browser_node.py host|visitor NAME --lobby URL [--host NAME] [--seconds 20] [--net ...] [--room "movers=50"]
 
 Writes /out/NAME.json (the host: every second, as it may be stopped at any time).
 """
@@ -19,6 +20,7 @@ import itertools
 import json
 import os
 import functools
+import sys
 import threading
 import time
 import urllib.request
@@ -96,48 +98,41 @@ async def chromium():
 
 
 async def host(args, tab):
-    await tab.until("window.v && v.state === 'online'")
-    await tab.js("""v.on('knock', k => v.answer(k.id, true));
-      window.__asked = 0; const hm = v._hostMessage.bind(v); v._hostMessage = m => { if (m.type === 'keyframe') window.__asked++; return hm(m); };
-      window.__forced = 0; const rf = v._renderFor.bind(v); v._renderFor = (h, now, input) => { if (h.keyNext) window.__forced++; return rf(h, now, input); };
-      window.__sizes = []; const send = v._sendChunk.bind(v);
-      v._sendChunk = (h, c) => { window.__sizes.push([c.type === 'key' ? 1 : 0, c.byteLength]); return send(h, c); }; true""")
+    await tab.until("!!(window.v && v.state === 'online' && v._hooks)")
+    await tab.js("""v.on('knock', k => v.answer(k.id, true)); for (const k of v.knocks) v.answer(k.id, true);   // and any that came first
+      window.__ticks = []; const st = v._sceneTick.bind(v);
+      v._sceneTick = now => { const t0 = performance.now(); st(now); if (v._hosted.size) window.__ticks.push(performance.now() - t0); }; true""")
     seconds = []
     while True:
         await asyncio.sleep(1)
-        snap = await tab.js("""(() => { const b = v._busy, now = performance.now();
-          return { share: b ? b.spent / Math.max(1, now - b.since) : 0,
-                   visits: [...v._hosted.values()].map(h => ({ fps: h.fps, scale: h.scale, width: h.width, height: h.height, codec: h.codec, bps: h.bps, accel: h.accel })) }; })()""")
-        sizes = await tab.js("window.__sizes.splice(0)")
-        asked = await tab.js("[window.__asked, window.__forced]")
-        seconds.append(dict(snap, sizes=sizes, keyframes_asked=asked[0], keyframes_forced=asked[1]))
+        ticks = await tab.js("for (const k of v.knocks) v.answer(k.id, true); window.__ticks.splice(0)")
+        seconds.append({"ticks": ticks, "visitors": await tab.js("v._hosted.size")})
         json.dump({"role": "host", "name": args.name, "seconds": seconds[-120:], "errors": tab.errors[-20:]}, open("/out/%s.json" % args.name, "w"))
 
 
 async def visitor(args, tab):
-    door = await tab.until("window.v && v.state === 'online' && (v.offices.find(o => o.name === %s && o.ready) || {}).id" % json.dumps(args.host))
-    if args.codec:   # this visitor decodes only that codec, so the host encodes it
-        await tab.js("v._decoders = %s; v._sendDecoders(); true" % json.dumps([args.codec]))
-    await tab.js("v.knock(%s)" % json.dumps(door))
-    await tab.until("v.visiting && (v.frames || 0) > 10")
+    door = await tab.until("window.v && v.state === 'online' && v._hooks && (v.offices.find(o => o.name === %s && o.ready) || {}).id" % json.dumps(args.host))
+    await tab.js("v.on('error', e => console.error('visit error', JSON.stringify(e))); v.knock(%s)" % json.dumps(door))
+    await tab.until("v.visiting && v._viewer && v._viewer.scene && (v.frames || 0) > 10", 60)
     await tab.js("""window.__drive = setInterval(() => { const w = v._view; if (!w) return;
-      w.keys.add('KeyW'); w.yaw += 0.004; v._sendInput(performance.now(), true); }, 8);
-      window.__asked = 0; const send = v._send.bind(v); v._send = m => { if (m.type === 'keyframe') window.__asked++; return send(m); };
-      window.__bytes = 0; window.__keys = 0; const frame = v._frame.bind(v);
-      v._frame = b => { window.__bytes += b.byteLength; if (new DataView(b).getUint8(2) & 1) window.__keys++; return frame(b); }; true""")
+      w.keys.add('KeyW'); w.yaw += 0.004; w.changedAt = w.changedAt || performance.now(); v._sendInput(performance.now(), true); }, 8);
+      window.__answers = []; window.__bytes = 0; window.__keys = 0;
+      const f = v._frame.bind(v); v._frame = b => { window.__bytes += b.byteLength; const dv = new DataView(b);
+        if (dv.getUint8(2) & 1) window.__keys++; if (b.byteLength >= 20) { const t = dv.getFloat64(12); if (t > 0) window.__answers.push(performance.now() - t); } return f(b); };
+      const e = v._sceneEdit.bind(v); v._sceneEdit = m => { window.__bytes += JSON.stringify(m.edit).length; return e(m); }; true""")
     await asyncio.sleep(WARMUP)
-    await tab.js("v._samples = { latency: [], drawn: [] }; window.__bytes = 0; window.__keys = 0; window.__asked = 0; window.__t0 = performance.now(); true")
+    await tab.js("v._samples = { latency: [], drawn: [] }; window.__answers = []; window.__bytes = 0; window.__keys = 0; window.__t0 = performance.now(); true")
     links = []
     for _ in range(int(args.seconds)):
         await asyncio.sleep(1)
         s = await tab.js("v.stats")
         if s and s.get("path"):
             links.append({"path": s["path"], "rtt_ms": s["rtt"]})
-    r = await tab.js("({ lat: v._samples.latency, drawn: v._samples.drawn, bytes: window.__bytes, keys: window.__keys, asked: window.__asked, secs: (performance.now() - window.__t0) / 1000 })")
+    r = await tab.js("({ lat: window.__answers, here: v._samples.latency, drawn: v._samples.drawn, bytes: window.__bytes, keys: window.__keys, secs: (performance.now() - window.__t0) / 1000 })")
     gaps = [b - a for a, b in zip(r["drawn"], r["drawn"][1:])]
-    return {"name": args.name, "latency_ms": r["lat"], "frames": len(r["drawn"]), "seconds": r["secs"], "keyframes": r["keys"], "bytes": r["bytes"],
-            "gaps_over_100ms": sum(1 for g in gaps if g > 100), "worst_gap_ms": max(gaps) if gaps else None, "link": links,
-            "keyframes_asked": r["asked"], "errors": tab.errors[-20:], "browser": True}
+    return {"name": args.name, "latency_ms": r["lat"], "here_ms": r["here"], "frames": len(r["drawn"]), "seconds": r["secs"], "keyframes": r["keys"],
+            "bytes": r["bytes"], "gaps_over_100ms": sum(1 for g in gaps if g > 100), "worst_gap_ms": max(gaps) if gaps else None, "link": links,
+            "errors": tab.errors[-20:], "browser": True}
 
 
 async def main():
@@ -148,8 +143,7 @@ async def main():
     ap.add_argument("--host", default="Host")
     ap.add_argument("--seconds", type=float, default=20)
     ap.add_argument("--net", default="")
-    ap.add_argument("--room", default="scene=busy")
-    ap.add_argument("--codec", default="", help="visitor: the only codec it decodes (the host's choice otherwise)")
+    ap.add_argument("--room", default="movers=50")
     args = ap.parse_args()
     shape(args.net)
     serve_tests()
@@ -164,6 +158,9 @@ async def main():
             await host(args, tab)
         else:
             result = await visitor(args, tab)
+    except Exception:
+        json.dump({"errors": tab.errors[-20:]}, open("/out/%s.errors.json" % args.name, "w"))
+        raise
     finally:
         if result is not None:
             json.dump(result, open("/out/%s.json" % args.name, "w"))

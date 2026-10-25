@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """One office of a perf run, in its own container: the network it is given (tc netem on its way out), a real
-visit-client, and a fake page speaking basedverse-visit-local/1 (../../../SPEC.md section 5) in place of a
+visit-client, and a fake page speaking basedverse-visit-local/2 (../../../SPEC.md section 5) in place of a
 browser's.
 
-- host: lets every knock in, and for each visitor sends frames as an encoder would (at the visit's frame
-  rate and bitrate, a keyframe every 2 s and when asked), each the moment its input arrives if a frame is
-  due, each carrying the visitor's latest input time in its meta, as visit.js does;
-- visitor: knocks on the host, then sends input as a moving mouse would (every 8 ms, with its time), and
-  times every frame: now minus the input time it carries is input to frame (the pipeline and the network:
-  everything but a browser's own encode, decode and paint).
+- host: hosts a scene, lets every knock in, and for each visitor sends deltas as visit.js does (SPEC 8.3):
+  every 33 ms (and the moment its input arrives, when one is due), each with where the host has the visitor and
+  the visitor's latest input time, and MOVERS moving objects' places; a key delta every second and when asked;
+- visitor: knocks on the host, then sends input as a moving mouse would (every 8 ms, with its time), and times
+  every delta: now minus the input time it carries is input to the host's answer (the network both ways and the
+  host's beat: what corrects where a visitor's page has walked it; its own view moves at once regardless).
 
     node.py host|visitor NAME --lobby URL [--host NAME] [--seconds 20] [--net "delay 4ms 1ms loss 1% rate 20mbit"]
 
@@ -16,6 +16,7 @@ Writes /out/NAME.json.
 """
 import argparse
 import asyncio
+import gzip
 import json
 import os
 import secrets
@@ -27,9 +28,11 @@ import time
 
 from websockets.asyncio.client import connect
 
-PROTO = "basedverse-visit-local/1"
-KEY, HAS_META = 1, 2
-WARMUP = 4.0   # seconds of a visit not measured: the link settling, the bitrate finding its level
+PROTO = "basedverse-visit-local/2"
+KEY = 1
+WARMUP = 4.0   # seconds of a visit not measured: the link settling
+SCENE_MS = 1000 / 30
+MOVERS = 50    # moving objects in the host's scene: each delta carries their places (33 bytes each)
 
 
 def now_ms():
@@ -65,27 +68,31 @@ class Page:
         # as a browser does: Nagle's algorithm off, so a small message goes at once
         self.ws.transport.get_extra_info("socket").setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         await self.send(type="hello", proto=PROTO, token=self.token, sim={"name": "perf", "version": "1"})
+        await self.send(type="host", three="128")   # every office hosts its scene, or it is not in the lobby
         return self
 
     async def send(self, **m):
         await self.ws.send(json.dumps(m))
 
 
+def delta(channel, key, now, v, movers):
+    """A delta as visit.js sends it (SPEC 5.4, 8.3): header, where the host has the visitor, then objects."""
+    head = struct.pack(">HBQ", channel, KEY if key else 0, int(now * 1000))
+    pose = struct.pack(">BdffffffI", 1, v["t"], now - v["at"] if v["at"] else 0.0, v["x"], 1.6, v["z"], v["yaw"], 0.0, movers)
+    body = b"".join(struct.pack(">IBfffffff", i + 2, 1, i * 0.1, 1.0, now % 7, 0.0, 0.0, 0.0, 1.0) for i in range(movers))
+    return head + pose + body
+
+
 # ---------- the host ----------
 async def host(args, page):
-    visits = {}   # channel -> {t, yaw, pitch, bps, fps, next_at, last_key, key_next, sent, keys_asked}
-    buf = os.urandom(2 << 20)
+    visits = {}   # channel -> {t, at, x, z, yaw, next_at, last_key, key_next, sent}
 
     async def emit(ch, v, now):
-        key = v["key_next"] or now - v["last_key"] >= 10000   # as visit.js: every 10 s, and when asked
-        size = max(200, int(v["bps"] / 8 / v["fps"]) * (6 if key else 1))
-        meta = struct.pack(">dff", v["t"], v["yaw"], v["pitch"])
-        ts = int(now * 1000)
-        await page.ws.send(struct.pack(">HBQ", ch, (KEY if key else 0) | HAS_META, ts) + meta + buf[:size])
+        key = v["key_next"] or now - v["last_key"] >= 1000
+        await page.ws.send(delta(ch, key, now, v, MOVERS))
         if key:
             v["key_next"], v["last_key"] = False, now
-        slot = 1000.0 / v["fps"]   # an even beat, as visit.js keeps it
-        v["next_at"] = now + slot if v["next_at"] + slot < now else v["next_at"] + slot
+        v["next_at"] = now + SCENE_MS if v["next_at"] + SCENE_MS < now else v["next_at"] + SCENE_MS
         v["sent"] += 1
 
     async def ticker():
@@ -106,23 +113,20 @@ async def host(args, page):
             if t == "knock":
                 await page.send(type="answer", knock=m["id"], accept=True)
             elif t == "visit_started" and m["role"] == "host":
-                visits[m["channel"]] = {"t": 0.0, "yaw": 0.0, "pitch": 0.0, "bps": 1_000_000, "fps": args.fps, "next_at": 0.0,
-                                        "last_key": 0.0, "key_next": True, "sent": 0, "keys_asked": 0, "bitrates": []}
-                await page.send(type="video_config", channel=m["channel"], codec="vp8", width=1280, height=720, fov=70)
+                visits[m["channel"]] = {"t": 0.0, "at": 0.0, "x": 2.0, "z": 6.0, "yaw": 0.0, "next_at": 0.0, "last_key": 0.0, "key_next": True, "sent": 0}
+                whole = {"type": "scene", "three": "128", "json": {"metadata": {"version": 4.5, "type": "Object"}, "object": {"type": "Scene", "uuid": "s"}}, "ids": [["s", 1]]}
+                await page.ws.send(struct.pack(">HBQ", m["channel"], 2, 0) + gzip.compress(json.dumps(whole).encode()))
             elif t == "visit_ended":
                 visits.pop(m.get("channel"), None)
             elif t == "input" and m["channel"] in visits:
                 v = visits[m["channel"]]
-                v["t"], v["yaw"], v["pitch"] = m.get("t", 0.0), m.get("yaw", 0.0), m.get("pitch", 0.0)
                 now = now_ms()
-                if now >= v["next_at"] - 2:   # as visit.js: rendered the moment the input arrives, when a frame is due
+                v["t"], v["at"], v["yaw"] = m.get("t", 0.0), now, m.get("yaw", 0.0)
+                v["z"] -= 0.004 * m.get("forward", 0)   # as move() would walk it
+                if now >= v["next_at"] - 2:   # as visit.js: moved the moment the input arrives, in the next delta when one is due
                     await emit(m["channel"], v, now)
             elif t == "keyframe" and m["channel"] in visits:
                 visits[m["channel"]]["key_next"] = True
-                visits[m["channel"]]["keys_asked"] += 1
-            elif t == "bitrate" and m["channel"] in visits:
-                visits[m["channel"]]["bps"] = m["bps"]
-                visits[m["channel"]]["bitrates"].append(m["bps"])
     finally:
         tick.cancel()
 
@@ -152,12 +156,11 @@ async def visitor(args, page):
                 if state["t0"] is None or time.monotonic() < state["t0"] + WARMUP:
                     continue
                 now = now_ms()
-                flags = raw[2]
                 arrivals.append(now)
                 sizes.append(len(raw))
-                keys += flags & KEY
-                if flags & HAS_META:
-                    t, _, _ = struct.unpack(">dff", raw[11:27])
+                keys += raw[2] & KEY
+                if len(raw) >= 20:
+                    t = struct.unpack(">d", raw[12:20])[0]
                     if t > 0:
                         lat.append(now - t)
                 continue
@@ -171,8 +174,6 @@ async def visitor(args, page):
             elif t == "visit_started" and m["role"] == "visitor":
                 state["visiting"], state["t0"] = m["channel"], time.monotonic()
                 deadline = state["t0"] + WARMUP + args.seconds
-                await page.send(type="decoders", codecs=["vp8"])
-                await page.send(type="viewport", width=1280, height=720)
             elif t == "link_stats":
                 if state["t0"] and time.monotonic() >= state["t0"] + WARMUP:
                     stats.append({"path": m["path"], "rtt_ms": m["rtt_ms"]})
@@ -193,7 +194,6 @@ async def main():
     ap.add_argument("--lobby", required=True)
     ap.add_argument("--host", default="Host")
     ap.add_argument("--seconds", type=float, default=20)
-    ap.add_argument("--fps", type=int, default=60)
     ap.add_argument("--net", default="")
     args = ap.parse_args()
     shape(args.net)
