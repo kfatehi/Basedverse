@@ -9,6 +9,23 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.3.2 — 2026-10-25
+
+**A busy encoder counts as a busy host.** A host steps its visitors' picture down (then their frame rate)
+when its encoder falls behind too, not only when its `render` is slow: a software encoder at full size no
+longer just skips frames. The perf test now also runs real browsers (`BROWSERS=1 tests/perf/run-perf.sh`:
+a headless Chromium beside each visit-client, the test room's busy scene), measuring input to screen with
+encoding and decoding: 18 ms on a LAN, 31 ms down the street (median, on processor-only browsers).
+
+Found there, not yet fixed: Chromium's software H.264 encoder (OpenH264, what a machine without a video
+encoder of its own gets: Chrome on Linux, often) starts a new keyframe whenever the picture changes a lot,
+as when a visitor turns quickly: 5 to 8 times a frame's size, about once a second, which a slow or lossy link
+feels as a stall. Hardware encoders do not. VP8 does not either, but was slower elsewhere.
+
+### What an integration does
+
+1. Get visit-client 0.3.2 (`bin/setup` again, download; or this release). Nothing else changes.
+
 ## v0.3.1 — 2026-10-25
 
 **Faster, measured.** A new test, `visit/client/tests/perf/run-perf.sh`, runs visits through simulated

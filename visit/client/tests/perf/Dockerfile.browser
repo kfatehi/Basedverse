@@ -1,0 +1,5 @@
+# The perf test's browser node: what node's image has, and a headless Chromium, to run visit.js for real
+# (its encoder, decoder and drawing) beside a visit-client, in the same container and on its network.
+FROM python:3.13-slim-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends iproute2 chromium fonts-dejavu-core && rm -rf /var/lib/apt/lists/* \
+ && pip install --no-cache-dir --root-user-action=ignore websockets==15.0.1

@@ -13,7 +13,7 @@
 // one (a timewarp, as VR headsets do), so looking around never waits for the round trip.
 "use strict";
 (function () {
-  const VERSION = "0.3.1", PROTO = "basedverse-visit-local/1";
+  const VERSION = "0.3.2", PROTO = "basedverse-visit-local/1";
   const CODECS = ["avc1.42E01F", "vp8", "vp09.00.10.08"];   // the order a host prefers, among what a visitor decodes
   const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, KEY_EVERY_MS = 10000, LOOK = 0.0025;
   // The share of a visitor's view size a host renders at: a busy host steps down these before it lowers its
@@ -51,6 +51,7 @@
       this.office = null;
       this.status = "available";
       this.maxVisitors = 3;
+      this._samples = { latency: [], drawn: [] };   // the last few thousand of each, for a test's percentiles
       this.offices = [];
       this.knocks = [];        // on your door: { id, from, message, until }
       this.knocking = [];      // yours, waiting: { id, to }
@@ -340,10 +341,10 @@
         this._emit("stats", this.stats);
       }
       if (!this._hooks || !this._hosted.size) return;
-      this._busy = this._busy || { since: now, spent: 0 };
+      this._busy = this._busy || { since: now, spent: 0, due: 0, skipped: 0 };
       for (const h of [...this._hosted.values()]) this._step(h, now);
       this._visitorsList();
-      if (now - this._busy.since >= 1000) { this._adapt(now); this._busy = { since: now, spent: 0 }; }
+      if (now - this._busy.since >= 1000) { this._adapt(now); this._busy = { since: now, spent: 0, due: 0, skipped: 0 }; }
     }
 
     // One visitor: moved up to now from its latest input, and rendered if its next frame is due. Every tick,
@@ -374,15 +375,17 @@
       }
     }
 
-    // Rendering for visitors took more than a quarter of this page's time: a smaller picture first (down to
-    // half the view's size), then fewer frames (down to 10 a second); back up the other way when it fits.
+    // Busy: rendering for visitors took more than a quarter of this page's time, or the encoder could not
+    // keep up (a tenth of the frames due skipped: a software encoder at full size, say). A smaller picture
+    // first (down to half the view's size), then fewer frames (down to 10 a second); back up the other way
+    // when it fits.
     _adapt(now) {
-      const share = this._busy.spent / (now - this._busy.since);
+      const share = this._busy.spent / (now - this._busy.since), skipped = this._busy.due ? (this._busy.skipped || 0) / this._busy.due : 0;
       for (const h of this._hosted.values()) {
-        if (share > 0.25) {
+        if (share > 0.25 || skipped > 0.1) {
           if (h.scale < SCALES.length - 1) { if (now - h.scaledAt > 2000) { h.scale++; h.scaledAt = now; this._configureEncoder(h); } }
           else h.fps = Math.max(10, Math.round(h.fps * 0.8));
-        } else if (share < 0.12) {
+        } else if (share < 0.12 && skipped < 0.02) {
           if (h.fps < this._fps()) h.fps = Math.min(this._fps(), h.fps + 5);
           else if (h.scale > 0 && now - h.scaledAt > 5000) { h.scale--; h.scaledAt = now; this._configureEncoder(h); }
         }
@@ -390,8 +393,9 @@
     }
 
     _renderFor(h, now, input) {
-      this._busy = this._busy || { since: now, spent: 0 };
-      if (h.encoder.encodeQueueSize > 2) return;                                       // the encoder is behind: skip
+      this._busy = this._busy || { since: now, spent: 0, due: 0, skipped: 0 };
+      this._busy.due = (this._busy.due || 0) + 1;
+      if (h.encoder.encodeQueueSize > 2) { this._busy.skipped = (this._busy.skipped || 0) + 1; return; }   // the encoder is behind: skip
       if (this._ws.bufferedAmount > 5e5) { h.keyNext = true; return; }                  // the connection is behind: skip, and start clean
       const t0 = performance.now();
       let canvas;
@@ -548,9 +552,11 @@
       w.meta.delete(frame.timestamp);
       if (w.last) w.last.close();
       w.last = frame; w.lastMeta = meta || null; w.count++;
+      const at = performance.now(), keep = (a, x) => { a.push(x); if (a.length > 6000) a.splice(0, 1000); };
+      keep(this._samples.drawn, at);
       if (meta && meta.t > 0) {   // input to screen, on this page's own clock: the time of the input this frame shows
-        const ms = performance.now() - meta.t;
-        if (ms >= 0 && ms < 10000) this.stats.latency = this.stats.latency == null ? ms : this.stats.latency * 0.9 + ms * 0.1;
+        const ms = at - meta.t;
+        if (ms >= 0 && ms < 10000) { this.stats.latency = this.stats.latency == null ? ms : this.stats.latency * 0.9 + ms * 0.1; keep(this._samples.latency, ms); }
       }
       this.frames = (this.frames || 0) + 1;
       this._paint();

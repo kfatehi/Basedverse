@@ -6,10 +6,14 @@
 #
 #   tests/perf/run-perf.sh                 every scenario (about 4 minutes)
 #   tests/perf/run-perf.sh metro wifi      just these
+#   BROWSERS=1 tests/perf/run-perf.sh      the browser scenarios: a headless Chromium beside each visit-client,
+#                                          running the test room's busy scene (browser_node.py): visit.js's
+#                                          own encoding, decoding and drawing too (about 6 minutes)
 #   SECONDS_EACH=30 OUT=/some/dir ...      longer measurements; where the results go (default: a temp dir)
 #
-# What it measures is visit-client and the network: input to frame, frames a second, stalls, bitrate. Not a
-# browser's own encode, decode and paint (see run-browser.sh for those, on one machine).
+# Without BROWSERS it measures visit-client and the network: input to frame, frames a second, stalls,
+# bitrate, but not a browser's own encode, decode and paint. With it, input to screen, all of it (the
+# browsers render on the processor, not a GPU: a real machine's render and encode are quicker).
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../../.." && pwd)"
@@ -28,12 +32,24 @@ relayed|1|delay 40ms 2ms rate 5mbit limit 80|delay 40ms 2ms
 tight|1|delay 10ms 1ms rate 2mbit limit 40|delay 10ms 1ms
 busy|6|delay 4ms 1ms|delay 4ms 1ms
 "
+# name | visitors | the host's way out | each visitor's way out | the test room's options (room.html)
+BROWSER_SCENARIOS="
+lan|1|||scene=busy
+metro|1|delay 4ms 1ms|delay 4ms 1ms|scene=busy
+wifi|1|delay 15ms 4ms loss 1.5%|delay 15ms 4ms loss 1.5%|scene=busy
+tight|1|delay 10ms 1ms rate 2mbit limit 40|delay 10ms 1ms|scene=busy
+heavy-host|1|delay 4ms 1ms|delay 4ms 1ms|scene=busy&cost=14
+two-visitors|2|delay 4ms 1ms|delay 4ms 1ms|scene=busy
+plain|1|delay 4ms 1ms|delay 4ms 1ms|scene=plain
+"
+if [ -n "${BROWSERS:-}" ]; then SCENARIOS="$BROWSER_SCENARIOS"; fi
 want=" $* "
 
 echo "building visit-client (release) and the perf image"
 "$here/../../cargo" build --release >/dev/null 2>&1 || "$here/../../cargo" build --release
 docker run --rm -v visit-target:/target:ro -v "$out":/o alpine sh -c 'cp /target/release/visit-client /o/visit-client && chmod 755 /o/visit-client'
 docker build -q -t visit-perf "$here" >/dev/null
+[ -z "${BROWSERS:-}" ] || docker build -q -t visit-perf-browser -f "$here/Dockerfile.browser" "$here" >/dev/null
 docker network create "$net" >/dev/null 2>&1 || true
 
 cleanup() { docker rm -f $(docker ps -aq --filter name='^vp-') >/dev/null 2>&1 || true; }
@@ -43,24 +59,30 @@ trap finish EXIT
 
 node() {   # node NAME DIR ROLE ARGS...
   local name="$1" dir="$2"; shift 2
-  docker run -d --name "vp-$name" --network "$net" --cap-add NET_ADMIN -u 0 \
-    -v "$out/visit-client":/bin/visit-client:ro -v "$here/node.py":/node.py:ro -v "$dir":/out \
-    visit-perf python3 -u /node.py "$@" >/dev/null
+  if [ -n "${BROWSERS:-}" ]; then
+    docker run -d --name "vp-$name" --network "$net" --cap-add NET_ADMIN -u 0 --shm-size 512m -e PYTHONPATH=/perf \
+      -v "$out/visit-client":/bin/visit-client:ro -v "$here":/perf:ro -v "$here/..":/tests:ro -v "$dir":/out \
+      visit-perf-browser python3 -u /perf/browser_node.py "$@" --room "$room" ${CODEC:+--codec "$CODEC"} >/dev/null
+  else
+    docker run -d --name "vp-$name" --network "$net" --cap-add NET_ADMIN -u 0 \
+      -v "$out/visit-client":/bin/visit-client:ro -v "$here/node.py":/node.py:ro -v "$dir":/out \
+      visit-perf python3 -u /node.py "$@" >/dev/null
+  fi
 }
 
-echo "$SCENARIOS" | while IFS='|' read -r name visitors hostnet visnet; do
+echo "$SCENARIOS" | while IFS='|' read -r name visitors hostnet visnet room; do
   [ -n "$name" ] || continue
   [ "$want" = "  " ] || [[ "$want" == *" $name "* ]] || continue
   cleanup
   dir="$out/$name"; rm -rf "$dir"; mkdir -p "$dir"
   printf '%-14s %s visitor(s), host out: %-28s visitor out: %s\n' "$name" "$visitors" "${hostnet:-as is}" "${visnet:-as is}"
-  printf '%s\n%s\n%s\n' "$visitors" "$hostnet" "$visnet" > "$dir/scenario"
+  printf '%s\n%s\n%s\n%s\n' "$visitors" "$hostnet" "$visnet" "$room" > "$dir/scenario"
   docker run -d --name vp-lobby --network "$net" -v "$repo/lobby/server":/lobby:ro -e STUN_URLS= visit-perf \
     sh -c 'cd /lobby && python3 -u lobby.py' >/dev/null
   for _ in $(seq 50); do docker exec vp-lobby python3 -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8765/health")' 2>/dev/null && break; sleep 0.2; done
   node host "$dir" host Host --lobby ws://vp-lobby:8765 --net "$hostnet"
   for i in $(seq "$visitors"); do node "v$i" "$dir" visitor "V$i" --lobby ws://vp-lobby:8765 --host Host --seconds "$secs" --net "$visnet"; done
-  for i in $(seq "$visitors"); do timeout $((secs + 60)) docker wait "vp-v$i" >/dev/null || echo "  ⚠ V$i did not finish"; done
+  for i in $(seq "$visitors"); do timeout $((secs + 120)) docker wait "vp-v$i" >/dev/null || echo "  ⚠ V$i did not finish"; done
   for c in $(docker ps -aq --filter name='^vp-v'); do docker logs "$c" 2>&1 | { grep -v '^$' || true; } | sed 's/^/  /' | tail -3; done
 done
 

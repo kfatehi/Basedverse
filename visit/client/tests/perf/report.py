@@ -3,8 +3,9 @@
 
     report.py OUT_DIR
 
-Targets (input to frame, which is everything but a browser's own encode, decode and paint):
-- p95 within the link's round trip plus 40 ms (a frame's slot at 60 a second, and some jitter);
+Targets (input to frame: without browsers, everything but their own encode, decode and paint):
+- p95 within the link's round trip plus 40 ms (a frame's slot at 60 a second, and some jitter); with
+  browsers, input to screen, plus 60 ms (their encoding and decoding too, on the processor here);
 - frames a second at least 50 (where the link carries them: not under a rate cap below the bitrate);
 - no stall: no 100 ms without a frame.
 """
@@ -21,14 +22,31 @@ def pct(xs, p):
     return xs[min(len(xs) - 1, int(round(p / 100 * (len(xs) - 1))))]
 
 
+def host_row(name, h):
+    secs = h["seconds"][3:] or h["seconds"]   # past the first seconds' settling
+    sizes = [s for sec in secs for s in sec["sizes"]]
+    keys, deltas = [b for k, b in sizes if k], [b for k, b in sizes if not k]
+    ratio = statistics.median(keys) / statistics.median(deltas) if keys and deltas else None
+    share = statistics.median(s["share"] for s in secs) if secs else 0
+    last = secs[-1]["visits"] if secs and secs[-1]["visits"] else []
+    v = last[0] if last else {}
+    settled = "%s fps at %s×%s (scale step %s)" % (v.get("fps"), v.get("width"), v.get("height"), v.get("scale")) if v else "—"
+    return (name, str(v.get("codec")), str(v.get("accel")), "%.1f" % ratio if ratio else "—", "%.0f%%" % (share * 100), settled,
+            str(len(h.get("errors") or [])))
+
+
 def main(out):
-    rows = []
+    rows, hosted = [], []
     for name in sorted(os.listdir(out), key=lambda n: os.path.getmtime(os.path.join(out, n))):
         d = os.path.join(out, name)
         if not os.path.isdir(d) or not os.path.exists(os.path.join(d, "scenario")):
             continue
         visitors, hostnet, visnet = (open(os.path.join(d, "scenario")).read().split("\n") + ["", "", ""])[:3]
-        results = [json.load(open(os.path.join(d, f))) for f in sorted(os.listdir(d)) if f.endswith(".json")]
+        everything = [json.load(open(os.path.join(d, f))) for f in sorted(os.listdir(d)) if f.endswith(".json")]
+        results = [r for r in everything if r.get("role") != "host"]
+        hosts = [r for r in everything if r.get("role") == "host"]
+        if hosts:
+            hosted.append((name, hosts[0]))
         if not results:
             rows.append((name, visitors, "no results", "", "", "", "", "", "", "", "✗"))
             continue
@@ -43,7 +61,8 @@ def main(out):
         keys = sum(r["keyframes"] for r in results) / len(results)
         p50, p95, p99 = pct(lat, 50), pct(lat, 95), pct(lat, 99)
         capped = "rate" in hostnet
-        ok = p95 is not None and rtt is not None and p95 <= rtt + 40 and stalls == 0 and (capped or fps >= 50)
+        budget = 60 if any(r.get("browser") for r in results) else 40   # browsers: their encode and decode too
+        ok = p95 is not None and rtt is not None and p95 <= rtt + budget and stalls == 0 and (capped or fps >= 50)
         f = lambda x: "—" if x is None else "%.0f" % x
         rows.append((name, visitors, "/".join(paths) or "?", f(rtt), "%s / %s / %s" % (f(p50), f(p95), f(p99)), "%.0f" % fps,
                      str(stalls), f(worst), "%.1f" % keys, "%.2f" % mbps, "✓" if ok else "✗"))
@@ -53,7 +72,14 @@ def main(out):
     print("|" + "|".join("---" for _ in head) + "|")
     for r in rows:
         print("| " + " | ".join(r) + " |")
-    print("\nTarget: input→frame p95 ≤ link rtt + 40 ms, no 100 ms without a frame, and ≥ 50 fps where the link is not capped.")
+    print("\nTarget: input→frame p95 ≤ link rtt + 40 ms (+ 60 with browsers), no 100 ms without a frame, and ≥ 50 fps where the link is not capped.")
+    if hosted:
+        print("\nWith browsers, input→frame is input to screen: the browsers' own encode, decode and paint included.\n")
+        head = ("scenario", "host codec", "encoder", "keyframe / frame size", "host's time rendering for visitors", "settled at", "page errors")
+        print("| " + " | ".join(head) + " |")
+        print("|" + "|".join("---" for _ in head) + "|")
+        for name, h in hosted:
+            print("| " + " | ".join(host_row(name, h)) + " |")
 
 
 if __name__ == "__main__":

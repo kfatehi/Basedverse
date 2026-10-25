@@ -405,8 +405,9 @@ and a visitor refused at the handshake ends it at once (`link_failed`).
 - **Size.** The visitor's `viewport`, scaled down to fit 1280×720 if larger, rounded down to even numbers.
 - **Rate.** Up to 60 frames a second per visit (`limits.fps`): the host's `fps` (10–60, default 60). A
   visitor's input is applied, and its frame rendered if one is due, the moment it arrives, not on the next
-  tick. While rendering for visitors takes more than a quarter of the page's time over the last second,
-  the library first renders smaller (three-quarters, then half the view's size: a smaller picture costs no
+  tick. While rendering for visitors takes more than a quarter of the page's time over the last second, or
+  the encoder cannot keep up (a tenth of the frames due skipped because it is behind), the library first
+  renders smaller (three-quarters, then half the view's size: a smaller picture costs no
   latency, fewer frames do), then lowers the frame rate (never below 10); it climbs back the other way when
   it fits.
 - **Encoder.** `latencyMode: "realtime"`, the machine's own encoder where it has one
