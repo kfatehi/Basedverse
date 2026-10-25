@@ -4,14 +4,24 @@
 // encodes what they render and decodes what a host sends (WebCodecs), and captures a visitor's input.
 //
 //   const v = await Visit.connect({ port, token, sim: { name, version } });
-//   v.host({ spawn, move, render, fps });   v.view(element);   Visit.panel(element, v);
+//   v.host({ spawn, move, render, fps, fov });   Visit.stage(v);   Visit.panel(element, v);
+//
+// Latency, as cloud gaming keeps it down: a visitor's input goes the moment it changes, and the host moves and
+// renders that visitor at once (up to 60 frames a second), not on its next tick; a busy host shrinks the
+// picture before it drops frames; video is newest-wins all the way (visit-client drops what a link cannot
+// carry); and the visitor's view turns with its mouse at once, shifting the last frame until the host's next
+// one (a timewarp, as VR headsets do), so looking around never waits for the round trip.
 "use strict";
 (function () {
-  const VERSION = "0.2.0", PROTO = "basedverse-visit-local/1";
+  const VERSION = "0.3.0", PROTO = "basedverse-visit-local/1";
   const CODECS = ["avc1.42E01F", "vp8", "vp09.00.10.08"];   // the order a host prefers, among what a visitor decodes
-  const MOVE_MS = 1000 / 30, INPUT_MS = 1000 / 30, STALE_MS = 300, KEY_EVERY_MS = 2000, LOOK = 0.0025;
+  const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, KEY_EVERY_MS = 2000, LOOK = 0.0025;
+  // The share of a visitor's view size a host renders at: a busy host steps down these before it lowers its
+  // frame rate (a smaller picture costs no latency; fewer frames do).
+  const SCALES = [1, 0.75, 0.5];
+  const HAS_META = 2, META = 16;   // frames' flags bit 1: 16 bytes of meta after the timestamp (SPEC 5.4)
   // What the host hears many times a second: none of it changes what the page shows, so none fires "change".
-  const QUIET = new Set(["input", "bitrate", "keyframe", "decoders", "viewport", "video_config"]);
+  const QUIET = new Set(["input", "bitrate", "keyframe", "decoders", "viewport", "video_config", "link_stats"]);
   // A timer from a Worker: a page's own timers slow to once a second (or less) while its tab is in the
   // background, and a host must go on rendering for its visitors.
   function ticker(ms, fn) {
@@ -49,7 +59,10 @@
       this._on = {};
       this._hosted = new Map();   // channel -> a visit to this office
       this._hooks = null;
-      this._limits = { max_width: 1280, max_height: 720, fps: 30 };
+      this._limits = { max_width: 1280, max_height: 720, fps: 60 };
+      // A visitor's numbers, about once a second (the "stats" event): input to screen and the link's round
+      // trip in ms, the link's path ("direct" or "relay"), frames drawn a second. null while not visiting.
+      this.stats = { latency: null, rtt: null, path: null, fps: 0 };
       this._decoders = null;
       this._viewer = null;        // the visit this office is on: { channel, decoder, waitKey, config }
       this._view = null;          // where it is shown: { element, canvas, ... }
@@ -166,6 +179,9 @@
           if (this.visiting && this._viewer && this._viewer.channel === m.channel) { this.visiting.paused = m.type === "host_paused"; this._overlay(); }
           break;
         case "video_config": this._configureDecoder(m); break;
+        case "link_stats":
+          if (this._viewer && this._viewer.channel === m.channel) { this.stats.rtt = Number(m.rtt_ms); this.stats.path = String(m.path); }
+          break;
         case "decoders": case "viewport": case "keyframe": case "bitrate": case "input": this._hostMessage(m); break;
         case "error": this._emit("error", { code: m.code, message: m.message, ref: m.ref }); break;
       }
@@ -188,14 +204,14 @@
     _started(m) {
       if (m.role === "host") {
         const h = { id: m.id, channel: m.channel, visitor: m.peer || {}, pose: null, yaw0: 0, input: null, inputAt: 0,
-          decoders: null, viewport: null, encoder: null, codec: null, width: 0, height: 0, bps: 1500000, fps: this._fps(),
-          keyNext: true, lastKey: 0, nextAt: 0, fails: 0, configuring: false, scratch: null, since: performance.now() };
+          decoders: null, viewport: null, encoder: null, codec: null, width: 0, height: 0, bps: 2000000, fps: this._fps(), scale: 0, scaledAt: 0,
+          keyNext: true, lastKey: 0, nextAt: 0, fails: 0, configuring: false, scratch: null, since: performance.now(), meta: new Map() };
         if (m.state && m.state.pose) { h.pose = m.state.pose; h.yaw0 = m.state.yaw0 || 0; }   // back after this page reloaded
         this._hosted.set(m.channel, h);
         this._spawn(h);
       } else {
         this.visiting = { id: m.id, host: m.peer || {}, paused: false };
-        this._viewer = { channel: m.channel, decoder: null, waitKey: true, config: null };
+        this._viewer = { channel: m.channel, decoder: null, waitKey: true, config: null, fov: null, meta: new Map(), last: null, lastMeta: null, count: 0 };
         this._sendViewport();
       }
       this._visitorsList();
@@ -228,7 +244,7 @@
       this._hooks = hooks;
       for (const h of this._hosted.values()) { h.fps = this._fps(); this._spawn(h); }
     }
-    _fps() { return Math.max(10, Math.min(this._limits.fps || 30, (this._hooks && this._hooks.fps) || 30)); }
+    _fps() { return Math.max(10, Math.min(this._limits.fps || 60, (this._hooks && this._hooks.fps) || 60)); }
 
     _spawn(h) {
       if (!this._hooks || h.pose) return;
@@ -239,7 +255,7 @@
     _hostMessage(m) {
       const h = this._hosted.get(m.channel);
       if (!h) return;
-      if (m.type === "input") { h.input = m; h.inputAt = performance.now(); }
+      if (m.type === "input") { h.input = m; h.inputAt = performance.now(); this._step(h, h.inputAt); }   // at once: the next frame shows it
       else if (m.type === "keyframe") h.keyNext = true;
       else if (m.type === "decoders") { h.decoders = m.codecs || []; this._configureEncoder(h); }
       else if (m.type === "viewport") { h.viewport = [m.width, m.height]; this._configureEncoder(h); }
@@ -250,8 +266,8 @@
     }
 
     _encoderConfig(h) {
-      return Object.assign({ codec: h.codec, width: h.width, height: h.height, bitrate: h.bps, framerate: h.fps, latencyMode: "realtime" },
-        h.codec.startsWith("avc1") ? { avc: { format: "annexb" } } : {});
+      return Object.assign({ codec: h.codec, width: h.width, height: h.height, bitrate: h.bps, framerate: h.fps, latencyMode: "realtime",
+        hardwareAcceleration: h.accel || "no-preference" }, h.codec.startsWith("avc1") ? { avc: { format: "annexb" } } : {});
     }
 
     // A codec this visitor decodes and this page encodes, at the visitor's view size; then its settings
@@ -261,19 +277,23 @@
       if (h.configuring) { h.again = true; return; }   // new settings arrived meanwhile: once this is done, again
       h.configuring = true;
       try {
-        const [width, height] = fit(...(h.viewport || [0, 0]), this._limits.max_width, this._limits.max_height);
+        const [fw, fh] = fit(...(h.viewport || [0, 0]), this._limits.max_width, this._limits.max_height), k = SCALES[h.scale] || 1;
+        const [width, height] = [even(fw * k), even(fh * k)];
         const wanted = (h.decoders && h.decoders.length ? h.decoders : ["vp8"]).filter(c => CODECS.includes(c));
-        let codec = null;
-        for (const c of wanted) {
-          const probe = { codec: c, width, height, bitrate: h.bps, framerate: h.fps, latencyMode: "realtime" };
-          if (c.startsWith("avc1")) probe.avc = { format: "annexb" };
-          try { if ((await VideoEncoder.isConfigSupported(probe)).supported) { codec = c; break; } } catch (e) { /* next */ }
+        let codec = null, accel = null;
+        // The machine's own video encoder where it has one: far less of the host's processor than software.
+        found: for (const c of wanted) {
+          for (const hw of ["prefer-hardware", "no-preference"]) {
+            const probe = { codec: c, width, height, bitrate: h.bps, framerate: h.fps, latencyMode: "realtime", hardwareAcceleration: hw };
+            if (c.startsWith("avc1")) probe.avc = { format: "annexb" };
+            try { if ((await VideoEncoder.isConfigSupported(probe)).supported) { codec = c; accel = hw; break found; } } catch (e) { /* next */ }
+          }
         }
         if (this._hosted.get(h.channel) !== h) return;   // the visit ended meanwhile
         if (!codec) return console.warn("visit: no codec both sides support for", h.visitor.name);
         if (h.encoder && h.codec === codec && h.width === width && h.height === height) return;
         if (h.encoder) { try { h.encoder.close(); } catch (e) { /* already closed */ } }
-        Object.assign(h, { codec, width, height });
+        Object.assign(h, { codec, width, height, accel });
         h.encoder = new VideoEncoder({
           output: chunk => this._sendChunk(h, chunk),
           error: e => {
@@ -284,65 +304,91 @@
         });
         h.encoder.configure(this._encoderConfig(h));
         h.keyNext = true;
-        this._send({ type: "video_config", channel: h.channel, codec, width, height });
+        const fov = this._hooks && Number(this._hooks.fov);   // the camera's vertical field of view: the visitor turns its picture by it
+        this._send({ type: "video_config", channel: h.channel, codec, width, height, fov: fov > 0 ? fov : null });
       } finally {
         h.configuring = false;
         if (h.again && this._hosted.get(h.channel) === h) { h.again = false; this._configureEncoder(h); }
       }
     }
 
+    // An encoded frame to visit-client, with its meta: the visitor's input it reflects (its time, and the look
+    // it was drawn at), for the visitor's latency figure and its turning between frames.
     _sendChunk(h, chunk) {
+      const meta = h.meta.get(chunk.timestamp);
+      h.meta.delete(chunk.timestamp);
       if (!this._ws || this._ws.readyState !== 1) return;
-      const buf = new ArrayBuffer(11 + chunk.byteLength), dv = new DataView(buf);
+      const at = meta ? 11 + META : 11, buf = new ArrayBuffer(at + chunk.byteLength), dv = new DataView(buf);
       dv.setUint16(0, h.channel);
-      dv.setUint8(2, chunk.type === "key" ? 1 : 0);
+      dv.setUint8(2, (chunk.type === "key" ? 1 : 0) | (meta ? HAS_META : 0));
       dv.setBigUint64(3, BigInt(Math.max(0, Math.round(chunk.timestamp))));
-      chunk.copyTo(new Uint8Array(buf, 11));
+      if (meta) { dv.setFloat64(11, meta[0]); dv.setFloat32(19, meta[1]); dv.setFloat32(23, meta[2]); }
+      chunk.copyTo(new Uint8Array(buf, at));
       this._ws.send(buf);
     }
 
     _dropHosted(h) { if (h.encoder) { try { h.encoder.close(); } catch (e) { /* closed */ } h.encoder = null; } }
 
-    // Moves every visitor 30 times a second; renders each at its frame rate, lowering it while rendering
-    // takes more than a quarter of the page's time, raising it when it fits again.
+    // 60 times a second: a visitor's input (when it is due), every hosted visitor moved and (when its frame is
+    // due) rendered, and once a second the stats and how hard rendering is working this page.
     _tick() {
       const now = performance.now();
-      if (this._view) this._sendInput(now);
+      if (this._view) this._sendInput(now, this._view.pending);
+      if (this._viewer && now - (this._statsAt || 0) >= 1000) {
+        this._statsAt = now;
+        this.stats.fps = this._viewer.count; this._viewer.count = 0;
+        this._emit("stats", this.stats);
+      }
       if (!this._hooks || !this._hosted.size) return;
       this._busy = this._busy || { since: now, spent: 0 };
-      for (const h of [...this._hosted.values()]) {
-        if (!h.pose) { this._spawn(h); if (!h.pose) continue; }
-        const dt = Math.min(0.25, (now - (h.movedAt || now)) / 1000);
-        h.movedAt = now;
-        const fresh = h.input && now - h.inputAt < STALE_MS;
-        const input = fresh ? h.input : { forward: 0, strafe: 0, run: false, yaw: h.input ? h.input.yaw : 0, pitch: h.input ? h.input.pitch : 0 };
-        try {
-          const turned = Object.assign({}, h.pose, { yaw: h.yaw0 + (input.yaw || 0), pitch: input.pitch || 0 });
-          h.pose = Object.assign({}, this._hooks.move(turned, input, dt) || turned);
-          h.fails = 0;
-        } catch (e) { this._hookFailed(h, "move", e); continue; }
-        if (now - (h.keptAt || 0) >= 200) {   // where the visitor stands, kept by visit-client for a reload of this page
-          h.keptAt = now;
-          this._send({ type: "pose", channel: h.channel, state: { pose: h.pose, yaw0: h.yaw0 } });
-        }
-        if (h.encoder && h.encoder.state === "configured" && now >= h.nextAt) {
-          h.nextAt = now + 1000 / h.fps;
-          this._renderFor(h, now);
-        }
-      }
+      for (const h of [...this._hosted.values()]) this._step(h, now);
       this._visitorsList();
-      if (now - this._busy.since >= 1000) {
-        const share = this._busy.spent / (now - this._busy.since);
-        for (const h of this._hosted.values()) {
-          h.fps = share > 0.25 ? Math.max(10, Math.round(h.fps * 0.8)) : share < 0.15 ? Math.min(this._fps(), h.fps + 2) : h.fps;
-        }
-        this._busy = { since: now, spent: 0 };
+      if (now - this._busy.since >= 1000) { this._adapt(now); this._busy = { since: now, spent: 0 }; }
+    }
+
+    // One visitor: moved up to now from its latest input, and rendered if its next frame is due. Every tick,
+    // and at once when its input comes, so what the visitor does is in the very next frame.
+    _step(h, now) {
+      if (!this._hooks) return;
+      if (!h.pose) { this._spawn(h); if (!h.pose) return; }
+      const dt = Math.min(0.25, (now - (h.movedAt || now)) / 1000);
+      h.movedAt = now;
+      const fresh = h.input && now - h.inputAt < STALE_MS;
+      const input = fresh ? h.input : { forward: 0, strafe: 0, run: false, yaw: h.input ? h.input.yaw : 0, pitch: h.input ? h.input.pitch : 0 };
+      try {
+        const turned = Object.assign({}, h.pose, { yaw: h.yaw0 + (input.yaw || 0), pitch: input.pitch || 0 });
+        h.pose = Object.assign({}, this._hooks.move(turned, input, dt) || turned);
+        h.fails = 0;
+      } catch (e) { return this._hookFailed(h, "move", e); }
+      if (now - (h.keptAt || 0) >= 200) {   // where the visitor stands, kept by visit-client for a reload of this page
+        h.keptAt = now;
+        this._send({ type: "pose", channel: h.channel, state: { pose: h.pose, yaw0: h.yaw0 } });
+      }
+      if (h.encoder && h.encoder.state === "configured" && now >= h.nextAt) {
+        h.nextAt = now + 1000 / h.fps;
+        this._renderFor(h, now, input);
       }
     }
 
-    _renderFor(h, now) {
+    // Rendering for visitors took more than a quarter of this page's time: a smaller picture first (down to
+    // half the view's size), then fewer frames (down to 10 a second); back up the other way when it fits.
+    _adapt(now) {
+      const share = this._busy.spent / (now - this._busy.since);
+      for (const h of this._hosted.values()) {
+        if (share > 0.25) {
+          if (h.scale < SCALES.length - 1) { if (now - h.scaledAt > 2000) { h.scale++; h.scaledAt = now; this._configureEncoder(h); } }
+          else h.fps = Math.max(10, Math.round(h.fps * 0.8));
+        } else if (share < 0.12) {
+          if (h.fps < this._fps()) h.fps = Math.min(this._fps(), h.fps + 5);
+          else if (h.scale > 0 && now - h.scaledAt > 5000) { h.scale--; h.scaledAt = now; this._configureEncoder(h); }
+        }
+      }
+    }
+
+    _renderFor(h, now, input) {
+      this._busy = this._busy || { since: now, spent: 0 };
       if (h.encoder.encodeQueueSize > 2) return;                                       // the encoder is behind: skip
-      if (this._ws.bufferedAmount > 2e6) { h.keyNext = true; return; }                  // the connection is behind: skip, and start clean
+      if (this._ws.bufferedAmount > 5e5) { h.keyNext = true; return; }                  // the connection is behind: skip, and start clean
       const t0 = performance.now();
       let canvas;
       try { canvas = this._hooks.render(h.pose, h.width, h.height); h.fails = 0; }
@@ -356,7 +402,10 @@
       const key = h.keyNext || now - h.lastKey > KEY_EVERY_MS;
       let frame;
       try {
-        frame = new VideoFrame(canvas, { timestamp: Math.round(now * 1000) });
+        const ts = Math.round(now * 1000);
+        frame = new VideoFrame(canvas, { timestamp: ts });
+        if (h.meta.size > 32) h.meta.clear();   // chunks the encoder dropped: never answered
+        h.meta.set(ts, [Number(input && input.t) || 0, Number(input && input.yaw) || 0, Number(input && input.pitch) || 0]);
         h.encoder.encode(frame, { keyFrame: key });
         if (key) { h.keyNext = false; h.lastKey = now; }
       } catch (e) { console.warn("visit: could not encode a frame", e); }
@@ -370,23 +419,36 @@
     }
 
     // ---------- visiting ----------
+    // Where the room you are visiting is drawn. While the view is active (the default) it takes WASD, Shift and
+    // the mouse; inactive (setActive(false): a picture-in-picture, say) it takes nothing, and the page's own
+    // keys are its own again. `viewFocused` says which.
+    get viewFocused() { return !!(this.visiting && this._view && this._view.active); }
+
     view(element) {
       if (this._view) this._view.release();
       const canvas = document.createElement("canvas");
       canvas.style.cssText = "display:block;width:100%;height:100%;background:#000;cursor:pointer;outline:none";
       canvas.tabIndex = 0;
       element.appendChild(canvas);
-      const view = { element, canvas, ctx: canvas.getContext("2d"), keys: new Set(), yaw: 0, pitch: 0, sentAt: 0, resizeAt: 0 };
+      const view = { element, canvas, ctx: canvas.getContext("2d"), keys: new Set(), yaw: 0, pitch: 0, sentAt: 0, resizeAt: 0, active: true, pending: false, raf: 0 };
       const ignore = e => e.ctrlKey || e.metaKey || e.altKey || (e.target && (e.target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)));
       const KEYS = ["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "ShiftLeft", "ShiftRight"];
-      const down = e => { if (!this.visiting || ignore(e) || !KEYS.includes(e.code)) return; view.keys.add(e.code); e.preventDefault(); };
-      const up = e => { view.keys.delete(e.code); };
-      const blur = () => view.keys.clear();
-      const click = () => { if (canvas.requestPointerLock) canvas.requestPointerLock(); };
+      const changed = () => this._sendInput(performance.now(), true);   // at once (at most every 8 ms): no waiting for a tick
+      const down = e => {
+        if (!this.visiting || !view.active || ignore(e) || !KEYS.includes(e.code)) return;
+        e.preventDefault();
+        if (!view.keys.has(e.code)) { view.keys.add(e.code); changed(); }
+      };
+      const up = e => { if (view.keys.delete(e.code)) changed(); };
+      const blur = () => { if (view.keys.size) { view.keys.clear(); changed(); } };
+      const click = () => { if (view.active && canvas.requestPointerLock) canvas.requestPointerLock(); };
       const look = e => {
         if (document.pointerLockElement !== canvas) return;
         view.yaw -= e.movementX * LOOK;
         view.pitch = Math.max(-1.4, Math.min(1.4, view.pitch - e.movementY * LOOK));
+        changed();
+        // The picture turns now, from the last frame; the host's next one fills in what came into view.
+        if (!view.raf) view.raf = requestAnimationFrame(() => { view.raf = 0; this._paint(); });
       };
       addEventListener("keydown", down); addEventListener("keyup", up); addEventListener("blur", blur);
       canvas.addEventListener("click", click); document.addEventListener("mousemove", look);
@@ -400,10 +462,17 @@
         canvas.remove();
         if (this._view === view) this._view = null;
       };
+      view.setActive = on => {
+        view.active = !!on;
+        if (!view.active) {
+          if (document.pointerLockElement === canvas) document.exitPointerLock();
+          if (view.keys.size) { view.keys.clear(); changed(); }
+        }
+      };
       this._view = view;
       this._sizeView();
       if (this._viewer) { this._viewer.waitKey = true; this._send({ type: "keyframe", channel: this._viewer.channel }); }
-      return { release: () => view.release(), canvas };
+      return { release: () => view.release(), setActive: on => view.setActive(on), get active() { return view.active; }, canvas };
     }
 
     _sizeView() {
@@ -416,15 +485,21 @@
     }
     _sendViewport() { if (this._view && this.visiting) this._send({ type: "viewport", width: this._view.canvas.width, height: this._view.canvas.height }); }
 
-    _sendInput(now) {
+    // The visitor's input: the state of its keys and look, whole each time (the newest wins; none is ever
+    // queued). When it changes, now (at most every 8 ms; a change sooner goes on the next tick); and every
+    // 33 ms regardless, so a host knows it is still held. `t` is this page's clock, which the host's frames
+    // carry back: their age when drawn is the latency figure.
+    _sendInput(now, changed) {
       const v = this._view;
+      if (!v) return;
       if (v.resizeAt && now >= v.resizeAt) this._sizeView();
-      if (!this.visiting || now - v.sentAt < INPUT_MS) return;
-      v.sentAt = now;
+      if (!this.visiting) return;
+      if (now - v.sentAt < (changed ? INPUT_MIN_MS : INPUT_MS)) { if (changed) v.pending = true; return; }
+      v.sentAt = now; v.pending = false;
       const k = c => v.keys.has(c);
       this._send({ type: "input", forward: (k("KeyW") || k("ArrowUp") ? 1 : 0) - (k("KeyS") || k("ArrowDown") ? 1 : 0),
         strafe: (k("KeyD") || k("ArrowRight") ? 1 : 0) - (k("KeyA") || k("ArrowLeft") ? 1 : 0),
-        run: k("ShiftLeft") || k("ShiftRight"), yaw: v.yaw, pitch: v.pitch });
+        run: k("ShiftLeft") || k("ShiftRight"), yaw: v.yaw, pitch: v.pitch, t: now });
     }
 
     _configureDecoder(m) {
@@ -433,6 +508,7 @@
       const same = w.config && w.config.codec === m.codec && w.config.codedWidth === m.width && w.config.codedHeight === m.height;
       if (same && w.decoder && w.decoder.state === "configured") return;   // told again: nothing to change
       if (w.decoder) { try { w.decoder.close(); } catch (e) { /* closed */ } }
+      w.fov = Number(m.fov) > 0 ? Number(m.fov) : null;
       w.config = { codec: m.codec, codedWidth: m.width, codedHeight: m.height, optimizeForLatency: true };
       w.decoder = new VideoDecoder({
         output: f => this._draw(f),
@@ -445,26 +521,54 @@
     _frame(buf) {
       const w = this._viewer;
       if (!w || buf.byteLength < 11) return;
-      const dv = new DataView(buf), channel = dv.getUint16(0), key = (dv.getUint8(2) & 1) === 1;
-      if (channel !== w.channel || !w.decoder || w.decoder.state !== "configured") return;
+      const dv = new DataView(buf), channel = dv.getUint16(0), flags = dv.getUint8(2), key = (flags & 1) === 1;
+      const hasMeta = (flags & HAS_META) !== 0, at = hasMeta ? 11 + META : 11;
+      if (channel !== w.channel || !w.decoder || w.decoder.state !== "configured" || buf.byteLength < at) return;
       if (w.waitKey && !key) return;
-      if (w.decoder.decodeQueueSize > 6) { w.waitKey = true; return this._send({ type: "keyframe", channel }); }
+      if (w.decoder.decodeQueueSize > 3) { w.waitKey = true; return this._send({ type: "keyframe", channel }); }   // behind: newest wins
       w.waitKey = false;
-      try { w.decoder.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: Number(dv.getBigUint64(3)), data: new Uint8Array(buf, 11) })); }
+      const ts = Number(dv.getBigUint64(3));
+      if (hasMeta) {
+        if (w.meta.size > 32) w.meta.clear();
+        w.meta.set(ts, { t: dv.getFloat64(11), yaw: dv.getFloat32(19), pitch: dv.getFloat32(23) });
+      }
+      try { w.decoder.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: ts, data: new Uint8Array(buf, at) })); }
       catch (e) { w.waitKey = true; this._send({ type: "keyframe", channel }); }
     }
 
+    // A decoded frame: kept (the last one, for turning between frames), its age measured, and drawn.
     _draw(frame) {
-      const v = this._view;
-      if (v) {
-        const { canvas, ctx } = v, k = Math.min(canvas.width / frame.displayWidth, canvas.height / frame.displayHeight);
-        const dw = frame.displayWidth * k, dh = frame.displayHeight * k;
-        ctx.fillStyle = "#000"; ctx.fillRect(0, 0, canvas.width, canvas.height);
-        ctx.drawImage(frame, (canvas.width - dw) / 2, (canvas.height - dh) / 2, dw, dh);
-        if (this.visiting && this.visiting.paused) this._overlay();
+      const w = this._viewer;
+      if (!w) return frame.close();
+      const meta = w.meta.get(frame.timestamp);
+      w.meta.delete(frame.timestamp);
+      if (w.last) w.last.close();
+      w.last = frame; w.lastMeta = meta || null; w.count++;
+      if (meta && meta.t > 0) {   // input to screen, on this page's own clock: the time of the input this frame shows
+        const ms = performance.now() - meta.t;
+        if (ms >= 0 && ms < 10000) this.stats.latency = this.stats.latency == null ? ms : this.stats.latency * 0.9 + ms * 0.1;
       }
-      frame.close();
       this.frames = (this.frames || 0) + 1;
+      this._paint();
+    }
+
+    // The last frame, letterboxed, shifted by how far the visitor has turned since the host drew it (the host
+    // said its camera's field of view, and the frame which look it drew): turning is instant, whatever the
+    // round trip; what came into view at the edge arrives with the host's next frame.
+    _paint() {
+      const v = this._view, w = this._viewer;
+      if (!v || !w || !w.last) return;
+      const f = w.last, { canvas, ctx } = v, k = Math.min(canvas.width / f.displayWidth, canvas.height / f.displayHeight);
+      const dw = f.displayWidth * k, dh = f.displayHeight * k;
+      let sx = 0, sy = 0;
+      if (w.lastMeta && w.fov) {
+        const focal = (dh / 2) / Math.tan(w.fov * Math.PI / 360);
+        sx = Math.max(-dw / 3, Math.min(dw / 3, Math.tan(v.yaw - w.lastMeta.yaw) * focal));       // turned left: the picture moves right
+        sy = Math.max(-dh / 3, Math.min(dh / 3, Math.tan(v.pitch - w.lastMeta.pitch) * focal));   // looked up: it moves down
+      }
+      ctx.fillStyle = "#000"; ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(f, (canvas.width - dw) / 2 + sx, (canvas.height - dh) / 2 + sy, dw, dh);
+      if (this.visiting && this.visiting.paused) this._overlay();
     }
 
     // The host's page is reloading: its room holds its last frame, and says so.
@@ -480,7 +584,9 @@
     _dropViewer() {
       const w = this._viewer;
       if (w && w.decoder) { try { w.decoder.close(); } catch (e) { /* closed */ } }
+      if (w && w.last) w.last.close();
       this._viewer = null;
+      this.stats = { latency: null, rtt: null, path: null, fps: 0 };
       if (this._view) {
         const { canvas, ctx } = this._view;
         ctx.fillStyle = "#000"; ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -592,10 +698,66 @@
     return { element: root, release() { clearInterval(timer); v.off("change", draw); root.remove(); } };
   }
 
+  // ---------- the ready-made stage: the room you are visiting, full-window or in a corner ----------
+  const STAGE_CSS = `
+.visit-stage { position: fixed; z-index: 5; background: #000; overflow: hidden; }
+.visit-stage.big { inset: 0; }
+.visit-stage.small { right: 16px; bottom: 16px; width: 320px; height: 180px; border: 1px solid #2d333b; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.4); cursor: pointer; }
+.visit-stage .screen { position: absolute; inset: 0; }
+.visit-stage .bar { position: absolute; left: 0; right: 0; bottom: 0; display: flex; gap: 8px; align-items: center; padding: 6px 10px; font: 12px/1.3 ui-monospace, Consolas, monospace; color: #e6edf3; background: rgba(13,17,23,.78); }
+.visit-stage .bar .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.visit-stage .bar .stats { color: #8b949e; white-space: nowrap; }
+.visit-stage .bar button { font: inherit; color: inherit; background: #161b22; border: 1px solid #2d333b; border-radius: 6px; padding: 2px 10px; cursor: pointer; }
+.visit-stage.small .bar button, .visit-stage.small .bar .stats { display: none; }`;
+
+  // While you visit: the room you are in fills the window, with how it is going (the link's path and round
+  // trip, input to screen, frames a second), "Back to my room" and "Leave". Back in your room, the visit
+  // shrinks to a corner (and takes no keys: v.viewFocused is false, so the page's own are its own); a click
+  // on it brings it back to the full window. Gone when the visit ends. { element, big, shrink(), grow(),
+  // release() }
+  function stage(v, { parent = document.body } = {}) {
+    if (!document.getElementById("visit-stage-css")) {
+      const st = document.createElement("style"); st.id = "visit-stage-css"; st.textContent = STAGE_CSS; document.head.appendChild(st);
+    }
+    const root = document.createElement("div");
+    root.className = "visit-stage big"; root.hidden = true;
+    root.innerHTML = `<div class="screen"></div><div class="bar"><span class="grow"></span><span class="stats"></span>`
+      + `<button type="button" data-s="small" title="your own room, with this one in the corner">Back to my room</button><button type="button" data-s="leave">Leave</button></div>`;
+    parent.appendChild(root);
+    const screen = root.querySelector(".screen"), cap = root.querySelector(".grow"), nums = root.querySelector(".stats");
+    let view = null, big = true;
+    function set(on) { big = on; root.className = "visit-stage " + (on ? "big" : "small"); if (view) view.setActive(on); draw(); stats(); }
+    function draw() {
+      if (v.visiting && !view) { root.hidden = false; view = v.view(screen); big = true; root.className = "visit-stage big"; }
+      if (!v.visiting && view) { view.release(); view = null; root.hidden = true; }
+      if (!v.visiting) return;
+      const name = v.visiting.host.name || "Their";
+      cap.textContent = big ? `${name}'s room${v.visiting.paused ? " (reloading)" : ""} · click to look around, WASD to walk, Shift to run, Esc frees the mouse`
+        : `${name}'s room · click to go back in`;
+    }
+    function stats() {
+      const x = v.stats;
+      nums.textContent = !v.visiting ? "" : [x.path, x.rtt != null && `link ${Math.round(x.rtt)} ms`,
+        x.latency != null && `input to screen ${Math.round(x.latency)} ms`, x.fps ? `${x.fps} fps` : ""].filter(Boolean).join(" · ");
+    }
+    root.addEventListener("click", e => {
+      const b = e.target.closest("button[data-s]");
+      if (b) { e.stopPropagation(); return b.dataset.s === "leave" ? v.leave() : set(false); }
+      if (!big) set(true);
+    });
+    v.on("change", draw); v.on("stats", stats);
+    draw();
+    return {
+      element: root, get big() { return big; }, shrink: () => set(false), grow: () => set(true),
+      release() { v.off("change", draw); v.off("stats", stats); if (view) view.release(); root.remove(); },
+    };
+  }
+
   window.Visit = {
     version: VERSION,
     connect({ port, token, sim = {} }) { const c = new Client(port, token, sim); return c._open().then(() => c, e => { c.close(); throw e; }); },
     walk,
     panel,
+    stage,
   };
 })();

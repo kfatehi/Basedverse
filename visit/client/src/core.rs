@@ -38,6 +38,8 @@ pub enum Ev {
     LinkFrame { visit: String, frame: Frame },
     LinkFailed { visit: String },
     Bitrate { visit: String, bps: u64 },
+    /// The link's path (direct or through a relay) and round-trip time, about once a second.
+    LinkStats { visit: String, relay: bool, rtt_ms: f64 },
     WantKey { visit: String },
     Tick,
     Shutdown,
@@ -77,11 +79,18 @@ struct Visit {
     host_state: Option<Value>,
     /// Control messages taken from the other side in the current second: at most CTL_PER_SECOND.
     ctl: (Instant, u32),
+    /// When a keyframe the visitor asked for was last passed to the page (host side): at most every
+    /// KEY_EVERY, as a keyframe costs the host's machine far more than another frame.
+    key_asked: Option<Instant>,
 }
 
 /// The most control messages a link's other side may send a second; more are dropped (a peer flooding
 /// keyframe requests or encoder settings must not swamp this office's page).
 const CTL_PER_SECOND: u32 = 20;
+const KEY_EVERY: Duration = Duration::from_millis(500);
+/// The most inputs a second taken from a visitor (it sends one whenever its keys or look change, at most
+/// every 8 ms, and every 33 ms regardless).
+const INPUTS_PER_SECOND: u32 = 120;
 
 pub struct Core {
     lobby: mpsc::UnboundedSender<LobbyOut>,
@@ -110,7 +119,7 @@ pub struct Core {
     input_seq: u64,
 }
 
-const LIMITS: fn() -> Value = || json!({ "max_width": 1280, "max_height": 720, "fps": 30 });
+const LIMITS: fn() -> Value = || json!({ "max_width": 1280, "max_height": 720, "fps": 60 });
 
 impl Core {
     pub fn new(lobby: mpsc::UnboundedSender<LobbyOut>, me: mpsc::UnboundedSender<Ev>, relays: Option<Relays>, max_visitors: u8, idle_exit: u64,
@@ -218,6 +227,12 @@ impl Core {
                 if let Some(v) = self.visits.get(&visit) {
                     let ch = v.channel;
                     self.to_page(json!({ "type": "bitrate", "channel": ch, "bps": bps }));
+                }
+            }
+            Ev::LinkStats { visit, relay, rtt_ms } => {
+                if let Some(v) = self.visits.get(&visit) {
+                    let ch = v.channel;
+                    self.to_page(json!({ "type": "link_stats", "channel": ch, "path": if relay { "relay" } else { "direct" }, "rtt_ms": (rtt_ms * 10.0).round() / 10.0 }));
                 }
             }
             Ev::WantKey { visit } => {
@@ -356,7 +371,7 @@ impl Core {
                 let ctl = if t == "keyframe" {
                     json!({ "keyframe": true })
                 } else {
-                    json!({ "video_config": { "codec": m.get("codec"), "width": m.get("width"), "height": m.get("height") } })
+                    json!({ "video_config": { "codec": m.get("codec"), "width": m.get("width"), "height": m.get("height"), "fov": fov(&m) } })
                 };
                 let _ = v.cmd.try_send(LinkCmd::Ctl(ctl));
             }
@@ -539,6 +554,7 @@ impl Core {
                 self.visits.insert(id.to_string(), Visit {
                     id: id.to_string(), channel, role, peer: m.get("peer").cloned().unwrap_or(Value::Null), up: false, cmd,
                     video_config: None, last_seq: 0, inputs: (Instant::now(), 0), want_key: false, peer_decoders: None, peer_viewport: None, host_state: None, ctl: (Instant::now(), 0),
+                    key_asked: None,
                 });
             }
             Err(e) => {
@@ -644,7 +660,8 @@ impl Core {
                     let msg = json!({ "type": "viewport", "channel": ch, "width": w.min(8192), "height": h.min(8192) });
                     v.peer_viewport = Some(msg.clone());
                     self.to_page(msg);
-                } else if m.get("keyframe").is_some() {
+                } else if m.get("keyframe").is_some() && v.key_asked.is_none_or(|t| t.elapsed() >= KEY_EVERY) {
+                    v.key_asked = Some(Instant::now());
                     self.to_page(json!({ "type": "keyframe", "channel": ch }));
                 }
             }
@@ -671,7 +688,7 @@ impl Core {
         if v.inputs.0.elapsed() >= Duration::from_secs(1) {
             v.inputs = (Instant::now(), 0);
         }
-        if v.inputs.1 >= 60 {
+        if v.inputs.1 >= INPUTS_PER_SECOND {
             return;
         }
         v.inputs.1 += 1;
@@ -712,16 +729,24 @@ fn started(v: &Visit) -> Value {
 }
 
 fn with_channel(kind: &str, channel: u16, cfg: &Value) -> Value {
-    json!({ "type": kind, "channel": channel, "codec": cfg.get("codec"), "width": cfg.get("width"), "height": cfg.get("height") })
+    json!({ "type": kind, "channel": channel, "codec": cfg.get("codec"), "width": cfg.get("width"), "height": cfg.get("height"), "fov": fov(cfg) })
 }
 
-/// An input with every field in its range (../SPEC.md section 8.2).
+/// The host camera's vertical field of view, in degrees (for the visitor's own turning between frames), or
+/// null when the host did not say.
+fn fov(m: &Value) -> Value {
+    m.get("fov").and_then(Value::as_f64).filter(|f| (10.0..=150.0).contains(f)).map_or(Value::Null, |f| json!(f))
+}
+
+/// An input with every field in its range (../SPEC.md section 8.2). `t` (the visitor page's clock when it
+/// sent it, ms) passes through as a number, for the host to echo in its frames' meta.
 fn clamp_input(m: &Value) -> Value {
     let step = |k: &str| m.get(k).and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0, |x| x.round().clamp(-1.0, 1.0) as i64);
     let angle = |k: &str, lim: f64| m.get(k).and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0.0, |x| x.clamp(-lim, lim));
     json!({
         "forward": step("forward"), "strafe": step("strafe"), "run": m.get("run").and_then(Value::as_bool).unwrap_or(false),
         "yaw": angle("yaw", 1e6), "pitch": angle("pitch", 1.4),
+        "t": m.get("t").and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0.0, |x| x.clamp(0.0, 1e12)),
     })
 }
 
@@ -732,8 +757,8 @@ mod tests {
     #[test]
     fn inputs_are_clamped() {
         let i = clamp_input(&json!({ "forward": 5, "strafe": -0.6, "run": "yes", "yaw": 3.0, "pitch": -9 }));
-        assert_eq!(i, json!({ "forward": 1, "strafe": -1, "run": false, "yaw": 3.0, "pitch": -1.4 }));
-        let j = clamp_input(&json!({}));
-        assert_eq!(j, json!({ "forward": 0, "strafe": 0, "run": false, "yaw": 0.0, "pitch": 0.0 }));
+        assert_eq!(i, json!({ "forward": 1, "strafe": -1, "run": false, "yaw": 3.0, "pitch": -1.4, "t": 0.0 }));
+        let j = clamp_input(&json!({ "t": 1234.5 }));
+        assert_eq!(j, json!({ "forward": 0, "strafe": 0, "run": false, "yaw": 0.0, "pitch": 0.0, "t": 1234.5 }));
     }
 }

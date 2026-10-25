@@ -115,7 +115,7 @@ A flag wins over its environment variable, and a variable set but blank counts a
 On start it prints **one JSON line** to stdout once it listens, then logs to stderr:
 
 ```json
-{"ready": true, "port": 7401, "version": "0.2.0", "proto": "basedverse-visit-local/1"}
+{"ready": true, "port": 7401, "version": "0.3.0", "proto": "basedverse-visit-local/1"}
 ```
 
 Exit codes: 0 asked to stop (SIGINT/SIGTERM, or idle-exit); 2 bad flags; 3 the port is taken; 4 the
@@ -148,7 +148,7 @@ lobby refused it for good (`proto_unsupported`, `name_invalid`).
 | request | auth | answer |
 |---|---|---|
 | `GET /visit.js` | none | the library (JavaScript), the version built into this binary. `Access-Control-Allow-Origin: *` |
-| `GET /health` | none | `{"ok": true, "version": "0.2.0"}` |
+| `GET /health` | none | `{"ok": true, "version": "0.3.0"}` |
 | `GET /ws` (WebSocket upgrade) | `hello.token` (5.1) | the page connection |
 | anything else | — | 404 |
 
@@ -169,10 +169,10 @@ The page sends, within 5 s:
 The visit-client answers `ready` (or closes: 4401 bad token, 4400 bad `proto`):
 
 ```json
-{"type": "ready", "version": "0.2.0", "office": {"id": "o1a2b3c4", "name": "Magic Room"},
+{"type": "ready", "version": "0.3.0", "office": {"id": "o1a2b3c4", "name": "Magic Room"},
  "online": true, "away": false, "status": "available", "max_visitors": 3,
  "visits": [{"id": "v…", "channel": 1, "role": "host", "peer": {"id": "o…", "name": "Ada", "sim": {…}}}],
- "limits": {"max_width": 1280, "max_height": 720, "fps": 30}}
+ "limits": {"max_width": 1280, "max_height": 720, "fps": 60}}
 ```
 
 followed by a `lobby` snapshot and any pending `knock`s.
@@ -189,9 +189,9 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `knock` | `to` (office id), `message`? (≤ 280) | ask to visit an office |
 | `answer` | `knock`, `accept` (bool), `message`? | let a knocker in, or not |
 | `end` | `visit` | end a visit: yours as a visitor (leave), or a visitor's to you (kick) |
-| `input` | `forward`, `strafe`, `run`, `yaw`, `pitch` (8.2) | the visitor's input, at about 30 a second while visiting |
+| `input` | `forward`, `strafe`, `run`, `yaw`, `pitch`, `t` (8.2) | the visitor's input, whole: whenever it changes (at most every 8 ms) and every 33 ms regardless, while visiting |
 | `viewport` | `width`, `height` | the visitor's view size, on start and when it changes (debounced 250 ms) |
-| `video_config` | `channel`, `codec`, `width`, `height` | the host's encoder settings for a visit, before its first frame and whenever they change |
+| `video_config` | `channel`, `codec`, `width`, `height`, `fov`? | the host's encoder settings for a visit, before its first frame and whenever they change; `fov`, its camera's vertical field of view in degrees, lets the visitor turn its picture between frames (9) |
 | `decoders` | `codecs`: [string] | the codecs this page can decode, best first (sent once after `ready`) |
 | `keyframe` | `channel` | the visitor's page asks for a keyframe (its decoder lost its place) |
 | `pose` | `channel`, `state` (≤ 2 KiB) | the host page's state for a visitor (where it stands), about 5 a second; kept by the visit-client and handed back in `ready` to a page that reloads |
@@ -212,8 +212,9 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `input` | `channel`, `seq`, `forward`, `strafe`, `run`, `yaw`, `pitch` | a visitor's latest input (host side) |
 | `viewport` | `channel`, `width`, `height` | a visitor's view size (host side) |
 | `decoders` | `channel`, `codecs` | what a visitor can decode (host side) |
-| `video_config` | `channel`, `codec`, `width`, `height` | the host's encoder settings (visitor side) |
-| `bitrate` | `channel`, `bps` | the bitrate the host should encode a visit at, about once a second (8.4) |
+| `video_config` | `channel`, `codec`, `width`, `height`, `fov` | the host's encoder settings (visitor side); `fov` null when the host gave none |
+| `bitrate` | `channel`, `bps` | the bitrate the host should encode a visit at, about once a second (7.5) |
+| `link_stats` | `channel`, `path` (`"direct"` \| `"relay"`), `rtt_ms` | the visit's link, about once a second, both sides: a relayed path is slower and rate-limited |
 | `keyframe` | `channel` | send a keyframe on this visit soon (host side) |
 | `error` | `code`, `message`, `ref`? | a refusal (section 11) |
 | binary | section 5.4 | an encoded frame (visitor) |
@@ -225,11 +226,14 @@ Both directions, one encoded video frame per WebSocket binary message:
 | bytes | field |
 |---|---|
 | 0–1 | `channel`, u16 big-endian |
-| 2 | flags: bit 0 = keyframe |
+| 2 | flags: bit 0 = keyframe; bit 1 = the frame carries its meta |
 | 3–10 | timestamp, u64 big-endian, microseconds (the `VideoFrame` timestamp) |
-| 11… | the encoded chunk, as `EncodedVideoChunk.copyTo` gives it |
+| 11–26 | the meta, when flagged: `t` (f64, the visitor's input time this frame reflects, from its `input`), then `yaw` and `pitch` (f32 each, the look it was drawn at, from that input); all big-endian |
+| 11… or 27… | the encoded chunk, as `EncodedVideoChunk.copyTo` gives it |
 
-A frame larger than 1 MiB is dropped.
+A frame larger than 1 MiB is dropped. The meta lets the visitor measure input to screen (its own clock,
+now minus `t`) and turn its picture between frames (section 9); a visit-client passes it through untouched,
+and leaves it out for a visitor whose link handshake did not ask for it (7.1).
 
 ## 6. The lobby: `basedverse-lobby/2`
 
@@ -323,7 +327,8 @@ ALPN **`basedverse-visit/1`**. iroh connections are encrypted and authenticated 
 
 1. On `visit`, the **visitor's** visit-client dials `peer_link` with the ALPN. The **host's** waits for it.
 2. The visitor opens the **control stream** (bidirectional) and sends `{"proto": "basedverse-visit/1",
-   "visit": "<id>", "ticket": "<ticket>"}`.
+   "visit": "<id>", "ticket": "<ticket>", "frame_meta": true}` (`frame_meta`: it reads frames' meta,
+   section 7.4; visit-clients before 0.3 leave it out, and get frames without).
 3. The host checks that it has that visit, that the ticket matches, and that the connecting endpoint's id
    is the visitor's `peer_link.endpoint`. If not, it closes the connection (application error code 1,
    `"refused"`). If so it answers `{"ok": true}`.
@@ -339,36 +344,42 @@ Messages are JSON, each prefixed by its length (u32 big-endian). In order, relia
 | visitor | `{"decoders": [codec, …]}` | what the visitor's page can decode, best first |
 | visitor | `{"viewport": {"width", "height"}}` | the visitor's view size |
 | visitor | `{"keyframe": true}` | send a keyframe soon |
-| host | `{"video_config": {"codec", "width", "height"}}` | before the first frame and on every change |
+| host | `{"video_config": {"codec", "width", "height", "fov"}}` | before the first frame and on every change |
 | host | `{"paused": true}` / `{"paused": false}` | the host's page went away / came back |
 | either | `{"bye": "<reason>"}` | ending the visit (also sent to the lobby as `end`) |
 
 ### 7.3 Inputs
 
-Visitor to host as **QUIC datagrams**, about 30 a second, each a JSON object
-`{"seq", "forward", "strafe", "run", "yaw", "pitch"}` (section 8.2). Datagrams may be lost or reordered:
-the host keeps the one with the highest `seq` and drops older ones. The visitor sends its current input
-every 33 ms whether or not it changed, so a lost "key up" is corrected within one interval; the host
-treats a visitor whose last input is older than 300 ms as standing still.
+Visitor to host as **QUIC datagrams**, each a JSON object `{"seq", "forward", "strafe", "run", "yaw",
+"pitch", "t"}` (section 8.2): the whole state, never a change, so the newest is all that matters. Datagrams
+may be lost or reordered: the host keeps the one with the highest `seq` and drops older ones, and takes at
+most 120 a second. The visitor sends whenever its keys or look change (at most every 8 ms) and every 33 ms
+regardless, so a lost "key up" is corrected within one interval; the host treats a visitor whose last input
+is older than 300 ms as standing still.
 
 ### 7.4 Video
 
-Host to visitor on **unidirectional streams, one per group of pictures**: each stream starts with a
-keyframe and carries the frames after it until the next keyframe, which goes on a new stream. Each frame
-on a stream is: length (u32 big-endian, the length of what follows), flags (u8, bit 0 keyframe), timestamp
-(u64 big-endian, microseconds), the encoded chunk.
+Host to visitor on **unidirectional streams, one per group of pictures** (as Media over QUIC does): each
+stream starts with a keyframe and carries the frames after it until the next keyframe, which goes on a new
+stream. Each frame on a stream is: length (u32 big-endian, the length of what follows), flags (u8, bit 0
+keyframe, bit 1 meta), timestamp (u64 big-endian, microseconds), the meta (16 bytes, when flagged: only to
+a visitor that said `frame_meta`), the encoded chunk.
 
-The visitor's visit-client reads streams in order of their keyframes' timestamps. When a newer stream
-starts it stops reading older ones (QUIC `STOP_SENDING`): a stalled group is abandoned rather than
-waited for, and no frame of an older group follows a newer group's keyframe. Frames go to the page as they
-arrive (5.4).
+**Newest wins; nothing queues.** The host's visit-client resets an older stream when a newer keyframe
+starts one (its unsent frames are stale), lets at most 256 KiB be sent and not yet acknowledged (so a slow
+path backs up the sender, not seconds of video), and drops every frame of a group that is more than
+100 ms older than the newest frame waiting, asking its page for a keyframe. The visitor's visit-client reads
+streams in order of their keyframes' timestamps. When a newer stream starts it stops reading older ones
+(QUIC `STOP_SENDING`): a stalled group is abandoned rather than waited for, and no frame of an older group
+follows a newer group's keyframe. Frames go to the page as they arrive (5.4).
 
 ### 7.5 Bitrate
 
 The host's visit-client measures each link (QUIC's round-trip time and loss) and once a second tells its
-page the bitrate to encode that visit at (`bitrate`): start at 1.5 Mbit/s; if more than 2% of packets were
+page the bitrate to encode that visit at (`bitrate`): start at 2 Mbit/s; if more than 2% of packets were
 lost or the round-trip time rose more than 50% above the link's lowest, multiply by 0.7; otherwise add
-150 kbit/s; never below 300 kbit/s or above 4 Mbit/s.
+150 kbit/s; never below 300 kbit/s or above 6 Mbit/s. Both visit-clients also tell their pages the link's
+path and round-trip time (`link_stats`), and log the path whenever it changes.
 
 ### 7.6 Blips
 
@@ -387,11 +398,17 @@ and a visitor refused at the handshake ends it at once (`link_failed`).
   baseline, Annex B: SPS and PPS travel with each keyframe, so no decoder description is needed), `vp8`,
   `vp09.00.10.08`.
 - **Size.** The visitor's `viewport`, scaled down to fit 1280×720 if larger, rounded down to even numbers.
-- **Rate.** Up to 30 frames a second per visit (`limits.fps`): the host's `fps` (10–30, default 30), which
-  the library lowers while rendering for visitors takes more than a quarter of the page's time over the
-  last second (never below 10) and raises again when it fits. Renders are staggered across visits.
-- **Encoder.** `latencyMode: "realtime"`, the bitrate from section 7.5, a keyframe every 2 s and whenever a
-  visitor asks (`keyframe`), and as the first frame after `video_config` changes or the page reconnects.
+- **Rate.** Up to 60 frames a second per visit (`limits.fps`): the host's `fps` (10–60, default 60). A
+  visitor's input is applied, and its frame rendered if one is due, the moment it arrives, not on the next
+  tick. While rendering for visitors takes more than a quarter of the page's time over the last second,
+  the library first renders smaller (three-quarters, then half the view's size: a smaller picture costs no
+  latency, fewer frames do), then lowers the frame rate (never below 10); it climbs back the other way when
+  it fits.
+- **Encoder.** `latencyMode: "realtime"`, the machine's own encoder where it has one
+  (`hardwareAcceleration: "prefer-hardware"`), the bitrate from section 7.5, a keyframe every 2 s, when
+  a visitor asks (`keyframe`; at most every 500 ms, as keyframes cost the host far more than other frames)
+  and as the first frame after `video_config` changes or the page reconnects. No B-frames (the codecs
+  above have none in realtime mode): every frame can be shown as soon as it is decoded.
 
 ### 8.2 Input
 
@@ -402,9 +419,13 @@ and a visitor refused at the handshake ends it at once (`link_failed`).
 | `run` | boolean | Shift held |
 | `yaw` | radians | where the visitor is looking, left/right, relative to how it was facing when it arrived (positive: turned left) |
 | `pitch` | radians, −1.4 to 1.4 | up (positive) or down |
+| `t` | ms | the visitor page's clock when it sent this input (`performance.now()`); the host's frames carry it back in their meta |
 
 **Look belongs to the visitor; position belongs to the host.** The visitor's page turns the view as fast
-as the mouse moves and sends where it is looking; the host applies it as is. Where the visitor stands is
+as the mouse moves and sends where it is looking; the host applies it as is. Between the host's frames the
+visitor's page shifts the last one by how far it has turned since (it knows the look each frame was drawn
+at, and the host's field of view), so turning feels instant whatever the round trip; walking waits for
+the host. Where the visitor stands is
 the host's to decide (`move`), against its own walls and furniture. The host clamps every field to its
 range.
 
@@ -420,6 +441,9 @@ const v = await Visit.connect({ port, token, sim: { name, version } });
 
 // state, always current; "change" fires whenever any of it changes (never for the per-frame traffic)
 v.state        // "connecting" | "online" | "offline" (the lobby out of reach) | "away" (out of it on purpose)
+v.stats        // while visiting, about once a second: { latency (input to screen, ms), rtt (the link's, ms),
+               //   path ("direct" | "relay"), fps (frames drawn a second) }
+v.viewFocused  // visiting, and the view takes the keys and mouse (not shrunk to a corner): the page's own keys wait
 v.office       // { id, name } while online
 v.status       // "available" | "busy"
 v.maxVisitors  // number
@@ -429,7 +453,7 @@ v.knocking     // your knocks still waiting: [{ id, to }]
 v.visiting     // your visit as a visitor: { id, host: { id, name, sim }, paused } or null
 v.visitors     // your visitors as a host: [{ id, visitor: { id, name, sim }, pose }]
 
-v.on(event, fn); v.off(event, fn)   // "change" | "knock" | "answered" | "visit_started" | "visit_ended" | "error"
+v.on(event, fn); v.off(event, fn)   // "change" | "knock" | "answered" | "visit_started" | "visit_ended" | "stats" | "error"
 v.close()          // disconnect for good
 v.setStatus(status); v.setMaxVisitors(n); v.rename(name)
 v.knock(officeId, message); v.answer(knockId, accept, message)
@@ -443,15 +467,18 @@ v.host({
   spawn(visitor) { return pose; },            // where a new visitor appears
   move(pose, input, dt) { return pose; },     // where it may go: the library has already set pose.yaw and pose.pitch
   render(pose, width, height) { return canvas; },   // your room from pose, into a canvas of that size
-  fps: 30,                                          // optional: the most frames a second per visitor (10–30)
+  fps: 60,                                          // optional: the most frames a second per visitor (10–60)
+  fov: 70,                                          // optional: the camera's vertical field of view, in degrees: visitors turn instantly
 });
 
 // visiting: where to show the room you are in; the library draws it there and captures input
-const view = v.view(element);   // { release(), canvas }
+const view = v.view(element);   // { release(), setActive(on), active, canvas }: inactive, it takes no keys or mouse
 
 // helpers
 Visit.walk(pose, input, dt, { speed, blocked })   // first-person walking with wall sliding, for move()
 Visit.panel(element, v)                          // an optional ready-made lobby panel, with Go offline / Go online: { element, release() }
+Visit.stage(v)                                   // an optional ready-made visit view: the room visited full-window (with the
+                                                 //   link's numbers, Back to my room, Leave), or in a corner; { element, big, shrink(), grow(), release() }
 ```
 
 **Poses** are the host's own: the library only stores them and passes them back. `Visit.walk` uses
@@ -461,7 +488,7 @@ looking up (three.js's camera, Euler order `"YXZ"`). It moves at `speed` units a
 visitor slides along walls.
 
 **Calling the hooks.** `spawn` once per visitor. `move` 30 times a second per visitor, with the latest
-input and `dt` in seconds. `render` at the visit's frame rate (8.1: up to 30 a second per visitor), one visitor at a time: the library makes
+input and `dt` in seconds. `render` at the visit's frame rate (8.1: up to 60 a second per visitor), one visitor at a time: the library makes
 its `VideoFrame` from the returned canvas before the next call, so one canvas MAY serve every visitor. A
 hook that throws is logged and skipped for that tick; three throws in a row end that visit (`"kicked"`).
 
@@ -479,10 +506,13 @@ slowly while its tab is hidden.
 | page hello timeout | 5 s |
 | max visitors | 3 by default, 0–8 |
 | view size | the visitor's, at most 1280×720 |
-| frame rate | up to 30 per visit: the host's `fps` (10–30, default 30), lowered while it does not fit |
-| bitrate | 1.5 Mbit/s to start, 0.3–4 Mbit/s |
-| keyframe interval | 2 s, and on request |
-| input rate | about 30 a second; at most 60 accepted |
+| frame rate | up to 60 per visit: the host's `fps` (10–60, default 60), lowered (after the size) while it does not fit |
+| render size | the visitor's view, then three-quarters, then half of it while the host is busy |
+| bitrate | 2 Mbit/s to start, 0.3–6 Mbit/s |
+| keyframe interval | 2 s, and on request (a visitor's requests passed on at most every 500 ms) |
+| input rate | on every change, at most every 8 ms, and every 33 ms regardless; at most 120 a second accepted |
+| video behind | a frame more than 100 ms older than the newest waiting is dropped, to the next keyframe |
+| link send window | 256 KiB sent and not yet acknowledged |
 | control messages on a link | at most 20 a second from either side; more are dropped |
 | lobby silence | a minute: then the connection is made again |
 | input staleness | 300 ms |

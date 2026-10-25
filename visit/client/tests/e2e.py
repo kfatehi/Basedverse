@@ -3,7 +3,8 @@
 two stand-in pages speaking basedverse-visit-local/1 (../../SPEC.md section 5). Everything on this
 machine's loopback; the visit-clients link directly (no relay).
 
-    python3 e2e.py path/to/visit-client          (run-e2e.sh runs it in a container)
+    python3 e2e.py path/to/visit-client [B's]   (run-e2e.sh runs it in a container; a second binary runs B,
+                                                 to try two versions together)
 """
 import asyncio
 import json
@@ -20,6 +21,8 @@ from websockets.asyncio.server import serve  # noqa: E402
 from websockets.exceptions import ConnectionClosed  # noqa: E402
 
 BIN = sys.argv[1]
+BIN_B = sys.argv[2] if len(sys.argv) > 2 else BIN
+OLD_B = BIN_B != BIN   # B is an older visit-client (0.2): the checks of what only 0.3 does become checks it still works
 TMP = tempfile.mkdtemp()
 fails = 0
 
@@ -55,7 +58,7 @@ class Page:
     async def send(self, **m):
         await self.ws.send(json.dumps(m))
 
-    async def expect(self, type_, timeout=10, skip=("lobby", "bitrate", "online", "knock_sent")):
+    async def expect(self, type_, timeout=10, skip=("lobby", "bitrate", "online", "knock_sent", "link_stats")):
         """The next message of this type, passing over the kinds in `skip`; any other first is a failure."""
         while True:
             m = await asyncio.wait_for(self.texts.get(), timeout)
@@ -87,14 +90,14 @@ class Page:
         self.pump.cancel()
 
 
-async def start_client(name, port, url, *extra):
+async def start_client(name, port, url, *extra, binary=None):
     token = secrets.token_hex(32)
     path = os.path.join(TMP, name + ".token")
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     os.write(fd, token.encode())
     os.close(fd)
     log = open(os.path.join(TMP, name + ".log"), "w")
-    p = await asyncio.create_subprocess_exec(BIN, "--lobby", url, "--name", name, "--sim", "e2e/1", "--port", str(port),
+    p = await asyncio.create_subprocess_exec(binary or BIN, "--lobby", url, "--name", name, "--sim", "e2e/1", "--port", str(port),
                                              "--token-file", path, "--relays", "none", *extra,
                                              stdout=asyncio.subprocess.PIPE, stderr=log,
                                              env=dict(os.environ, RUST_LOG=os.environ.get("RUST_LOG", "visit_client=debug,iroh=warn")))
@@ -107,9 +110,17 @@ def frame(channel, key, ts, payload):
     return struct.pack(">HBQ", channel, 1 if key else 0, ts) + payload
 
 
+def frame_meta(channel, key, ts, meta, payload):
+    return struct.pack(">HBQ", channel, (1 if key else 0) | 2, ts) + meta + payload
+
+
 def unframe(b):
     channel, flags, ts = struct.unpack(">HBQ", b[:11])
-    return channel, bool(flags & 1), ts, b[11:]
+    return (channel, bool(flags & 1), ts, b[27:]) if flags & 2 else (channel, bool(flags & 1), ts, b[11:])
+
+
+def meta_of(b):
+    return b[11:27] if struct.unpack(">B", b[2:3])[0] & 2 else None
 
 
 async def main():
@@ -119,7 +130,7 @@ async def main():
         url = "ws://127.0.0.1:%d" % server.sockets[0].getsockname()[1]
         state = os.path.join(TMP, "A.state.json")   # where A keeps whether it is away
         a_flags = ("--origins", "http://room.test", "--state-file", state)
-        (pa, ta), (pb, tb) = await start_client("A", 7411, url, *a_flags), await start_client("B", 7412, url)
+        (pa, ta), (pb, tb) = await start_client("A", 7411, url, *a_flags), await start_client("B", 7412, url, binary=BIN_B)
 
         print("\npage connection")
         bad = await Page(7411, ta).open(token="0" * 64)
@@ -135,7 +146,7 @@ async def main():
             check("A takes pages only from its --origins", "403" in str(e), True)
         a, b = await Page(7411, ta).open(), await Page(7412, tb).open()
         ra, rb = await a.expect("ready"), await b.expect("ready")
-        check("ready: the version, limits, no visits, not away", (ra["version"], ra["limits"]["fps"], ra["visits"], ra["away"]), ("0.2.0", 30, [], False))
+        check("ready: the version, limits, no visits, not away", (ra["version"], ra["limits"]["fps"], ra["visits"], ra["away"]), ("0.3.0", 60, [], False))
         both = lambda m: m["type"] == "lobby" and sum(o["ready"] for o in m["offices"]) == 2
         lob = await a.until(both)
         await b.until(both)
@@ -176,11 +187,24 @@ async def main():
         await b.send(type="viewport", width=1600, height=900)
         d, vp = await a.expect("decoders"), await a.expect("viewport")
         check("A's page hears what B decodes and B's view size, on A's channel", (d["channel"], d["codecs"], vp["width"], vp["height"]), (cha, ["avc1.42E01F", "vp8"], 1600, 900))
-        await b.send(type="input", forward=1, strafe=-1, run=True, yaw=0.5, pitch=9)
+        await b.send(type="input", forward=1, strafe=-1, run=True, yaw=0.5, pitch=9, t=12345.5)
         i = await a.expect("input")
         check("B's input reaches A's page, clamped", (i["channel"], i["forward"], i["strafe"], i["run"], i["yaw"], i["pitch"]), (cha, 1, -1, True, 0.5, 1.4))
-        await b.send(type="keyframe", channel=chb)
-        check("B asking for a keyframe reaches A", (await a.expect("keyframe"))["channel"], cha)
+        check("with B's time on it, for A's frames to carry back" if not OLD_B else "an older B sends no time: A's page gets 0", i["t"], 0.0 if OLD_B else 12345.5)
+        await a.drain()
+        for _ in range(5):
+            await b.send(type="keyframe", channel=chb)
+        await asyncio.sleep(0.3)
+        keys = []
+        while not a.texts.empty():
+            m = a.texts.get_nowait()
+            if m and m["type"] == "keyframe":
+                keys.append(m["channel"])
+        check("B asking for a keyframe five times at once: A's page is asked once (they cost its machine)", keys, [cha])
+        sa_stats = await a.until(lambda m: m["type"] == "link_stats", timeout=4)
+        sb_stats = {"channel": chb, "path": "direct", "rtt_ms": 0} if OLD_B else await b.until(lambda m: m["type"] == "link_stats", timeout=4)
+        check("both pages hear the link's path and round trip, about once a second: direct here" + (" (A's only: B is older)" if OLD_B else ""),
+              (sa_stats["channel"], sa_stats["path"], sb_stats["channel"], sb_stats["path"], 0 <= sb_stats["rtt_ms"] < 100), (cha, "direct", chb, "direct", True))
 
         print("\nhost to visitor: video")
         await a.send(type="video_config", channel=cha, codec="vp8", width=1280, height=720)
@@ -207,8 +231,16 @@ async def main():
         ts = [g[2] for g in got]
         check("a burst: never an older frame after a newer one", ts == sorted(ts), True)
         check("and the newest group of pictures whole", ts[-4:], [58_000, 59_000, 60_000, 61_000])
+        meta = struct.pack(">dff", 4242.25, 0.5, -0.25)
+        await a.ws.send(frame_meta(cha, False, 70_000, meta, b"with meta"))
+        got = await asyncio.wait_for(b.frames.get(), 5)
+        if OLD_B:
+            check("a frame with meta reaches an older B without it (B's handshake did not ask), the chunk whole", (unframe(got)[3], meta_of(got)), (b"with meta", None))
+        else:
+            check("a frame with meta (the input it shows, the look it was drawn at) reaches B whole",
+                  (unframe(got)[3], meta_of(got) and struct.unpack(">dff", meta_of(got))), (b"with meta", (4242.25, 0.5, -0.25)))
         bitrate = await a.until(lambda m: m["type"] == "bitrate", timeout=4)
-        check("A's page is told a bitrate for the visit", (bitrate["channel"], 300_000 <= bitrate["bps"] <= 4_000_000), (cha, True))
+        check("A's page is told a bitrate for the visit", (bitrate["channel"], 300_000 <= bitrate["bps"] <= 6_000_000), (cha, True))
 
         print("\nreloads")
         await a.send(type="pose", channel=cha, state={"pose": {"x": 1.5, "z": 2}, "yaw0": 0})

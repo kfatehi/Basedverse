@@ -13,6 +13,7 @@ output in Docker volumes.
 ./cargo build --release        # for working on it: the binary is target/release/visit-client in the visit-target volume
 ./cargo test                   # unit tests
 tests/run-e2e.sh               # end to end: the real lobby, two visit-clients, two stand-in pages, in a container
+                               # (tests/e2e.py BIN OTHER_BIN runs B on another build: two versions together)
 tests/run-browser.sh           # visit.js in two headless Chromes: knock, walk with WASD, reload, leave
 ```
 

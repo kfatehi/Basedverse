@@ -248,6 +248,10 @@ visit.host({
   render(pose, width, height) {
     return renderVisitorView(pose, width, height);
   },
+  // Your visitor camera's vertical field of view, in degrees (three.js: the PerspectiveCamera's first
+  // argument). With it, a visitor's view turns with their mouse at once, between your frames; without
+  // it, turning waits for the round trip. Give it if `render` is a first-person camera.
+  fov: 70,
 });
 ```
 
@@ -286,14 +290,15 @@ visible canvas.
 
 ### Rules for `render`
 
-- It is called up to 30 times a second **per visitor** (pass `fps: 15` to `visit.host` to ask for less),
-  one visitor at a time. Visit captures the canvas right
-  after each call, so you may reuse one canvas for all of them.
+- It is called up to 60 times a second **per visitor** (pass `fps: 30` to `visit.host` to ask for less),
+  one visitor at a time, and as soon as a visitor's input arrives (what they did is in the next frame).
+  Visit captures the canvas right after each call, so you may reuse one canvas for all of them.
 - It must not change what your own window shows, or your own camera.
-- Keep it fast: aim for under 5 ms at 1280×720. Visit lowers a visitor's frame rate (to no less than 10)
-  when rendering for visitors takes more than a quarter of your page's time, so a slow `render` makes
-  choppy visits rather than a frozen room. If your room is heavy, render visitors with fewer effects
-  (no shadows, lower detail) than your own view.
+- Keep it fast: aim for under 5 ms at 1280×720. When rendering for visitors takes more than a quarter of
+  your page's time, Visit asks for smaller pictures first (three-quarters, then half the visitor's view),
+  then fewer frames (to no less than 10), so a slow `render` makes blurrier, then choppier visits, rather
+  than a frozen room or a laggy one. If your room is heavy, render visitors with fewer effects (no
+  shadows, lower detail) than your own view.
 - Everything it draws is seen by the visitor. If your room shows things your user would not show a guest,
   leave them out of `render`.
 
@@ -302,25 +307,37 @@ walks with WASD, stops at your walls, and looks around with the mouse.
 
 ## Step 6 — Be a visitor: show the room you are in
 
-When you are visiting, show the host's room in an element of your page; Visit draws it there and captures
-the keyboard and mouse while it is shown:
+The quickest way: the ready-made stage, once, right after `connect`:
 
 ```js
-let view = null;
-function showVisit() {
-  if (visit.visiting && !view) { stage.hidden = false; view = visit.view(stage); }       // stage: a full-window element
-  if (!visit.visiting && view) { view.release(); view = null; stage.hidden = true; }
-}
-visit.on("change", showVisit);
-showVisit();   // now too: after a reload mid-visit, you are already visiting
+Visit.stage(visit);
 ```
 
-Inside the element Visit creates a canvas that fills it. Click it to look around (it takes the pointer);
-Esc gives the pointer back; WASD/arrows walk, Shift runs. While the host's page is reloading, the view
-holds its last frame and says so. Give your user a way to leave: a button calling `visit.leave()`.
+While your user visits, the room they are in fills the window, with how the visit is going (the link's
+path and round trip, input to screen, frames a second), **Back to my room** and **Leave**. Back to my room
+shrinks it to the bottom-right corner, your own room full-window behind it; a click on the corner brings
+it back. Full-window it takes WASD, Shift and the mouse (click it to look around; Esc gives the pointer
+back); in the corner it takes nothing. It goes away when the visit ends, and comes back by itself after a
+reload mid-visit. It sits at `z-index: 5`; `.visit-stage` is yours to restyle.
 
-**Check:** with a host to visit (step 8), its room fills your element, and WASD and the mouse move you
-in it.
+**If your room has keys of its own** (WASD for your user's avatar, say), they wait while
+`visit.viewFocused` is true, and work while it is false (not visiting, or the visit in the corner):
+
+```js
+addEventListener("keydown", e => {
+  if (window.visit && visit.viewFocused) return;   // the room your user is visiting has the keys
+  // ... your own keys
+});
+```
+
+Or your own view: `const view = visit.view(element)` draws the host's room in an element of yours and
+captures the keyboard and mouse; `view.setActive(false)` stops it capturing (a picture-in-picture, say),
+`view.release()` takes it away. Show it when `visit.visiting` becomes true (and at once after a reload, if
+already visiting), give your user a way to leave (`visit.leave()`), and show `visit.stats` if you can:
+it is what to look at when a visit feels slow.
+
+**Check:** with a host to visit (step 8), its room fills the window; WASD and the mouse move you in it,
+and turning is instant; Back to my room shrinks it to the corner and gives your room its keys back.
 
 ## Step 7 — The lobby: knocking and letting in
 
@@ -388,8 +405,10 @@ Then, in order:
 - [ ] `render` draws your room from the pose without touching your own view, fast enough for 30 fps per
       visitor, and leaves out anything your user would not show a guest.
 - [ ] Your hooks are registered on every page load.
-- [ ] Visiting: the host's room fills your element; WASD, Shift and the mouse work; Esc frees the pointer;
-      there is a way to leave.
+- [ ] Visiting: the host's room fills the window (`Visit.stage`, or your own view); WASD, Shift and the
+      mouse work; Esc frees the pointer; there is a way to leave, and back to your room; your own keys wait
+      while `visit.viewFocused`.
+- [ ] `fov` is given in `visit.host` (for a first-person `render`), so turning is instant.
 - [ ] The lobby: offices, knocks, answers, visitors (kick), your visit (leave), status and max visitors
       all work, with the knock rules of step 7; names and messages are escaped.
 - [ ] Your user can go offline and back (the panel, or `leaveLobby()` / `joinLobby()`), and stays offline
@@ -412,6 +431,7 @@ Then, in order:
 | a visit ends `link_failed` | the two machines could not connect, even through the relay; check the relay is up |
 | the visitor sees a black or frozen view | `render` returned a canvas that was not drawn (cleared, or a different canvas), or threw (see the console) |
 | visitors walk through walls | your `blocked` does not cover them, or your `move` ignores it |
+| a visit feels laggy | read the stage's numbers (`visit.stats`): `relay` means the two machines could not reach each other directly (a relay is slower and rate-limited); a high link round trip is the network; input to screen far above the round trip is the host: its `render` is slow (fewer effects for visitors), or its machine is busy. Turning should be instant either way: if it is not, the host gave no `fov` |
 | visitors' view slows to a crawl while your tab is in the background | your page's Content-Security-Policy forbids `blob:` workers, so the library's timer is the page's own (slowed in the background): allow `worker-src blob:` |
 
 ## Upgrading
