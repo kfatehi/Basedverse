@@ -9,6 +9,19 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.9.1 — 2026-10-26
+
+**A visitor's click in a room with sprites runs its interaction.** Following a click into the room (SPEC 8.3),
+visit.js met a sprite (a name tag, a label, a burst) without the camera three.js needs for one, and the click's
+interaction never ran. It now looks from the visitor's eyes, where it clicked. The test room has a sprite, and its
+own spawn puts one who steps in at the nearest free spot to where they stepped (a desk may be there), as a real
+room does.
+
+### What an integration does
+
+1. Get visit-client 0.9.1 (`bin/setup` again, download; or this release). If your room follows a visitor's point
+   into its scene itself (`visit.on("point")`) and has sprites, give its raycaster a camera (`ray.camera`).
+
 ## v0.9.0 — 2026-10-26
 
 **A map of your world, avatars, interactions by type, voice by who is near, and phones.**

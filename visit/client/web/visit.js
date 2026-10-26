@@ -13,7 +13,7 @@
 // visitor's page walks at once and the host corrects it), and a host renders and encodes nothing for anyone.
 "use strict";
 (function () {
-  const VERSION = "0.9.0", PROTO = "basedverse-visit-local/2";
+  const VERSION = "0.9.1", PROTO = "basedverse-visit-local/2";
   const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, LOOK = 0.0025;
   const POINT_MS = 200, AIM_MS = 125;   // a visitor's points, at most one this often; what it aims at, looked for this often
   // What the host hears many times a second: none of it changes what the page shows, so none fires "change".
@@ -1413,8 +1413,13 @@
       if (!hk) return;
       const T = hk.scene.three, ray = this._ray || (this._ray = new T.Raycaster());
       ray.set(new T.Vector3(...from), new T.Vector3(...dir));
+      // A camera at the visitor's eyes, looking where it clicked: three.js meets a sprite (a label, a burst) only with one.
+      const cam = ray.camera = this._rayCam || (this._rayCam = new T.PerspectiveCamera(70, 1, 0.01, 1000));
+      cam.position.set(...from); cam.lookAt(from[0] + dir[0], from[1] + dir[1], from[2] + dir[2]); cam.updateMatrixWorld();
       const body = o => { for (; o; o = o.parent) if (!o.visible || (o.userData && o.userData.visitor)) return true; return false; };
-      const hit = ray.intersectObject(hk.scene.root, true).find(x => !body(x.object));
+      let hits;
+      try { hits = ray.intersectObject(hk.scene.root, true); } catch (e) { return console.warn("visit: a visitor's click could not be followed into the scene", e); }
+      const hit = hits.find(x => !body(x.object));
       if (!hit) return;
       let object = hit.object, type = null;
       for (; object; object = object.parent) if (object.userData && typeof object.userData.visitPoint === "string") { type = object.userData.visitPoint; break; }

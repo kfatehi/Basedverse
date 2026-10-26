@@ -26,6 +26,8 @@ const OPTS = new URLSearchParams(location.search), MOVERS = Math.min(2000, Numbe
 // In a world, a doorway 1.4 wide in the middle of each wall, and nothing in the way outside the room.
 const DOOR = 0.7, door = (along, mid) => WORLD && Math.abs(along - mid) < DOOR - 0.25;
 const inRoom = (x, z) => x > -0.3 && x < ROOM.w + 0.3 && z > -0.3 && z < ROOM.d + 0.3;
+// The nearest spot to x, z (within 3 m) that nothing blocks; null if none.
+const freeNear = (x, z) => { for (let r = 0; r <= 3; r += 0.25) for (let k = 0; k < (r ? 16 : 1); k++) { const a = k * Math.PI / 8, p = [x + Math.cos(a) * r, z + Math.sin(a) * r]; if (!blocked(...p)) return p; } return null; };
 const blocked = (x, z) => (WORLD && !inRoom(x, z)) ? false
   : ((x < 0.3 && !door(z, ROOM.d / 2)) || (x > ROOM.w - 0.3 && !door(z, ROOM.d / 2)) || (z < 0.3 && !door(x, ROOM.w / 2)) || (z > ROOM.d - 0.3 && !door(x, ROOM.w / 2))
   || (x > ROOM.desk.x - 0.3 && x < ROOM.desk.x + ROOM.desk.w + 0.3 && z > ROOM.desk.z - 0.3 && z < ROOM.desk.z + ROOM.desk.d + 0.3));
@@ -65,6 +67,8 @@ async function build(v) {
   const signCanvas = document.createElement("canvas"); signCanvas.width = 256; signCanvas.height = 64;
   const signTex = new THREE.CanvasTexture(signCanvas);
   const sign = new THREE.Mesh(new THREE.PlaneGeometry(2, 0.5), new THREE.MeshBasicMaterial({ map: signTex }));
+  // A sprite (as a name tag is): a click followed into the scene meets it too (a camera is needed for that).
+  const tagSprite = new THREE.Sprite(new THREE.SpriteMaterial({ color: 0xe3b341 })); tagSprite.position.set(1, 2.2, 1); tagSprite.name = "tag"; scene.add(tagSprite);
   sign.position.set(ROOM.w / 2, 1.8, 0.06); scene.add(sign);
   sign.userData = { owner: { session: "s-1234" }, part: spinner };
   const write = text => { const x = signCanvas.getContext("2d"); x.fillStyle = "#0d1117"; x.fillRect(0, 0, 256, 64); x.fillStyle = "#e6edf3"; x.font = "28px sans-serif"; x.fillText(text, 12, 42); signTex.needsUpdate = true; };
@@ -136,8 +140,8 @@ async function build(v) {
   const v = window.v = await Visit.connect({ port, token, sim: { name: "test-room", version: "1" } });
   const t = await build(v);
   v.host({
-    // Where a visitor appears; in a world, where it stepped in (`at`), if that is not in a wall.
-    spawn: (who, { at } = {}) => { const p = at && !blocked(at.x, at.z) ? { x: at.x, y: 1.6, z: at.z, yaw: at.yaw, pitch: 0 } : { x: 2, y: 1.6, z: 6, yaw: 0, pitch: 0 }; (window.spawns = window.spawns || []).push({ who: who.name, at: at || null, p, t: Math.round(performance.now()) }); return p; },
+    // Where a visitor appears; in a world, where it stepped in (`at`), or the nearest free spot to it (a desk may be there).
+    spawn: (who, { at } = {}) => { const near = at && freeNear(at.x, at.z), p = near ? { x: near[0], y: 1.6, z: near[1], yaw: at.yaw, pitch: 0 } : { x: 2, y: 1.6, z: 6, yaw: 0, pitch: 0 }; (window.spawns = window.spawns || []).push({ who: who.name, at: at || null, p, t: Math.round(performance.now()) }); return p; },
     // room.lift (the test sets it): a lift under every visitor, that far up from where they came in
     move: (pose, input, dt, who) => { window.movedFor = who && who.id; const p = Visit.walk(pose, input, dt, { speed: 2.5, blocked }); return window.room.lift != null ? Object.assign({}, p, { y: 1.6 + window.room.lift }) : p; },
     fov: 70,
@@ -159,7 +163,7 @@ async function build(v) {
   v.avatar(av);
   v.phone(true);   // a phone in this room (SPEC 8.8): it takes calls, and v.call() makes them
   // A visitor pointing (SPEC 8.3): kept, with what it hit first, for the test to read.
-  const ray = new t.THREE.Raycaster();
+  const ray = new t.THREE.Raycaster(), rayCam = new t.THREE.PerspectiveCamera();
   window.points = [];
   // Interactions (SPEC 8.3): spinning the cube is cosmetic; nothing else is taken (the vault's type is not here).
   window.spins = [];
@@ -168,6 +172,7 @@ async function build(v) {
   v.interactions({ spin: { cosmetic: true, label: "spin it", run: e => { e.object.rotation.y += 1; window.spins.push({ who: e.visitor.name, type: e.type }); } } });
   v.on("point", e => {
     ray.set(new t.THREE.Vector3(...e.from), new t.THREE.Vector3(...e.dir));
+    rayCam.position.set(...e.from); rayCam.updateMatrixWorld(); ray.camera = rayCam;   // a sprite is met only with a camera
     const hit = ray.intersectObjects(t.scene.children, true).find(h => !h.object.userData.visitor);
     window.points.push({ ...e, hit: hit ? hit.object.name : null });
   });
