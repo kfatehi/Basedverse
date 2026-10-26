@@ -839,7 +839,6 @@
     _sceneApply(w, e) {
       const s = w.scene;
       if (!s) return this._sceneResync(w);   // an edit with no scene to apply it to: start again
-      const L = s.loader;
       if (isObj(e.res)) this._sceneResources(s, e.res);
       for (const idx of Array.isArray(e.remove) ? e.remove : []) {
         const o = idx ? s.byIdx.get(idx) : null;
@@ -850,8 +849,13 @@
       for (const a of Array.isArray(e.add) ? e.add : []) {
         if (!isObj(a)) continue;
         try {
-          const o = this._sceneParse(s, cleanScene(a.json, s.budget));
-          if (!o) { console.warn("visit: an object added to the scene made of what this page does not have: the whole scene again"); this._sceneResync(w); continue; }
+          const budget = Object.assign({}, s.budget), o = this._sceneParse(s, cleanScene(a.json, s.budget));
+          if (!o) {   // what it would have counted is not in the scene
+            Object.assign(s.budget, budget);
+            console.warn("visit: an object added to the scene made of what this page does not have: the whole scene again");
+            this._sceneResync(w);
+            continue;
+          }
           this._sceneAdopt(s, o);
           const byUuid = new Map();
           o.traverse(c => byUuid.set(c.uuid, c));
