@@ -1734,11 +1734,20 @@ fn revision(r: &str) -> bool {
 fn clamp_input(m: &Value) -> Value {
     let step = |k: &str| m.get(k).and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0, |x| x.round().clamp(-1.0, 1.0) as i64);
     let angle = |k: &str, lim: f64| m.get(k).and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0.0, |x| x.clamp(-lim, lim));
+    // A visitor's actions (8.2), as counts: one risen since the last input is an action (a lost datagram loses none).
+    let count = |k: &str| m.get(k).and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0, |x| x.floor().clamp(0.0, u32::MAX as f64) as u64);
+    let emote = m.get("emote").and_then(Value::as_str).filter(|e| emote_ok(e)).unwrap_or("");
     json!({
         "forward": step("forward"), "strafe": step("strafe"), "run": m.get("run").and_then(Value::as_bool).unwrap_or(false),
         "yaw": angle("yaw", 1e6), "pitch": angle("pitch", 1.4),
         "t": m.get("t").and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0.0, |x| x.clamp(0.0, 1e12)),
+        "jump": count("jump"), "emote": emote, "emotes": count("emotes"),
     })
+}
+
+/// An emote's id (8.2): 1 to 40 letters, digits, `_`, `.` or `-`; what it does is the room's to say.
+fn emote_ok(e: &str) -> bool {
+    (1..=40).contains(&e.len()) && e.bytes().all(|b| b.is_ascii_alphanumeric() || b"_.-".contains(&b))
 }
 
 #[cfg(test)]
@@ -1787,9 +1796,20 @@ mod tests {
     #[test]
     fn inputs_are_clamped() {
         let i = clamp_input(&json!({ "forward": 5, "strafe": -0.6, "run": "yes", "yaw": 3.0, "pitch": -9 }));
-        assert_eq!(i, json!({ "forward": 1, "strafe": -1, "run": false, "yaw": 3.0, "pitch": -1.4, "t": 0.0 }));
+        assert_eq!(i, json!({ "forward": 1, "strafe": -1, "run": false, "yaw": 3.0, "pitch": -1.4, "t": 0.0, "jump": 0, "emote": "", "emotes": 0 }));
         let j = clamp_input(&json!({ "t": 1234.5 }));
-        assert_eq!(j, json!({ "forward": 0, "strafe": 0, "run": false, "yaw": 0.0, "pitch": 0.0, "t": 1234.5 }));
+        assert_eq!(j, json!({ "forward": 0, "strafe": 0, "run": false, "yaw": 0.0, "pitch": 0.0, "t": 1234.5, "jump": 0, "emote": "", "emotes": 0 }));
+    }
+
+    #[test]
+    fn actions_are_counts_and_emotes_are_ids() {
+        let a = clamp_input(&json!({ "jump": 3.7, "emote": "wave", "emotes": 2 }));
+        assert_eq!((a["jump"].clone(), a["emote"].clone(), a["emotes"].clone()), (json!(3), json!("wave"), json!(2)));
+        let b = clamp_input(&json!({ "jump": -4, "emote": "<script>", "emotes": 1e20 }));
+        assert_eq!((b["jump"].clone(), b["emote"].clone(), b["emotes"].clone()), (json!(0), json!(""), json!(u32::MAX)));
+        assert!(emote_ok("v.g.h") && emote_ok("hello_1") && emote_ok(&"a".repeat(40)));
+        assert!(!emote_ok("") && !emote_ok(&"a".repeat(41)) && !emote_ok("say hi") && !emote_ok("é"));
+        assert_eq!(clamp_input(&json!({ "emote": 7 }))["emote"], json!(""));
     }
 
     #[test]

@@ -199,6 +199,13 @@ async def main():
         i = await a.expect("input")
         check("B's input reaches A's page, clamped", (i["channel"], i["forward"], i["strafe"], i["run"], i["yaw"], i["pitch"]), (cha, 1, -1, True, 0.5, 1.4))
         check("with B's time on it, for A's deltas to carry back", i["t"], 12345.5)
+        check("no actions yet: counts at 0, no emote", (i["jump"], i["emote"], i["emotes"]), (0, "", 0))
+        await b.send(type="input", forward=0, strafe=0, run=False, yaw=0.5, pitch=0, t=12346, jump=2.9, emote="wave", emotes=1)
+        i = await a.expect("input")
+        check("B's actions reach A's page as counts (8.2)", (i["jump"], i["emote"], i["emotes"]), (2, "wave", 1))
+        await b.send(type="input", forward=0, strafe=0, run=False, yaw=0.5, pitch=0, t=12347, jump=-1, emote="<b>hi</b>", emotes=1e30)
+        i = await a.expect("input")
+        check("and clamped: a count never below 0 nor past u32, an emote only an id", (i["jump"], i["emote"], i["emotes"]), (0, "", 4294967295))
         await a.drain()
         for _ in range(5):
             await b.send(type="keyframe", channel=chb)

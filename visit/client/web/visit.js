@@ -533,6 +533,9 @@
       this._phoneOn = new Set();  // channels whose other office's room has a phone
       this._phone = false;        // this room has one
       this._mic = null;
+      this._tx = null;            // what your voice is sent from: one encoder, fed by the microphone and a voice source
+      this._source = null;        // voiceSource(): a voice besides the microphone's
+      this._acts = { jump: 0, emote: "", emotes: 0 };   // your actions as counts (8.2): carried in each input
       this._home = null;          // where your user is at home (your world's frame, or listener()), in your units
       this.visiting = null;    // the room in the stage: { id, host, paused, link, inside } (a link's: inside once you go there)
       this.visitors = [];      // { id, visitor, pose }
@@ -608,7 +611,7 @@
       });
     }
     _send(m) { if (this._ws && this._ws.readyState === 1) this._ws.send(JSON.stringify(m)); }
-    close() { this._closed = true; this._loop.stop(); this._micStop(); for (const k of [...this._calls.keys()]) this.hangUp(k); this._dropAll(); if (this._ws) this._ws.close(); }
+    close() { this._closed = true; this._loop.stop(); this._micStop(); this._sourceOff(); for (const k of [...this._calls.keys()]) this.hangUp(k); this._dropAll(); if (this._ws) this._ws.close(); }
 
     _ready(m) {
       this.state = m.away ? "away" : m.online ? "online" : "offline";
@@ -836,7 +839,8 @@
         const clip = re => (o.animations || []).find(c => re.test(c.name));
         const mixer = new T.AnimationMixer(o), idle = clip(/idle/i), walk = clip(/walk/i);
         this._avatarDrop(h);
-        h.avatar = { object: body, mixer, idle: idle && mixer.clipAction(idle), walk: walk && mixer.clipAction(walk), playing: null, at: null };
+        h.avatar = { object: body, mixer, idle: idle && mixer.clipAction(idle), walk: walk && mixer.clipAction(walk), playing: null, at: null,
+          clips: o.animations || [], once: null, LoopOnce: T.LoopOnce };
         this._visitorsList();
         this._changed();
       } catch (e) { console.warn(`visit: ${h.visitor.name}'s avatar cannot be read`, e); }
@@ -850,11 +854,27 @@
       a.object.traverse(c => { if (c.geometry) c.geometry.dispose(); for (const mt of list(c.material)) { for (const k of MAPS) if (mt[k] && mt[k].isTexture) mt[k].dispose(); mt.dispose(); } });
     }
     // Its clips as it moves: walk while it goes (faster than a slow amble), else idle; eased between.
+    // An action on a visitor shown as its own avatar: its clip named as the emote is (or "jump"), any case, played
+    // once, then idle or walk again (_avatarStep). One it does not have: nothing (the page has "act" for its own look).
+    _avatarAct(h, act) {
+      const a = h.avatar;
+      if (!a || !h.visitor.key || this.avatarUse(h.visitor.key) !== "theirs") return;
+      const name = (act.kind === "jump" ? "jump" : act.emote).toLowerCase(), clip = a.clips.find(c => String(c.name).toLowerCase() === name);
+      // its idle or walk is never played once: that action is the loop _avatarStep keeps
+      if (!clip || (a.idle && a.idle.getClip() === clip) || (a.walk && a.walk.getClip() === clip)) return;
+      const once = a.mixer.clipAction(clip);
+      once.setLoop(a.LoopOnce, 1); once.clampWhenFinished = false;
+      if (a.playing && a.playing !== once) a.playing.fadeOut(0.15);
+      once.reset().fadeIn(0.15).play();
+      a.playing = once; a.once = { action: once, left: clip.duration };
+    }
     _avatarStep(h, dt) {
       const a = h.avatar, p = h.pose;
       if (!a || !p) return;
       const moved = a.at ? Math.hypot(p.x - a.at.x, p.z - a.at.z) / Math.max(dt, 1e-3) : 0;
       a.at = { x: p.x, z: p.z };
+      if (a.once && (a.once.left -= dt) > 0.15) return a.mixer.update(dt);   // an action's clip plays out first
+      a.once = null;
       const want = moved > 0.3 / this._unit() ? a.walk || a.idle : a.idle || null;
       if (want !== a.playing) {
         if (a.playing) a.playing.fadeOut(0.2);
@@ -984,6 +1004,7 @@
     async setMic(on) {
       try { localStorage.setItem("visit:mic", on ? "on" : "off"); } catch (e) { /* not kept */ }
       this.mic = !!on;
+      this._voiceMix();
       if (on) await this._micStart(); else this._micMaybeStop();
       this._changed();
     }
@@ -1001,30 +1022,105 @@
       }
       return ctx;
     }
-    // The microphone runs while it is on, or a call is: what it hears goes where _voiceTo says (nobody: nothing).
-    async _micStart() {
-      if (this._mic || this._micStarting) return this._micStarting;
+    // A voice besides your microphone's (8.7): a MediaStream with an audio track (a spoken line, a synthesized
+    // voice), sent as yours is, to those near you and on your calls, with the microphone on or off; null takes it off.
+    // One at a time (a new one replaces it), and off by itself when its track ends. Its tracks stay yours: never stopped.
+    async voiceSource(stream) {
+      if (stream != null && !(isObj(stream) && typeof stream.getAudioTracks === "function" && stream.getAudioTracks().length)) {
+        throw new Error("visit.voiceSource: a MediaStream with an audio track (or null)");
+      }
+      const gen = this._sourceGen = (this._sourceGen || 0) + 1;
+      this._sourceStop();
+      if (stream == null) return this._changed();
+      // while it starts, nothing stops the encoder under it (_txMaybeStop waits for _sourceStarting)
+      this._sourceStarting = (this._sourceStarting || 0) + 1;
+      let tx;
+      try { tx = await this._txStart(); } finally { this._sourceStarting--; }
+      if (gen !== this._sourceGen || this._closed) return this._txMaybeStop();   // replaced, taken off or closed while it started
+      const ctx = this._ctx, src = ctx.createMediaStreamSource(stream), gain = ctx.createGain(), track = stream.getAudioTracks()[0];
+      src.connect(gain); gain.connect(tx.node);
+      const ended = () => { if (this._source && this._source.stream === stream) { this._sourceOff(); this._changed(); } };
+      track.addEventListener("ended", ended);
+      this._source = { stream, src, gain, track, ended };
+      this._voiceMix();
+      this._changed();
+    }
+    _sourceOff() { this._sourceGen = (this._sourceGen || 0) + 1; this._sourceStop(); }
+    _sourceStop() {
+      const s = this._source;
+      if (!s) return;
+      this._source = null;
+      s.track.removeEventListener("ended", s.ended);
+      try { s.src.disconnect(); s.gain.disconnect(); } catch (e) { /* gone */ }
+      this._voiceMix();
+      this._txMaybeStop();
+    }
+    // How the microphone and a voice source go into your one voice, each by a gain of its own. With your microphone
+    // off and a voice source on, the microphone (running for a call only) is muted: your voice then goes to the room
+    // for the source, and a microphone you have off is never in it. Both in: each a little down, for headroom.
+    _voiceMix() {
+      const m = this._mic, s = this._source, micIn = !!m && (this.mic || !s);
+      if (m) m.gain.gain.value = micIn ? (s ? 0.7 : 1) : 0;
+      if (s) s.gain.gain.value = micIn ? 0.7 : 1;
+    }
+    // What your voice is sent from: one Opus encoder, fed by the microphone, a voice source, or both, summed (mono:
+    // a stereo source is mixed down); it runs while either does. What it hears goes where _voiceTo says (nobody:
+    // nothing encoded, nothing sent).
+    async _txStart() {
+      if (this._tx) return this._tx;
+      if (this._txStarting) return this._txStarting;
       if (typeof AudioEncoder === "undefined" || typeof AudioDecoder === "undefined") throw new Error("visit: this browser cannot encode voice (WebCodecs)");
-      this._micStarting = (async () => {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+      this._txStarting = (async () => {
         const ctx = this._audio();
         if (!this._micModule) {
           this._micModule = URL.createObjectURL(new Blob([MIC_WORKLET], { type: "text/javascript" }));
           await ctx.audioWorklet.addModule(this._micModule);
         }
-        const src = ctx.createMediaStreamSource(stream), node = new AudioWorkletNode(ctx, "visit-mic"), hush = ctx.createGain();
-        hush.gain.value = 0; src.connect(node); node.connect(hush); hush.connect(ctx.destination);   // pulled by the graph, heard by nobody here
+        const node = new AudioWorkletNode(ctx, "visit-mic", { channelCount: 1, channelCountMode: "explicit", channelInterpretation: "speakers" }), hush = ctx.createGain();
+        hush.gain.value = 0; node.connect(hush); hush.connect(ctx.destination);   // pulled by the graph, heard by nobody here
         const enc = new AudioEncoder({ output: c => this._voiceOut(c), error: e => console.warn("visit: the voice encoder failed", e) });
         enc.configure({ codec: "opus", sampleRate: VOICE_RATE, numberOfChannels: 1, bitrate: VOICE_BITRATE });
-        const mic = this._mic = { stream, src, node, hush, enc, t: 0, level: 0 };
+        const tx = this._tx = { node, hush, enc, t: 0, level: 0 };
         node.port.onmessage = e => {
           const pcm = e.data;
-          mic.level = rms(pcm);
+          tx.level = rms(pcm);
           if (!this._voiceTo || enc.state !== "configured") return;   // nobody to hear it: nothing encoded, nothing sent
-          enc.encode(new AudioData({ format: "f32-planar", sampleRate: VOICE_RATE, numberOfFrames: pcm.length, numberOfChannels: 1, timestamp: mic.t, data: pcm }));
-          mic.t += pcm.length * 1e6 / VOICE_RATE;
+          enc.encode(new AudioData({ format: "f32-planar", sampleRate: VOICE_RATE, numberOfFrames: pcm.length, numberOfChannels: 1, timestamp: tx.t, data: pcm }));
+          tx.t += pcm.length * 1e6 / VOICE_RATE;
         };
-      })().finally(() => { this._micStarting = null; });
+        return tx;
+      })().finally(() => { this._txStarting = null; });
+      return this._txStarting;
+    }
+    _txMaybeStop() {
+      const t = this._tx;
+      if (!t || this._mic || this._source || this._micStarting || this._sourceStarting > 0) return;
+      this._tx = null;
+      t.node.port.onmessage = null;
+      try { t.node.disconnect(); t.hush.disconnect(); } catch (e) { /* gone */ }
+      if (t.enc.state !== "closed") t.enc.close();
+    }
+    // The microphone runs while it is on, or a call is: one of your voice's inputs (_txStart). (WebCodecs is checked
+    // first here too: a browser that cannot encode is never asked for the microphone.) A start that fails after the
+    // microphone was given, or that this client was closed during, lets the microphone go again.
+    async _micStart() {
+      if (this._mic || this._micStarting) return this._micStarting;
+      if (typeof AudioEncoder === "undefined" || typeof AudioDecoder === "undefined") throw new Error("visit: this browser cannot encode voice (WebCodecs)");
+      this._micStarting = (async () => {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+        try {
+          if (this._closed) throw new Error("visit: closed");
+          const tx = await this._txStart();
+          if (this._closed) throw new Error("visit: closed");
+          const ctx = this._ctx, src = ctx.createMediaStreamSource(stream), gain = ctx.createGain();
+          src.connect(gain); gain.connect(tx.node);
+          this._mic = { stream, src, gain };
+          this._voiceMix();
+        } catch (e) {
+          for (const t of stream.getTracks()) t.stop();
+          if (!this._closed) throw e;
+        }
+      })().finally(() => { this._micStarting = null; this._txMaybeStop(); });
       return this._micStarting;
     }
     _micMaybeStop() { if (!this.mic && ![...this._calls.values()].some(c => c.state === "on")) this._micStop(); }
@@ -1032,10 +1128,10 @@
       const m = this._mic;
       if (!m) return;
       this._mic = null;
-      m.node.port.onmessage = null;
       for (const t of m.stream.getTracks()) t.stop();
-      try { m.src.disconnect(); m.node.disconnect(); m.hush.disconnect(); } catch (e) { /* gone */ }
-      if (m.enc.state !== "closed") m.enc.close();
+      try { m.src.disconnect(); m.gain.disconnect(); } catch (e) { /* gone */ }
+      this._voiceMix();
+      this._txMaybeStop();
     }
     // A packet of your voice, once, to your visit-client: it sends it to those who hear it (where _voiceTo allows).
     _voiceOut(chunk) {
@@ -1102,8 +1198,9 @@
         ? told.map(n => { const key = r.kind === "home" ? n.key : n.phone ? "relay:phone" : n.id ? "relay:" + n.id : n.key;
             return { key, name: n.name, distance: n.distance, speaking: n.phone ? [...this._voices.keys()].some(k => k.startsWith("relay:phone") && speaking(k)) : speaking(key) }; })
         : [...near.values()].filter(p => p.distance <= range).map(p => ({ key: p.key, name: p.name, distance: Math.round(p.distance * 10) / 10, speaking: speaking(p.key) }));
-      const room = this.mic && !!r.ears && (this.voices.length > 0 || (r.kind !== "home" && !told)), calls = [...this._calls.values()].some(c => c.state === "on");
+      const room = (this.mic || !!this._source) && !!r.ears && (this.voices.length > 0 || (r.kind !== "home" && !told)), calls = [...this._calls.values()].some(c => c.state === "on");
       this._voiceTo = (room ? VOICE_ROOM : 0) | (calls ? VOICE_CALLS : 0);
+      this._voiceMix();
       for (const c of this._calls.values()) c.speaking = speaking(c.key);
       const ku = this._unit(), pa = this._phoneAt, phone = pa && r.ears && r.kind === "home" && { x: pa.x * ku, y: (pa.y || 0) * ku, z: pa.z * ku };   // your phone, in your room
       const ctx = this._ctx;
@@ -1354,6 +1451,17 @@
       if (next) this._toCorner(next);
     }
 
+    // ---------- actions (8.2) ----------
+    // In the room you are visiting (a visit, or a plot you walked onto): jump(), or emote(id), an emote by its id
+    // (1 to 40 letters, digits, _ . -; what each does is that room's to say). Carried in your input as counts, so a
+    // datagram lost on the way loses none; the room hears each once. Space jumps in the view, as W A S D walk.
+    jump() { this._acts.jump++; this._sendInput(performance.now(), true); }
+    emote(id) {
+      if (!/^[\w.-]{1,40}$/.test(String(id))) throw new Error(`visit.emote: "${id}" is not an emote's id (letters, digits, _ . -, at most 40)`);
+      this._acts.emote = String(id); this._acts.emotes++;
+      this._sendInput(performance.now(), true);
+    }
+
     // ---------- hosting ----------
     // `scene`: { root, three, renderer, near, far }, the room's three.js scene (or the part of it to share), the
     // THREE namespace it was made with, its renderer and its visitors' camera range. `fov`: that camera's vertical
@@ -1425,11 +1533,31 @@
     _hostMessage(m) {
       const h = this._hosted.get(m.channel);
       if (!h) return;
-      if (m.type === "input") { h.input = m; h.inputAt = performance.now(); this._step(h, h.inputAt); }   // at once: the next delta has it
+      if (m.type === "input") {
+        const was = h.input;
+        h.input = m; h.inputAt = performance.now();
+        if (was) this._acted(h, was, m);   // its first input sets where its counts start
+        this._step(h, h.inputAt);   // at once: the next delta has it
+      }
       else if (m.type === "keyframe") h.keyNext = true;   // a key delta: where everything that moves is
       else if (m.type === "scene_resync") h.sceneSent = false;
       else if (m.type === "shared_adds") h.sharedAdds = true;   // its page reads an add naming what it has by uuid (8.3)
       else if (m.type === "point") this._point(h, m);
+    }
+
+    // A visitor's actions (8.2): a count risen since its last input is one (several since: one, the newest emote).
+    // The next move() has it as input.act ({ kind: "jump" } or { kind: "emote", emote }), once; the page hears "act"
+    // ({ id, visitor, kind, emote }) to show it on that visitor's body; one shown as its own avatar plays its clip.
+    _acted(h, was, m) {
+      const n = x => Number(x) || 0, acts = [];
+      if (n(m.jump) > n(was.jump)) acts.push({ kind: "jump" });
+      if (n(m.emotes) > n(was.emotes) && typeof m.emote === "string" && m.emote) acts.push({ kind: "emote", emote: m.emote });
+      for (const a of acts) {
+        (h.acts || (h.acts = [])).push(a);
+        if (h.acts.length > 4) h.acts.splice(0, h.acts.length - 4);   // a visitor acting faster than it moves: the newest few
+        this._avatarAct(h, a);
+        this._emit("act", Object.assign({ id: h.id, visitor: h.visitor }, a));
+      }
     }
 
     // A visitor pointed: clicked at the middle of its view (SPEC 8.3). The page hears "point" with where from
@@ -1993,7 +2121,8 @@
       const dt = Math.min(0.25, (now - (h.movedAt || now)) / 1000);
       h.movedAt = now;
       const fresh = h.input && now - h.inputAt < STALE_MS;
-      const input = fresh ? h.input : { forward: 0, strafe: 0, run: false, yaw: h.input ? h.input.yaw : 0, pitch: h.input ? h.input.pitch : 0 };
+      let input = fresh ? h.input : { forward: 0, strafe: 0, run: false, yaw: h.input ? h.input.yaw : 0, pitch: h.input ? h.input.pitch : 0 };
+      if (h.acts && h.acts.length) input = Object.assign({}, input, { act: h.acts.shift() });   // an action: this move's, once
       try {
         const turned = Object.assign({}, h.pose, { yaw: h.yaw0 + (input.yaw || 0), pitch: input.pitch || 0 });
         h.pose = Object.assign({}, this._hooks.move(turned, input, dt, { id: h.id, visitor: h.visitor }) || turned);
@@ -2042,6 +2171,7 @@
       const KEYS = ["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "ShiftLeft", "ShiftRight"];
       const changed = () => { view.changedAt = view.changedAt || performance.now(); this._sendInput(performance.now(), true); };   // at once (at most every 8 ms): no waiting for a tick
       const down = e => {
+        if (e.code === "Space" && this._inRoom() && view.active && !ignore(e)) { e.preventDefault(); if (!e.repeat) this.jump(); return; }   // a jump (8.2)
         if (!this._inRoom() || !view.active || ignore(e) || !KEYS.includes(e.code)) return;
         e.preventDefault();
         if (!view.keys.has(e.code)) { view.keys.add(e.code); changed(); }
@@ -2172,7 +2302,7 @@
       const k = c => v.keys.has(c);
       this._send({ type: "input", forward: (k("KeyW") || k("ArrowUp") ? 1 : 0) - (k("KeyS") || k("ArrowDown") ? 1 : 0),
         strafe: (k("KeyD") || k("ArrowRight") ? 1 : 0) - (k("KeyA") || k("ArrowLeft") ? 1 : 0),
-        run: k("ShiftLeft") || k("ShiftRight"), yaw: v.yaw, pitch: v.pitch, t: now });
+        run: k("ShiftLeft") || k("ShiftRight"), yaw: v.yaw, pitch: v.pitch, t: now, ...this._acts });
     }
 
     // A delta of the scene of the room visited, or of a plot watched (SPEC 5.4).
@@ -2545,10 +2675,10 @@
     // The input while in a plot, in its terms (its look absolute: it came from a world): on every change (at most
     // every 8 ms) and every 33 ms regardless.
     _input(w, inp, yaw, pitch, now) {
-      const sig = [inp.forward, inp.strafe, inp.run, yaw.toFixed(3), pitch.toFixed(3)].join();
+      const a = this.v._acts, sig = [inp.forward, inp.strafe, inp.run, yaw.toFixed(3), pitch.toFixed(3), a.jump, a.emotes].join();
       if (now - this.sent.at < (sig !== this.sent.sig ? INPUT_MIN_MS : INPUT_MS)) return;
       this.sent = { at: now, sig };
-      this.v._send({ type: "input", forward: inp.forward, strafe: inp.strafe, run: inp.run, yaw, pitch: Math.max(-1.4, Math.min(1.4, pitch)), t: now });
+      this.v._send({ type: "input", forward: inp.forward, strafe: inp.strafe, run: inp.run, yaw, pitch: Math.max(-1.4, Math.min(1.4, pitch)), t: now, ...a });
     }
 
     // While in a plot: point where you look (SPEC 8.3). Home: out of the plot you are in.

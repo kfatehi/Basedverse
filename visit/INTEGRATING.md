@@ -249,6 +249,7 @@ visit.host({
   },
   // Where the visitor may go. Visit has already set pose.yaw and pose.pitch from where it is looking;
   // you move it with input.forward / input.strafe / input.run, against your own walls and furniture.
+  // input.act, once, when the visitor acts: { kind: "jump" } or { kind: "emote", emote } (below).
   // The fourth argument says whose pose it is ({ id: the visit's, visitor }), for a room that keeps
   // something of its own per visitor (one sat down, say, stays put).
   move(pose, input, dt, { id, visitor }) {
@@ -303,9 +304,17 @@ visit.host({
 
   (Every point also reaches you raw, `visit.on("point", e => ...)`, with `e.from` and `e.dir`: for what is not
   a click on a thing, and for older visitors' marks, `userData.visitPoint = true`.)
+- **A visitor's actions**: a visitor jumps (Space, or `visit.jump()` from its page) and emotes
+  (`visit.emote(id)`: an id of 1 to 40 letters, digits, `_ . -`, such as `"wave"` or `"v.g.h"`). Each reaches you
+  once: in your `move` as `input.act` (a jump is yours to make: lift the pose and let it fall), and as
+  `visit.on("act", e => ...)` with `{ id, visitor, kind: "jump" | "emote", emote }`, to show it on that visitor's
+  body (a wave, a line over its head). A visitor shown as its own avatar plays its clip of that name by itself.
+  Which emotes mean something is yours to say; one you do not know, ignore. Your own user acts in a room they visit
+  by the same calls: `visit.jump()`, `visit.emote(id)`.
 - **Your own avatar** (optional): how rooms that show their visitors' own looks show your user:
   `visit.avatar(body)`, a three.js object of yours (its origin at its feet, facing −z, in your scene's units; with
-  clips named `idle` and `walk` in `body.animations` if you have them; at most 4 MiB gzipped, 300 000 vertices).
+  clips named `idle` and `walk` in `body.animations` if you have them, and one for each emote your user makes,
+  named as it is, and `jump`; at most 4 MiB gzipped, 300 000 vertices).
   It goes only to a room that asks for it. Whose look your own visitors have is your user's to choose: the panel's
   "visitors look like", and "their look" / "your model" by each visitor (or `visit.useAvatars`, `useAvatar`).
 - **Voice**: in a room, people hear each other by distance, from where each stands, within 45 m; nothing to join,
@@ -316,6 +325,10 @@ visit.host({
   `visit.listener({ x, y, z, yaw })` each frame. Your visitors it takes from where your room has them. A
   page's Content-Security-Policy needs `blob:` for worklets too (as for the ticker's Worker), and the browser
   WebCodecs (Chrome, Edge, Safari, recent Firefox). Headphones keep your user's speakers out of their microphone.
+  A line your room says for your user (a greeting, an emote's words) goes to those near them too:
+  `visit.voiceSource(stream)`, a `MediaStream` with an audio track (an `AudioContext`'s
+  `createMediaStreamDestination().stream` with your speech played into it), with the microphone on or off;
+  `visit.voiceSource(null)` when it is done (or let its track end). The stream stays yours: Visit never stops it.
 - **Chat**: your user types a line (the panel's say box, or `visit.say(text)`) and everyone in the room they are in
   sees it over their head for a few seconds; nobody else. With a world (step 9) Visit draws the bubbles in your room
   too; without one, draw them yourself from `visit.chats` (`Visit.bubble(THREE, text, unit)` makes one). A key of your

@@ -143,7 +143,7 @@ async function build(v) {
     // Where a visitor appears; in a world, where it stepped in (`at`), or the nearest free spot to it (a desk may be there).
     spawn: (who, { at } = {}) => { const near = at && freeNear(at.x, at.z), p = near ? { x: near[0], y: 1.6, z: near[1], yaw: at.yaw, pitch: 0 } : { x: 2, y: 1.6, z: 6, yaw: 0, pitch: 0 }; (window.spawns = window.spawns || []).push({ who: who.name, at: at || null, p, t: Math.round(performance.now()) }); return p; },
     // room.lift (the test sets it): a lift under every visitor, that far up from where they came in
-    move: (pose, input, dt, who) => { window.movedFor = who && who.id; const p = Visit.walk(pose, input, dt, { speed: 2.5, blocked }); return window.room.lift != null ? Object.assign({}, p, { y: 1.6 + window.room.lift }) : p; },
+    move: (pose, input, dt, who) => { window.movedFor = who && who.id; if (input.act) window.moveActs.push(input.act); const p = Visit.walk(pose, input, dt, { speed: 2.5, blocked }); return window.room.lift != null ? Object.assign({}, p, { y: 1.6 + window.room.lift }) : p; },
     fov: 70,
     scene: { root: t.scene, three: t.THREE, renderer: t.renderer, near: 0.05, far: 100 },
     walk: { speed: 2.5 },   // as move() walks: the visitor's page walks at once, before the answer
@@ -159,7 +159,10 @@ async function build(v) {
   torso.name = "torso"; torso.position.y = 0.6; head.name = "head"; head.position.y = 1.45;
   av.add(torso, head);
   av.animations = [new T.AnimationClip("idle", 2, [new T.NumberKeyframeTrack("head.position[y]", [0, 1, 2], [1.45, 1.5, 1.45])]),
-                   new T.AnimationClip("walk", 0.6, [new T.NumberKeyframeTrack("torso.rotation[z]", [0, 0.3, 0.6], [-0.1, 0.1, -0.1])])];
+                   new T.AnimationClip("walk", 0.6, [new T.NumberKeyframeTrack("torso.rotation[z]", [0, 0.3, 0.6], [-0.1, 0.1, -0.1])]),
+                   // clips an emote names (SPEC 8.2, 8.6): played once by a room showing us as ourselves
+                   new T.AnimationClip("wave", 1, [new T.NumberKeyframeTrack("head.rotation[z]", [0, 0.5, 1], [0, 0.4, 0])]),
+                   new T.AnimationClip("jump", 0.5, [new T.NumberKeyframeTrack("torso.position[y]", [0, 0.25, 0.5], [0.6, 1.0, 0.6])])];
   v.avatar(av);
   v.phone(true);   // a phone in this room (SPEC 8.8): it takes calls, and v.call() makes them
   // A visitor pointing (SPEC 8.3): kept, with what it hit first, for the test to read.
@@ -168,6 +171,9 @@ async function build(v) {
   // Interactions (SPEC 8.3): spinning the cube is cosmetic; nothing else is taken (the vault's type is not here).
   window.spins = [];
   window.visitErrors = [];   // what Visit refused, for the test to read
+  // A visitor's actions (SPEC 8.2): as the page hears them, and as move() has them, for the test to read.
+  window.acts = []; window.moveActs = [];
+  v.on("act", e => window.acts.push({ who: e.visitor.name, kind: e.kind, emote: e.emote || null }));
   v.on("error", e => window.visitErrors.push(e));
   v.interactions({ spin: { cosmetic: true, label: "spin it", run: e => { e.object.rotation.y += 1; window.spins.push({ who: e.visitor.name, type: e.type }); } } });
   v.on("point", e => {

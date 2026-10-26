@@ -521,6 +521,29 @@ async def main():
             "(h => [h.avatar.object.getObjectByName('torso').geometry.type, !!h.avatar.object.getObjectByName('head'), !!h.avatar.walk, !!h.avatar.idle])([...v._hosted.values()].find(h => h.avatar))"),
             ["CylinderGeometry", True, True, True])
         check("and B, in A's room, does not see itself", await b.until("(s => !!s && s.own.some(o => o.name === 'avatar:B'))(v._viewer && v._viewer.scene)"), True)
+
+        print("\nactions: a visitor jumps and emotes in the room it visits (8.2)")
+        await b.js("v.emote('wave')")
+        check("B emotes 'wave': A's page hears it once, its move() has it once", (await a.until("window.acts.length === 1 && window.acts[0]"), await a.until("window.moveActs.length === 1 && window.moveActs[0]")),
+              ({"who": "B", "kind": "emote", "emote": "wave"}, {"kind": "emote", "emote": "wave"}))
+        check("and B shown as itself plays its 'wave' clip, once", await a.until(
+            "(h => !!h.avatar.once && h.avatar.playing.getClip().name === 'wave')([...v._hosted.values()].find(h => h.avatar))"), True)
+        check("then back to standing about", await a.until("(h => !h.avatar.once && h.avatar.playing === h.avatar.idle)([...v._hosted.values()].find(h => h.avatar))", 5), True)
+        await b.js("v.jump()")
+        check("B jumps: A hears one jump, and plays B's 'jump' clip", (await a.until("window.acts.length === 2 && window.acts[1].kind"),
+              await a.until("(h => !!h.avatar.once && h.avatar.playing.getClip().name === 'jump')([...v._hosted.values()].find(h => h.avatar))")), ("jump", True))
+        await b.key("Space", " ", 32, True)
+        await b.key("Space", " ", 32, False)
+        check("Space in B's view is a jump too", await a.until("window.acts.length === 3 && window.acts[2].kind"), "jump")
+        await asyncio.sleep(0.5)
+        check("each heard once, though B's input goes on every 33 ms", (await a.js("window.acts.length"), await a.js("window.moveActs.length")), (3, 3))
+        check("an emote that is not an id is refused at B, before it goes", await b.js("(() => { try { v.emote('say hi'); return false; } catch (e) { return true; } })()"), True)
+        await b.js("v.emote('idle')")
+        await asyncio.sleep(0.5)
+        check("an emote named as B's own idle clip: idle stays a loop (never played once)", await a.js(
+            "(h => !h.avatar.once && h.avatar.idle.loop !== h.avatar.LoopOnce)([...v._hosted.values()].find(h => h.avatar))"), True)
+        check("a visitor acting faster than it moves: the host keeps the newest 4", await a.js(
+            "(() => { const h = { id: 'x', visitor: { name: 't' } }; for (let i = 0; i < 10; i++) v._acted(h, { jump: i, emotes: i }, { jump: i + 1, emote: 'wave', emotes: i + 1 }); return h.acts.length; })()"), 4)
         await a.shot("a_avatar.png")
         await a.js("(s => { s.value = 'theirs'; s.dispatchEvent(new Event('change', { bubbles: true })); })(document.querySelector('.visit-panel select[data-v=looks]'))")
         check("A: everyone's own look by default; B no longer set apart", await a.until("v.avatars.default === 'theirs' && v.avatars.by.length === 0 && !!v.visitors[0].avatar"), True)
@@ -570,6 +593,34 @@ async def main():
         await a.shot("a_chat.png")
         await b.shot("b_chat.png")
         check("six lines at once: the sixth not said (5 every 10 s)", await a.js("(r => r[5])(Array.from({ length: 6 }, (_, i) => v.say('n' + i)))"), False)
+        # A spoken line (voiceSource, 8.7): A's microphone off, a tone's stream in its place; B still hears A.
+        await a.js("v.setMic(false)")
+        check("A's microphone off: nothing captured, no encoder", await a.until("!v._mic && !v._tx"), True)
+        f0 = await b.js("(s => s ? s.frames : 0)(v._voices.get(v.voices[0].key))")
+        await a.js("""(() => { const c = v._audio(), o = c.createOscillator(), d = c.createMediaStreamDestination(); o.frequency.value = 330; o.connect(d); o.start();
+          window.line = { o, d }; return v.voiceSource(d.stream); })()""")
+        check("A's line through voiceSource, its microphone still off", await a.until("!v.mic && !v._mic && !!v._source && !!v._tx && v._voiceTo !== 0"), True)
+        check("B hears it, from where A stands", await b.until("(s => !!s && s.frames > %d + 50 && s.level > 0.01 && s.near)(v._voices.get(v.voices[0].key))" % (f0 or 0)), True)
+        await a.js("v.voiceSource(null)")
+        check("the line taken off: nothing sent, no encoder (its stream is still A's: not stopped)", await a.until(
+            "!v._source && !v._tx && v._voiceTo === 0 && window.line.d.stream.getAudioTracks()[0].readyState === 'live'"), True)
+        check("voiceSource takes only a stream with audio", await a.js("v.voiceSource({}).then(() => false, () => true)"), True)
+        mk = "(() => { const c = v._audio(), o = c.createOscillator(), d = c.createMediaStreamDestination(); o.frequency.value = 330; o.connect(d); o.start(); (window.oscs = window.oscs || []).push(o); return d.stream; })()"
+        check("two lines at once: the second plays, on a live encoder", await a.js(
+            "(async () => { const s1 = %s, s2 = %s; await Promise.all([v.voiceSource(s1), v.voiceSource(s2)]); return v._source && v._source.stream === s2 && !!v._tx && v._tx.enc.state === 'configured'; })()" % (mk, mk)), True)
+        await a.js("v.voiceSource(null)")
+        # his microphone off but running (for a call): a line on must not carry it to the room
+        await a.js("(async () => { v.mic = false; await v._micStart(); })()")
+        check("microphone running for a call only: alone it is heard (gain 1)", await a.until("!!v._mic && v._mic.gain.gain.value === 1"), True)
+        await a.js("v.voiceSource(%s)" % mk)
+        check("a line on with his microphone off: the microphone is muted, the line goes whole", await a.until("!!v._source && v._mic.gain.gain.value === 0 && v._source.gain.gain.value === 1"), True)
+        await a.js("v.setMic(true)")
+        check("his microphone on as well: both in, each at 0.7", await a.until("Math.abs(v._mic.gain.gain.value - 0.7) < 1e-6 && Math.abs(v._source.gain.gain.value - 0.7) < 1e-6"), True)
+        await a.js("v.voiceSource(null)")
+        await a.js("v.setMic(false)")
+        check("both off: nothing captured, no encoder", await a.until("!v._mic && !v._source && !v._tx"), True)
+        await a.js("(window.oscs || []).forEach(o => o.stop())")
+        await a.js("window.line.o.stop()")
         await a.js("v.leave()")
         await b.until("v.visitors.length === 0")
         await a.js("v.setMic(false)")

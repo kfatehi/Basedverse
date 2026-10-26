@@ -571,6 +571,16 @@ data.
 | `yaw` | radians | where the visitor is looking, left/right, relative to how it was facing when it arrived (positive: turned left) |
 | `pitch` | radians, −1.4 to 1.4 | up (positive) or down |
 | `t` | ms | the visitor page's clock when it sent this input (`performance.now()`); the host's deltas carry it back |
+| `jump` | count, 0 to 2³²−1 | how many times the visitor has jumped (Space, `v.jump()`) |
+| `emote` | id, or `""` | the visitor's latest emote (`v.emote(id)`): 1 to 40 letters, digits, `_`, `.` or `-`; what it does is the room's to say |
+| `emotes` | count, 0 to 2³²−1 | how many times the visitor has emoted |
+
+**Actions are counts.** Input is whole state, newest wins, and datagrams may be lost, so a jump or an
+emote is never an event of its own: the visitor's page counts them, and every input carries the counts. The host
+takes a count risen since the visitor's last input as one action (several at once: one, with the newest emote),
+and its visitor's first input as where the counts start. The host's page hands each to `move` once, as
+`input.act` (`{ kind: "jump" }` or `{ kind: "emote", emote }`), and says it (`act`: `{ id, visitor, kind, emote }`)
+so the room can show it on the visitor's body (8.6). An older visitor sends no counts: it never acts.
 
 **Look belongs to the visitor; position belongs to the host.** The visitor's page turns its view as fast as
 the mouse moves and sends where it is looking; the host applies it as is. Where the visitor stands is the
@@ -683,6 +693,9 @@ visitor as the visitor's own body instead.
   the visitor's body (`userData.visitor`), and plays its `walk` while the visitor moves and its `idle` while it
   stands. `v.visitors[i].avatar` is it while the room shows that visitor's own look, null otherwise: the room
   draws it (in its scene, it goes to every visitor; the visitor's own eyes do not see it).
+- **Actions** (8.2): on a visitor shown as its own avatar, the page plays once the clip named as the
+  emote is (or `jump`, for a jump; any case), then `walk` or `idle` again. An avatar without that clip does
+  nothing more: the room still hears the action (`act`) for its own look.
 
 ### 8.7 Voice
 
@@ -693,6 +706,10 @@ room: not next door in a world, not across a plot's side.
 - **The microphone** is each user's to turn on (`v.setMic`, the panel's 🎙), remembered in their browser (on again
   at the next load, once permission is given); off, they still hear. It is asked for with echo cancellation, noise
   suppression and gain control. Nothing is encoded or sent while nobody is near.
+- **A voice source**: a page may send a voice besides the microphone's, `v.voiceSource(stream)`, a
+  `MediaStream` with an audio track (a line its room speaks for its user, a synthesized voice). It goes as the
+  user's voice does, from where they stand, with the microphone on or off, mixed with it when both are; one at a
+  time, off with `null` or when its track ends. Visit never stops its tracks: the stream stays the page's.
 - **Where people are.** Each room's page tells its own visit-client where everyone in it stands (`voice_where`): its
   own user while they are at home (where its world, or `v.listener`, has them), its phone, and each visitor (where
   the room has them: it moves them, so it is the room's word, not the visitor's). It also keeps an empty object

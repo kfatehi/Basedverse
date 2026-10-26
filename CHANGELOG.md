@@ -9,6 +9,30 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## Unreleased
+
+**A visitor jumps and emotes in the room it visits, a room speaks a line for its user, and an avatar plays an
+emote's clip.**
+
+- **Actions** (SPEC 8.2): `visit.jump()` (and Space in the view) and `visit.emote(id)`. They ride in the
+  visitor's input as counts (`jump`, `emote`, `emotes`), so a lost datagram loses none. The host's `move` gets each
+  once as `input.act`, and its page hears `act` (`{ id, visitor, kind, emote }`). visit-client clamps them: counts
+  from 0 to 2³²−1, an emote only an id (1 to 40 letters, digits, `_ . -`).
+- **A voice source** (SPEC 8.7): `visit.voiceSource(stream)` sends a `MediaStream`'s audio as the user's voice, to
+  those near them, with the microphone on or off (mixed with it when both are). The microphone and a source now
+  feed one encoder, and its voice goes where visit-client decides (0.10).
+- **Emote clips** (SPEC 8.6): a visitor shown as its own avatar plays once the clip named as its emote (or `jump`),
+  then walks or stands again.
+
+The protocols keep their names: an older visitor sends no actions, and an older host ignores them.
+
+### What an integration does
+
+1. Get a visit-client with these. Nothing else is needed: a room that does nothing new keeps working.
+2. To take actions as a host: read `input.act` in your `move` (make a jump), and `visit.on("act")` to show an
+   emote on a visitor's body. Give your own avatar clips named as your emotes, and `jump`.
+3. To act as a visitor: call `visit.jump()` and `visit.emote(id)` from your page's own keys or menus.
+4. To speak a line to those near your user: `visit.voiceSource(stream)`, then `null`.
 ## v0.11.0 — 2026-10-26
 
 **Chat: type a line, and it shows over your head.** Everyone in the room you are in sees it (SPEC 8.9), and
