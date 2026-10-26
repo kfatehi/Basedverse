@@ -54,6 +54,11 @@ visit-clients talk to each other**. A page reload breaks nothing but the localho
 - **Hosting**: an office's page has given Visit its scene (`host`, 5.2). Only then is the office in the lobby
   to be visited, and only then can it knock: every office takes part with its room.
 - **Input**: what the visitor is pressing and where it is looking (section 8.2).
+- **Key**: an office's lasting identity: its link endpoint's public key, the same every run when the
+  visit-client has a state file (4.1). Names are first come, first served, and change; a key cannot be taken,
+  because a link makes whoever dials prove they hold it (7.1).
+- **Guest**: a key on an office's guest list. **Door**: open (its guests come in without knocking: the
+  visit-client answers their knocks yes itself, 6.4) or closed (everyone knocks).
 
 ## 3. Security
 
@@ -92,9 +97,18 @@ program listening on their machine.
    (no shaders, images only as data URLs of a sane size, bounded geometry); its visit-client unpacks each
    edit with a limit and checks it before the page sees it.
 
+9. **Guests by key, proved by the link.** A host's visit-client lets a knocker in without asking its page
+   only when its door is open and the key the lobby gives for the knocker is on its guest list; when the lobby
+   then agrees the visit, the visitor's link endpoint MUST be that very key, or the visit ends at once
+   (`kicked`), before any link is made. A lobby that lies about whose knock it is gets nobody in who is not a
+   guest. Adding a guest by a key the lobby lists trusts the lobby once, for whose key is whose; a key taken
+   from a visit (its `peer.key`, 5.3) the link has proved.
+10. **The state file is a secret.** It holds the office's secret key: the visit-client writes it readable by
+    its owner only. Whoever has it can be that office to its friends.
+
 Visitors get the host's whole scene: a sim that shows issue titles or agent activity in its room shows them
 to its visitors, wherever they stand and whether they look or not. Letting someone in is the host's
-decision, one knock at a time.
+decision, one knock at a time, or once and for all for its guests (point 9).
 
 ## 4. The visit-client
 
@@ -116,7 +130,7 @@ visit-client --lobby wss://lobby.example/ --name "Magic Room" --sim my-sim/1.0 \
 | `--idle-exit` | `VISIT_IDLE_EXIT` | 0 | exit after this many seconds with no page connected (0: never) |
 | `--origins` | `VISIT_ORIGINS` | none | the page origins allowed to connect (`http://localhost:3000`, comma-separated); none: any page with the token (section 3, point 4) |
 | `--relays` | `VISIT_RELAYS` | the lobby's | the relays for links: `none`, `default` (iroh's own), or URLs, comma-separated |
-| `--state-file` | `VISIT_STATE_FILE` | none | a file where it keeps whether the office is away (`leave_lobby`, 5.2), so a restart stays away; none: every start joins the lobby. A launcher SHOULD give one |
+| `--state-file` | `VISIT_STATE_FILE` | none | a file where it keeps what outlasts a run: whether the office is away (`leave_lobby`, 5.2), so a restart stays away; its key (section 2), so it is the same office to its guests' hosts; its door and its guests. Readable by its owner only (section 3, point 10). None: every start joins the lobby, with a new key and no guests. A launcher SHOULD give one |
 
 A flag wins over its environment variable, and a variable set but blank counts as unset (its default), as a
 `.env` file has it. [`../.env.example`](../.env.example) is the template of them all.
@@ -124,7 +138,7 @@ A flag wins over its environment variable, and a variable set but blank counts a
 On start it prints **one JSON line** to stdout once it listens, then logs to stderr:
 
 ```json
-{"ready": true, "port": 7401, "version": "0.6.0", "proto": "basedverse-visit-local/2"}
+{"ready": true, "port": 7401, "version": "0.7.0", "proto": "basedverse-visit-local/2"}
 ```
 
 Exit codes: 0 asked to stop (SIGINT/SIGTERM, or idle-exit); 2 bad flags; 3 the port is taken; 4 the
@@ -160,7 +174,7 @@ lobby refused it for good (`proto_unsupported`, `name_invalid`).
 | request | auth | answer |
 |---|---|---|
 | `GET /visit.js` | none | the library (JavaScript), the version built into this binary. `Access-Control-Allow-Origin: *` |
-| `GET /health` | none | `{"ok": true, "version": "0.6.0"}` |
+| `GET /health` | none | `{"ok": true, "version": "0.7.0"}` |
 | `GET /ws` (WebSocket upgrade) | `hello.token` (5.1) | the page connection |
 | anything else | — | 404 |
 
@@ -183,9 +197,10 @@ The page sends, within 5 s:
 The visit-client answers `ready` (or closes: 4401 bad token, 4400 bad `proto`):
 
 ```json
-{"type": "ready", "version": "0.6.0", "office": {"id": "o1a2b3c4", "name": "Magic Room"},
+{"type": "ready", "version": "0.7.0", "office": {"id": "o1a2b3c4", "name": "Magic Room"},
  "online": true, "away": false, "status": "available", "max_visitors": 3,
- "visits": [{"id": "v…", "channel": 1, "role": "host", "peer": {"id": "o…", "name": "Ada", "sim": {…}}}]}
+ "key": "7f3a…", "door": "open", "guests": [{"key": "c41e…", "name": "Ada"}],
+ "visits": [{"id": "v…", "channel": 1, "role": "host", "peer": {"id": "o…", "name": "Ada", "sim": {…}, "key": "c41e…"}, "guest": true}]}
 ```
 
 followed by a `lobby` snapshot and any pending `knock`s.
@@ -200,6 +215,9 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `rename` | `name` | ask the lobby for another name; taken (`name_taken`) or invalid, the office keeps its own |
 | `leave_lobby` | — | take the office out of the lobby, and keep it out (away, 4.2): nobody sees it or can knock; its visits end |
 | `join_lobby` | — | back into the lobby after `leave_lobby`: a new session |
+| `door` | `open` (bool) | open the door (guests come in without knocking) or close it (everyone knocks); kept in the state file |
+| `guest_add` | `key`, `name`? (≤ 24) | a guest: an office's key, as the lobby lists it (6.3) or a visit's peer has it (5.3), and the name it is known by; again for a key already there renames it. At most 256 (`too_many_guests`); not this office's own key |
+| `guest_remove` | `key` | no longer a guest |
 | `knock` | `to` (office id), `message`? (≤ 280) | ask to visit an office (refused `not_hosting` before `host`) |
 | `answer` | `knock`, `accept` (bool), `message`? | let a knocker in, or not |
 | `end` | `visit` | end a visit: yours as a visitor (leave), or a visitor's to you (kick) |
@@ -215,11 +233,12 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | type | fields | when |
 |---|---|---|
 | `ready` | 5.1 | after `hello` |
+| `guests` | `door` (`"open"` \| `"closed"`), `guests`: [{`key`, `name`}] | after `door`, `guest_add` or `guest_remove` |
 | `online` / `offline` | `office`, `knocking` / `away`? | the lobby session came up (after a drop: the same office if it resumed), with this office's own knocks still waiting ([{`id`, `to`}]) / went down: `away: true` when the page took it out (`leave_lobby`), `false` when it is on its way back (`join_lobby`), absent when the lobby is out of reach |
-| `lobby` | `offices`: [{`id`, `name`, `status`, `sim`, `max_visitors`, `visitors`, `visiting`, `ready`}] | every change (6.3) |
-| `knock` | `id`, `from` {`id`, `name`, `sim`}, `message`, `expires_in` | someone wants to visit you |
+| `lobby` | `offices`: [{`id`, `name`, `status`, `sim`, `max_visitors`, `visitors`, `visiting`, `ready`, `key`}] | every change (6.3) |
+| `knock` | `id`, `from` {`id`, `name`, `sim`, `key`}, `message`, `expires_in` | someone wants to visit you (never a guest at your open door: let in without asking) |
 | `knock_sent` / `knock_cancelled` / `answered` | as in section 6 | your knock's fate; a knock on you withdrawn |
-| `visit_started` | `id`, `channel`, `role` (`"host"` \| `"visitor"`), `peer` {`id`, `name`, `sim`}, `state`? | a visit began (its link is up); in `ready`, a host's visit carries the last `state` its page sent |
+| `visit_started` | `id`, `channel`, `role` (`"host"` \| `"visitor"`), `peer` {`id`, `name`, `sim`, `key`}, `guest`?, `state`? | a visit began (its link is up). `peer.key` is the other office's key, as the link proved it; `guest: true`, a guest let in through the open door, without asking the page; in `ready`, a host's visit carries the last `state` its page sent |
 | `visit_ended` | `id`, `channel`, `reason` (6.5) | a visit ended |
 | `host_paused` / `host_resumed` | `channel` | the host's page went away / came back (visitor side) |
 | `input` | `channel`, `seq`, `forward`, `strafe`, `run`, `yaw`, `pitch`, `t` | a visitor's latest input (host side) |
@@ -295,8 +314,8 @@ starts a new session (`resumed: false`).
 | type | fields | when |
 |---|---|---|
 | `welcome` | `proto`, `id`, `name`, `relays`: [url], `resume` (32 hex), `resumed` (bool), `visits`: [id], `knocking`: [{`id`, `to`}], `limits` | after a good `hello` |
-| `lobby` | `offices`: [{`id`, `name`, `status`, `sim`, `max_visitors`, `visitors` (count), `visiting` (the host's office id, or `null`), `ready`}], you included | on any change |
-| `knock` | `id`, `from` {`id`, `name`, `sim`}, `message`, `expires_in` | someone knocked |
+| `lobby` | `offices`: [{`id`, `name`, `status`, `sim`, `max_visitors`, `visitors` (count), `visiting` (the host's office id, or `null`), `ready`, `key` (the endpoint it last published, kept while its link is withdrawn; `null` before it has published one)}], you included | on any change |
+| `knock` | `id`, `from` {`id`, `name`, `sim`, `key`}, `message`, `expires_in` | someone knocked |
 | `knock_sent` | `id`, `to` | your knock reached the door |
 | `knock_cancelled` | `id`, `reason`: `"timeout"` \| `"gone"` | a knock on you was withdrawn |
 | `answered` | `knock`, `accept`, `reason`? (`"declined"`, `"timeout"`, `"gone"`, `"full"`, `"not_ready"`), `message`? | your knock's answer |
@@ -320,6 +339,10 @@ starts a new session (`resumed: false`).
   fresh `lobby`. If the door filled up meanwhile, the knocker hears `answered` with `reason: "full"`; if
   either side withdrew its link meanwhile, `reason: "not_ready"` (and the door an `error`, `not_ready`).
 - A visit counts toward the host's `max_visitors` from the moment it is agreed until it ends.
+- **A guest at an open door.** The host's visit-client answers a knock itself, `accept: true`, when its door
+  is open, its page hosts its scene, and the knock's `from.key` is on its guest list; its page is not asked.
+  When the lobby then sends `visit`, the visitor's `peer_link.endpoint` must be that key, or the host ends the
+  visit (`kicked`) before any link is made (section 3, point 9). To the lobby this is an answer like any other.
 
 ### 6.5 Why visits end
 
@@ -442,7 +465,7 @@ data.
   boolean. Everything else a sim keeps there (who a figure is, its handles, references to other objects)
   never leaves the host's page.
 - **Data, never code.** The visitor's page draws a scene with the host's very three.js revision (its first
-  release, `0.<r>.0`, r125 to r186 in 0.6.0), fetched from `https://cdn.jsdelivr.net/npm/three@0.<r>.0/build/`
+  release, `0.<r>.0`, r125 to r186 in 0.7.0), fetched from `https://cdn.jsdelivr.net/npm/three@0.<r>.0/build/`
   (or a page's own `threeBase`), checked against the SHA-384 hash visit.js carries for it (Subresource
   Integrity) and run as a module of its own: nothing else ever runs. Before three.js reads what a host sent,
   visit.js makes it safe: materials only of the kinds three.js draws itself (a `ShaderMaterial` or
@@ -508,13 +531,16 @@ v.stats        // while visiting, about once a second: { latency (input to scree
                //   ms), path ("direct" | "relay"), fps (frames drawn a second) }
 v.viewFocused  // visiting, and the view takes the keys and mouse (not shrunk to a corner): the page's own keys wait
 v.office       // { id, name } while online
+v.key          // this office's key: its lasting identity (the same every run, with a state file)
+v.door         // "open" (your guests come in without knocking) | "closed" (everyone knocks)
+v.guests       // [{ key, name }]: who walks in through the open door
 v.status       // "available" | "busy"
 v.maxVisitors  // number
-v.offices      // [{ id, name, status, sim, maxVisitors, visitors, visiting, ready }], you included
+v.offices      // [{ id, name, status, sim, maxVisitors, visitors, visiting, ready, key }], you included
 v.knocks       // knocks on your door: [{ id, from: { id, name, sim }, message, until (ms epoch) }]
 v.knocking     // your knocks still waiting: [{ id, to }]
 v.visiting     // your visit as a visitor: { id, host: { id, name, sim }, paused } or null
-v.visitors     // your visitors as a host: [{ id, visitor: { id, name, sim }, pose }]
+v.visitors     // your visitors as a host: [{ id, visitor: { id, name, sim, key }, guest, pose }]
 
 v.on(event, fn); v.off(event, fn)   // "change" | "knock" | "answered" | "visit_started" | "visit_ended" | "stats" | "error" | "point"
 v.close()          // disconnect for good
@@ -524,6 +550,9 @@ v.leave()          // end your visit
 v.kick(visitId)    // end someone's visit to you
 v.leaveLobby()     // away: out of the lobby, nobody sees you or can knock, your visits end (kept across restarts
 v.joinLobby()      //   with VISIT_STATE_FILE); and back
+v.setDoor(open)    // open or close your door (kept, with VISIT_STATE_FILE)
+v.addGuest(key, name); v.removeGuest(key); v.isGuest(key)   // a key from v.offices, or (proved by the link) a visit's
+                   //   peer.key; "visit_started" says guest: true for one let in through the open door
 
 // hosting: register once after connect (and again after each page load). Until then this office is not in the
 // lobby to be visited, and cannot knock: every room takes part with its scene.
@@ -610,7 +639,7 @@ codes 4400 bad `hello`, 4401 bad or missing token, 4409 replaced by a newer page
 **`error` codes the page can get** (from the visit-client, or passed through from the lobby): those of
 section 6.4 (`not_found`, `self_knock`, `not_available`, `full`, `not_ready`, `already_visiting`,
 `knock_pending`, `rate_limited`), `message_too_long`, `name_invalid`, `name_taken` (on `rename`; the
-office keeps its name), `not_yours` (answering a knock that is not yours), `not_hosting` (knocking before
+office keeps its name), `too_many_guests` (256 at most), `not_yours` (answering a knock that is not yours), `not_hosting` (knocking before
 the page hosts its scene, 4.2), `no_such_visit` (`end`, `keyframe` or `scene_resync` for a visit you are not
 in), `offline` (an action while the lobby is down), `away` (an action
 while the office is out of the lobby on purpose: `join_lobby` first), `bad_message`.

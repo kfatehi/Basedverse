@@ -381,6 +381,7 @@ class Office2:
         self.max_visitors = 3
         self.proto = PROTO2          # which lobby it is in: it sees, and visits, only offices of the same
         self.link = None             # {"endpoint", "addr"} once published (and until withdrawn)
+        self.key = None              # the endpoint it last published: its key, kept while its link is withdrawn
         self.visiting = None         # the visit it is on, as a visitor
         self.hosting = set()         # the visits to it, as a host
         self.knocked = collections.deque()
@@ -408,7 +409,7 @@ def lobby_view2(proto):
     return {"type": "lobby", "offices": [
         {"id": o.id, "name": o.name, "status": o.status, "sim": o.sim, "max_visitors": o.max_visitors,
          "visitors": len(o.hosting), "visiting": VISITS2[o.visiting]["host"] if o.visiting else None,
-         "ready": o.link is not None}
+         "ready": o.link is not None, "key": o.key}
         for o in sorted(OFFICES2.values(), key=lambda o: o.name.casefold()) if o.proto == proto]}
 
 
@@ -465,6 +466,7 @@ def on2_link(me, m):
     if len(json.dumps(addr)) > LIMITS2["link_addr"]:
         return error2(me, "bad_message", "addr is over %d bytes" % LIMITS2["link_addr"], "link")
     me.link = {"endpoint": endpoint, "addr": addr}
+    me.key = endpoint
     announce2()
 
 
@@ -531,7 +533,7 @@ def on2_knock(me, m):
 
 def knock_msg(kid):
     k, knocker = KNOCKS2[kid], OFFICES2[KNOCKS2[kid]["from"]]
-    return {"type": "knock", "id": kid, "from": {"id": knocker.id, "name": knocker.name, "sim": knocker.sim},
+    return {"type": "knock", "id": kid, "from": {"id": knocker.id, "name": knocker.name, "sim": knocker.sim, "key": knocker.key},
             "message": k["message"], "expires_in": max(0, round(k["until"] - time.monotonic()))}
 
 

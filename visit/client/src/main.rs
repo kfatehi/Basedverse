@@ -6,6 +6,7 @@ mod frames;
 mod link;
 mod lobby;
 mod page;
+mod state;
 
 use std::{path::PathBuf, process::ExitCode, time::Duration};
 
@@ -50,8 +51,9 @@ struct Args {
     /// with the token. Naming the sim's own makes a token stolen somehow useless to another site.
     #[arg(long, env = "VISIT_ORIGINS", default_value = "")]
     origins: String,
-    /// A file where it keeps whether the office is out of the lobby (the page's leave_lobby), so a restart
-    /// stays out; none: every start joins the lobby.
+    /// A file where it keeps what outlasts a run: whether the office is out of the lobby (the page's
+    /// leave_lobby), its key (so it is the same office to its friends), its door and its guests; none: every
+    /// start joins the lobby, with a new key and no guests.
     #[arg(long, env = "VISIT_STATE_FILE")]
     state_file: Option<PathBuf>,
 }
@@ -132,9 +134,8 @@ async fn run() -> ExitCode {
 
     let (core_tx, core_rx) = mpsc::unbounded_channel();
     let (lobby_tx, lobby_rx) = mpsc::unbounded_channel();
-    let away = a.state_file.as_ref().and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .and_then(|v| v.get("away").and_then(serde_json::Value::as_bool)).unwrap_or(false);
+    let (saved, fresh) = state::Saved::load(a.state_file.as_deref());
+    let away = saved.away;
     let hello = lobby::Hello { name: a.name.clone(), sim, status: "available".into(), max_visitors: a.max_visitors };
     tokio::spawn(lobby::run(a.lobby.clone(), hello, lobby_rx, core_tx.clone(), away));
     let origins: Vec<String> = a.origins.split(',').map(|o| o.trim().trim_end_matches('/').to_string()).filter(|o| !o.is_empty()).collect();
@@ -160,7 +161,7 @@ async fn run() -> ExitCode {
     });
 
     println!("{}", json!({ "ready": true, "port": a.port, "version": VERSION, "proto": page::PROTO }));
-    let code = core::Core::new(lobby_tx, core_tx, relays, a.max_visitors, a.idle_exit, away, a.state_file.clone()).run(core_rx).await;
+    let code = core::Core::new(lobby_tx, core_tx, relays, a.max_visitors, a.idle_exit, saved, fresh, a.state_file.clone()).run(core_rx).await;
     ExitCode::from(code as u8)
 }
 

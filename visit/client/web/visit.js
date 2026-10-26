@@ -13,7 +13,7 @@
 // visitor's page walks at once and the host corrects it), and a host renders and encodes nothing for anyone.
 "use strict";
 (function () {
-  const VERSION = "0.6.0", PROTO = "basedverse-visit-local/2";
+  const VERSION = "0.7.0", PROTO = "basedverse-visit-local/2";
   const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, LOOK = 0.0025;
   const POINT_MS = 200, AIM_MS = 125;   // a visitor's points, at most one this often; what it aims at, looked for this often
   // What the host hears many times a second: none of it changes what the page shows, so none fires "change".
@@ -447,6 +447,9 @@
       this.maxVisitors = 3;
       this._samples = { latency: [], drawn: [] };   // the last few thousand of each, for a test's percentiles
       this.offices = [];
+      this.key = null;         // this office's key: its lasting identity, the same every run (with a state file)
+      this.door = "open";      // "open": your guests come in without knocking; "closed": everyone knocks
+      this.guests = [];        // [{ key, name }]: who walks in through the open door
       this.knocks = [];        // on your door: { id, from, message, until }
       this.knocking = [];      // yours, waiting: { id, to }
       this.visiting = null;    // { id, host, paused }
@@ -525,6 +528,8 @@
       this.state = m.away ? "away" : m.online ? "online" : "offline";
       this.office = m.office && m.office.id ? m.office : null;
       this.status = m.status; this.maxVisitors = m.max_visitors;
+      this.key = typeof m.key === "string" ? m.key : null;
+      this._guests(m);
       this.knocks = []; this.knocking = [];
       for (const v of m.visits || []) this._started(v);
       if (this._hooks) this._sendHost();   // a visit-client that came back: this page hosts, again
@@ -543,7 +548,8 @@
           break;
         case "lobby":
           this.offices = (m.offices || []).map(o => ({ id: String(o.id), name: String(o.name), status: String(o.status), sim: o.sim || {},
-            maxVisitors: Number(o.max_visitors) || 0, visitors: Number(o.visitors) || 0, visiting: o.visiting || null, ready: o.ready === true }));
+            maxVisitors: Number(o.max_visitors) || 0, visitors: Number(o.visitors) || 0, visiting: o.visiting || null, ready: o.ready === true,
+            key: typeof o.key === "string" ? o.key : null }));
           { const me = this.offices.find(o => this.office && o.id === this.office.id); if (me) { this.status = me.status; this.maxVisitors = me.maxVisitors; } }
           break;
         case "knock":
@@ -558,6 +564,7 @@
           this._emit("answered", { to: k && k.to, accept: m.accept, reason: m.reason, message: m.message || "" });
           break;
         }
+        case "guests": this._guests(m); break;
         case "visit_started": this._started(m); break;
         case "visit_ended": this._ended(m); break;
         case "host_paused": case "host_resumed":
@@ -585,11 +592,22 @@
     leaveLobby() { this._send({ type: "leave_lobby" }); }
     joinLobby() { this._send({ type: "join_lobby" }); }
     kick(visitId) { this._send({ type: "end", visit: visitId }); }
+    // Your door and your guests (kept by visit-client, with its state file): while the door is open, a guest's
+    // knock lets them in at once, without asking you. A guest is a key, as v.offices lists it (or, surer, as a
+    // visit's peer has it: its link proved it), with the name you knew them by.
+    setDoor(open) { this._send({ type: "door", open: !!open }); }
+    addGuest(key, name = "") { this._send({ type: "guest_add", key, name }); }
+    removeGuest(key) { this._send({ type: "guest_remove", key }); }
+    isGuest(key) { return !!key && this.guests.some(g => g.key === key); }
+    _guests(m) {
+      this.door = m.door === "closed" ? "closed" : "open";
+      this.guests = (Array.isArray(m.guests) ? m.guests : []).map(g => ({ key: String(g.key), name: String(g.name || "") }));
+    }
 
     // ---------- visits ----------
     _started(m) {
       if (m.role === "host") {
-        const h = { id: m.id, channel: m.channel, visitor: m.peer || {}, pose: null, yaw0: 0, input: null, inputAt: 0,
+        const h = { id: m.id, channel: m.channel, visitor: m.peer || {}, guest: m.guest === true, pose: null, yaw0: 0, input: null, inputAt: 0,
           keyNext: true, fails: 0, sceneSent: false, posed: null };
         if (m.state && m.state.pose) { h.pose = m.state.pose; h.yaw0 = m.state.yaw0 || 0; }   // back after this page reloaded
         this._hosted.set(m.channel, h);
@@ -600,7 +618,7 @@
         this._placeholder();
       }
       this._visitorsList();
-      this._emit("visit_started", { id: m.id, role: m.role, peer: m.peer });
+      this._emit("visit_started", { id: m.id, role: m.role, peer: m.peer, guest: m.guest === true });
     }
 
     _ended(m) {
@@ -618,7 +636,7 @@
       this._visitorsList();
     }
 
-    _visitorsList() { this.visitors = [...this._hosted.values()].map(h => ({ id: h.id, visitor: h.visitor, pose: h.pose })); }
+    _visitorsList() { this.visitors = [...this._hosted.values()].map(h => ({ id: h.id, visitor: h.visitor, guest: h.guest, pose: h.pose })); }
 
     // ---------- hosting ----------
     // `scene`: { root, three, renderer, near, far }, the room's three.js scene (or the part of it to share), the
@@ -1313,6 +1331,8 @@
 .visit-panel button { cursor: pointer; } .visit-panel button:disabled { opacity: .45; cursor: default; }
 .visit-panel button.go { background: #2f9e4f; border-color: #2f9e4f; color: #fff; }
 .visit-panel .knock { display: block; background: #fff0d6; color: #7a4a00; } .visit-panel .knock .btns { display: flex; gap: 6px; margin-top: 4px; }
+.visit-panel button.star { border: 0; background: none; padding: 0 2px; color: #6e7681; font-size: 14px; line-height: 1; }
+.visit-panel button.star.on { color: #e3b341; }
 .visit-panel input { flex: 1; min-width: 0; }`;
 
   function panel(element, v) {
@@ -1333,19 +1353,25 @@
       if (v.state === "online") {
         rows.push(`<div class="row"><span class="grow">you are</span><select data-v="status">${["available", "busy"].map(s => `<option${s === v.status ? " selected" : ""}>${s}</option>`).join("")}</select>
           <select data-v="max" title="how many visitors at once">${[0, 1, 2, 3, 4, 5, 6, 7, 8].map(n => `<option value="${n}"${n === v.maxVisitors ? " selected" : ""}>${n} visitors</option>`).join("")}</select></div>`);
+        rows.push(`<div class="row"><span class="grow">your door</span><select data-v="door" title="open: your guests (★) come in without knocking">
+          <option value="open"${v.door === "open" ? " selected" : ""}>open to guests</option><option value="closed"${v.door === "closed" ? " selected" : ""}>closed: all knock</option></select>
+          <span class="muted">${v.guests.length} ★</span></div>`);
       }
+      // A star: whether this key is a guest (click to change); nothing for an office with no key yet.
+      const star = (key, name) => !key ? "" : `<button class="star${v.isGuest(key) ? " on" : ""}" data-v="guest" data-key="${esc(key)}" data-name="${esc(name)}"
+        title="${v.isGuest(key) ? `a guest: walks in without knocking while your door is open (click: no longer)` : `make ${esc(name)} a guest: in without knocking while your door is open`}">${v.isGuest(key) ? "★" : "☆"}</button>`;
       for (const k of v.knocks) {
         rows.push(`<div class="row knock"><b>${esc(k.from.name)}</b> is knocking${k.message ? `: “${esc(k.message)}”` : ""}
           <div class="btns"><button class="go" data-v="in" data-k="${esc(k.id)}">Let in</button><button data-v="out" data-k="${esc(k.id)}">Not now</button>
           <span class="muted">${Math.max(0, Math.round((k.until - Date.now()) / 1000))}s</span></div></div>`);
       }
       if (v.visiting) rows.push(`<div class="row"><span class="grow">in <b>${esc(v.visiting.host.name)}</b>'s room${v.visiting.paused ? " (reloading)" : ""}</span><button data-v="leave">Leave</button></div>`);
-      for (const x of v.visitors) rows.push(`<div class="row"><span class="grow"><b>${esc(x.visitor.name)}</b> is visiting</span><button data-v="kick" data-x="${esc(x.id)}">Kick</button></div>`);
+      for (const x of v.visitors) rows.push(`<div class="row">${star(x.visitor.key, x.visitor.name)}<span class="grow"><b>${esc(x.visitor.name)}</b> ${x.guest ? "walked in" : "is visiting"}</span><button data-v="kick" data-x="${esc(x.id)}">Kick</button></div>`);
       for (const o of v.offices) {
         if (me && o.id === me.id) continue;
         const why = !o.ready ? "not ready" : o.status !== "available" ? o.status : o.visitors >= o.maxVisitors ? "full"
           : v.visiting && v.visiting.host.id === o.id ? "you are there" : v.knocking.some(k => k.to === o.id) ? "knocking…" : "";
-        rows.push(`<div class="row"><span class="dot ${esc(o.status)}"></span><span class="grow" title="${esc(o.name)}">${esc(o.name)} <span class="muted">${esc(o.sim.name || "")} ${o.visitors}/${o.maxVisitors}</span></span>
+        rows.push(`<div class="row"><span class="dot ${esc(o.status)}"></span>${star(o.key, o.name)}<span class="grow" title="${esc(o.name)}">${esc(o.name)} <span class="muted">${esc(o.sim.name || "")} ${o.visitors}/${o.maxVisitors}</span></span>
           <button data-v="knock" data-o="${esc(o.id)}" ${why ? `disabled title="${esc(why)}"` : ""}>${v.knocking.some(k => k.to === o.id) ? "Knocking…" : "Knock"}</button></div>`);
         if (composing === o.id) rows.push(`<form class="row" data-o="${esc(o.id)}"><input maxlength="280" placeholder="a message for ${esc(o.name)}"><button class="go">Knock</button></form>`);
       }
@@ -1367,10 +1393,12 @@
       else if (act === "kick") v.kick(b.dataset.x);
       else if (act === "away") v.leaveLobby();
       else if (act === "back") v.joinLobby();
+      else if (act === "guest") v.isGuest(b.dataset.key) ? v.removeGuest(b.dataset.key) : v.addGuest(b.dataset.key, b.dataset.name);
     });
     root.addEventListener("change", e => {
       if (e.target.dataset.v === "status") v.setStatus(e.target.value);
       if (e.target.dataset.v === "max") v.setMaxVisitors(Number(e.target.value));
+      if (e.target.dataset.v === "door") v.setDoor(e.target.value === "open");
     });
     root.addEventListener("submit", e => {
       e.preventDefault();

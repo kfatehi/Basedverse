@@ -145,6 +145,9 @@ async def main():
         a, b = await Page(7411, ta).open(), await Page(7412, tb).open()
         ra, rb = await a.expect("ready"), await b.expect("ready")
         check("ready: the version, no visits, not away", (ra["version"], ra["visits"], ra["away"]), (VERSION, [], False))
+        ka, kb = ra["key"], rb["key"]
+        check("and each office's key (64 hex), its door open, no guests", (bool(re.fullmatch(r"[0-9a-f]{64}", ka)), ka != kb, ra["door"], ra["guests"]),
+              (True, True, "open", []))
         lob = await a.until(lambda m: m["type"] == "lobby" and len(m["offices"]) == 2)
         check("both offices in the lobby, neither ready: no page hosts its scene yet", sorted((o["name"], o["ready"]) for o in lob["offices"]), [("A", False), ("B", False)])
         await b.send(type="knock", to=next(o["id"] for o in lob["offices"] if o["name"] == "A"))
@@ -158,6 +161,7 @@ async def main():
         await b.until(both)
         ids = {o["name"]: o["id"] for o in lob["offices"]}
         check("each page hosts its scene: both ready (links published)", sorted(ids), ["A", "B"])
+        check("the lobby lists each office's key: the one its page was told", {o["name"]: o["key"] for o in lob["offices"]}, {"A": ka, "B": kb})
         await a.drain()
         await b.drain()
         await asyncio.sleep(4)   # idle through four of the lobby's pings
@@ -337,6 +341,66 @@ async def main():
                     stray.append(m)
         check("and no error after it (the link ended on purpose: no redialling, no link_failed)", stray, [])
 
+        print("\nguests and the door")
+        await a.drain()
+        await b.drain()
+        await a.send(type="guest_add", key=kb, name="B")
+        g = await a.expect("guests")
+        check("A adds B as a guest: its page hears the list, the door open", (g["door"], g["guests"]), ("open", [{"key": kb, "name": "B"}]))
+        saved = json.load(open(state))
+        check("kept in A's state file, with its key (the secret half, readable by A only)",
+              (saved["door"], saved["guests"], len(saved["key"]), oct(os.stat(state).st_mode & 0o777)), ("open", [{"key": kb, "name": "B"}], 64, "0o600"))
+        await b.send(type="knock", to=ids["A"])
+        sa, sb = await a.expect("visit_started", skip=("lobby",)), await b.expect("visit_started", skip=("lobby", "knock_sent", "answered"))
+        check("B knocks: a guest at an open door walks in, A's page never asked (it hears the visit start, a guest's)",
+              (sa["role"], sa.get("guest"), sa["peer"]["name"], sb["role"]), ("host", True, "B", "visitor"))
+        check("both told the other's key, as its link proved it", (sa["peer"]["key"], sb["peer"]["key"]), (kb, ka))
+        await b.send(type="end", visit=sa["id"])
+        await a.until(lambda m: m["type"] == "visit_ended")
+        await b.until(lambda m: m["type"] == "visit_ended")
+        await a.send(type="door", open=False)
+        check("A closes its door", (await a.expect("guests"))["door"], "closed")
+        await b.send(type="knock", to=ids["A"])
+        k = await a.expect("knock")
+        check("door closed: even a guest knocks, and A's page is asked", (k["from"]["name"], k["from"]["key"]), ("B", kb))
+        await a.send(type="answer", knock=k["id"], accept=False)
+        await b.until(lambda m: m["type"] == "answered")
+        await a.send(type="door", open=True)
+        await a.expect("guests")
+        await a.send(type="guest_remove", key=kb)
+        check("B no longer a guest", (await a.expect("guests"))["guests"], [])
+        await b.send(type="knock", to=ids["A"])
+        k = await a.expect("knock")
+        check("door open, but B not a guest: A's page is asked", k["from"]["name"], "B")
+        await a.send(type="answer", knock=k["id"], accept=False)
+        await b.until(lambda m: m["type"] == "answered")
+        await a.send(type="guest_add", key="o1a2b3c4", name="nope")
+        check("a guest's key must be a key", (await a.expect("error"))["code"], "bad_message")
+        await a.send(type="guest_add", key=ka)
+        check("and not A's own", (await a.expect("error"))["code"], "bad_message")
+        # A lobby that lies: it says B's knock comes from a guest's key. A lets it in, and the visit is agreed,
+        # but B's link is B's own key, not the guest's: A ends it before any link is made.
+        other = "5866666666666666666666666666666666666666666666666666666666666666"   # ed25519's base point: a key
+        await a.send(type="guest_add", key=other, name="someone")
+        await a.expect("guests")
+        real = lobby.knock_msg
+        def lying(kid):
+            m = real(kid)
+            m["from"]["key"] = other
+            return m
+        lobby.knock_msg = lying
+        try:
+            await b.send(type="knock", to=ids["A"])
+            await asyncio.sleep(1.5)
+        finally:
+            lobby.knock_msg = real
+        seen_a = [m["type"] for m in [a.texts.get_nowait() for _ in range(a.texts.qsize())] if m]
+        seen_b = [m["type"] for m in [b.texts.get_nowait() for _ in range(b.texts.qsize())] if m]
+        check("a lobby lying about whose knock it is: no visit (A's page asked nothing, B's never in)",
+              ("knock" in seen_a, "visit_started" in seen_a, "visit_started" in seen_b, len(lobby.VISITS2)), (False, False, False, 0))
+        await a.send(type="guest_remove", key=other)
+        await a.expect("guests")
+
         print("\naway: out of the lobby on purpose, and back")
         await a.drain()
         await b.drain()
@@ -353,7 +417,7 @@ async def main():
         check("and B's lobby no longer has A (it said bye: no resume window)", [o["name"] for o in lob["offices"]], ["B"])
         await a.send(type="knock", to=ids["B"])
         check("away, A cannot knock: refused `away`", (await a.expect("error", skip=("lobby", "visit_ended")))["code"], "away")
-        check("A's state file says away", json.load(open(state)), {"away": True})
+        check("A's state file says away", json.load(open(state))["away"], True)
         a2 = await Page(7411, ta).open()
         ra2 = await a2.expect("ready")
         check("a page connecting to A meanwhile: ready says away, not online", (ra2["away"], ra2["online"]), (True, False))
@@ -367,13 +431,14 @@ async def main():
         await asyncio.sleep(1.5)
         check("A restarted with its state file: still away, and not in the lobby",
               (ra["away"], ra["online"], "a" in lobby.BY_NAME2), (True, False, False))
+        check("and the same key as before: the same office to its friends", ra["key"], ka)
         await a.send(type="join_lobby")
         back = await a.until(lambda m: m["type"] == "offline")
         check("A joins again: its page hears it is no longer away", back.get("away"), False)
         on = await a.until(lambda m: m["type"] == "online")
         lob = await b.until(lambda m: m["type"] == "lobby" and any(o["name"] == "A" and o["ready"] for o in m["offices"]))
         check("then online, a new office, and B sees it (link published)", (on["office"]["name"], on["office"]["id"] != ids["A"]), ("A", True))
-        check("A's state file says not away", json.load(open(state)), {"away": False})
+        check("A's state file says not away", json.load(open(state))["away"], False)
         await a.drain()
         pb.terminate()
         await asyncio.wait_for(pb.wait(), 5)

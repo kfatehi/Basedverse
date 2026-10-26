@@ -9,6 +9,41 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.7.0 — unreleased (the `world` branch)
+
+**Keys, guests and the door: a friend walks in without knocking.** The first step of
+[visit/WORLD.md](visit/WORLD.md). An office now has a **key**, its lasting identity: its link endpoint's
+public key, kept (with its secret half) in the state file, so it is the same office every run. The lobby
+lists each office's key, and a knock says whose it is. A host keeps a **guest list** of keys and a **door**:
+while the door is open, a guest's knock is answered yes by the visit-client itself, at once, and the page only
+hears the visit start (`guest: true`). Everyone else knocks, as before. A lobby that lies about whose knock it
+is gets nobody in: the visitor's link must be the guest's very key. Protocol names are unchanged: a 0.7 office
+and a 0.6 one still meet (an older lobby lists no keys: then nobody walks in, everyone knocks).
+
+### What changed
+
+- visit-client: the state file (`--state-file`) keeps the office's secret key, its door and its guests as well
+  as whether it is away, and is written readable by its owner only. The page messages `door`, `guest_add` and
+  `guest_remove`, and `guests` back; `ready` has `key`, `door` and `guests`; `visit_started` has the other
+  office's `peer.key` (as the link proved it) and `guest: true` for a guest let in at the open door.
+- visit.js: `v.key`, `v.door`, `v.guests`, `v.setDoor(open)`, `v.addGuest(key, name)`, `v.removeGuest(key)`,
+  `v.isGuest(key)`; `v.offices[].key`; `v.visitors[].guest`. The panel has "your door" and a star by each office
+  (and visitor) to make it a guest.
+- The lobby: `key` for each office in `lobby` (kept while its link is withdrawn), and `from.key` on a knock.
+- [visit/SPEC.md](visit/SPEC.md): sections 2, 3 (points 9 and 10), 4.1, 5, 6.3, 6.4, 9, 11.
+  [visit/WORLD.md](visit/WORLD.md): the plan this is step 1 of.
+
+### What an integration does
+
+1. **The lobby first** (whoever runs it): `bin/deploy-lobby`, for the keys. With an older lobby everything
+   works as in 0.6, guests included: they just knock.
+2. Get visit-client 0.7.0.
+3. Make sure your launcher gives visit-client a `VISIT_STATE_FILE` (`bin/setup` does): without one, the office's
+   key is new every run and its guests' hosts no longer know it. The file now holds a secret key: outside your
+   repository, never copied anywhere.
+4. Nothing else is required. With `Visit.panel`, your user gets the door and the stars. With your own UI, offer
+   them if you like (INTEGRATING.md step 7).
+
 ## v0.6.0 — 2026-10-26
 
 **Visitors can point, and objects' userData stays home.** A visitor looking around has a crosshair, and a

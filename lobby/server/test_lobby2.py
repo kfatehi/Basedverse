@@ -402,12 +402,33 @@ async def t_version_3():
         await c.send(type="bye")
 
 
+async def t_keys():
+    """Each office's key (the endpoint it publishes: Visit 0.7's lasting identity) in the lobby and on its knocks,
+    for a host's guest list; kept while its link is withdrawn. Additions: version 3 as it was."""
+    a, b = await join("Key A", proto=lobby.PROTO3), await join("Key B", proto=lobby.PROTO3)
+    nolink = await join("Key C", link=False, proto=lobby.PROTO3)
+    lob = await a.last_lobby()
+    check("each office's key in the lobby: its endpoint, or null before it has published one",
+          [(o["name"], o["key"]) for o in lob["offices"]], [("Key A", "ep-Key A"), ("Key B", "ep-Key B"), ("Key C", None)])
+    await a.send(type="link", endpoint=None, addr=None)
+    lob = await b.last_lobby()
+    check("a link withdrawn: not ready, but still its key", (office(lob, "Key A")["ready"], office(lob, "Key A")["key"]), (False, "ep-Key A"))
+    await a.send(type="link", **a.link)
+    await b.quiet()
+    await a.send(type="knock", to=b.id)
+    await a.expect("knock_sent")
+    k = await b.expect("knock")
+    check("a knock says whose key it is", k["from"]["key"], "ep-Key A")
+    for c in (a, b, nolink):
+        await c.send(type="bye")
+
+
 async def main():
     global URL
     async with serve(lobby.handler, "127.0.0.1", 0, max_size=lobby.LIMITS["frame"], process_request=lobby.health) as server:
         URL = "ws://127.0.0.1:%d" % server.sockets[0].getsockname()[1]
         for t in (t_hello, t_hello_rules_and_separation, t_knock_refusals, t_visit, t_end_and_full, t_resume, t_resume_replays_visits, t_rename,
-                  t_resume_window_and_bye, t_knock_timeout_and_health, t_version_3):
+                  t_resume_window_and_bye, t_knock_timeout_and_health, t_version_3, t_keys):
             print("\n" + t.__name__[2:])
             try:
                 await t()

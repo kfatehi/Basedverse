@@ -72,7 +72,8 @@ from that section if not, and keep it out of version control), and fill in:
 
 - `VISIT_STATE_FILE`: a file of the user's own (outside your repository, e.g.
   `~/.local/state/basedverse/<office>.json`) where visit-client keeps whether your user has gone offline, so
-  a restart does not put them back in the lobby.
+  a restart does not put them back in the lobby, and the office's key, door and guests, so friends stay
+  friends across restarts. It holds a secret key: never commit it, never copy it elsewhere.
 
 The rest can stay blank, meaning their defaults (port 7401, 3 visitors at once). `VISIT_TOKEN_FILE` is
 for your launcher to set (step 2). Never put real values in `.env.example` itself: it is basedverse's
@@ -349,12 +350,15 @@ Visit.panel(document.getElementById("visit-panel"), visit);
 It lists the workrooms online (with whether each is available, how many visitors it has and takes), lets
 your user knock with a message, shows knocks on your door with **Let in** / **Not now**, shows your
 visitors (with **Kick**) and your visit (with **Leave**), sets your status and max visitors, and has
-**Go offline** / **Go online**.
+**Go offline** / **Go online**. A star (☆) by each office makes it a **guest**: while your door is open (the
+panel's "your door"), a guest's knock lets them in at once, without asking your user.
 
 Or build your own from the state and actions: `visit.offices`, `visit.knocks`, `visit.visiting`,
 `visit.visitors`, `visit.knock(id, message)`, `visit.answer(knockId, true | false)`, `visit.leave()`,
 `visit.kick(visitId)`, `visit.setStatus("available" | "busy")`, `visit.setMaxVisitors(n)`,
-`visit.leaveLobby()`, `visit.joinLobby()`; redraw on `"change"`. Rules your UI must follow:
+`visit.leaveLobby()`, `visit.joinLobby()`, and the door and guests: `visit.door`, `visit.guests`,
+`visit.setDoor(open)`, `visit.addGuest(office.key, office.name)`, `visit.removeGuest(key)`; redraw on
+`"change"`. Rules your UI must follow:
 
 - Offer **Knock** only for offices that are `ready`, `available`, not you, not full
   (`visitors < maxVisitors`), and not the one you are visiting.
@@ -364,6 +368,8 @@ Or build your own from the state and actions: `visit.offices`, `visit.knocks`, `
   are: `visit.state === "away"`. Away, nobody sees them or can knock, and their visits end; with
   `VISIT_STATE_FILE` they stay away until they come back, restarts included. Do not stop visit-client for
   this: it keeps your page connected while away, so the switch works.
+- If you offer guests, show which offices are guests, and whether the door is open; say plainly that a
+  guest walks in without asking. A visitor let in that way has `guest: true` in `visit.visitors`.
 
 **Check:** your user can see other workrooms, knock, answer a knock, and go offline and back.
 

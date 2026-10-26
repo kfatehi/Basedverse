@@ -269,6 +269,27 @@ async def main():
         check("A clicks Go online: online again", await a.until("v.state === 'online' && v.state"), "online")
         check("and B sees A again, ready to visit", await b.until("v.offices.some(o => o.name === 'A' && o.ready)"), True)
 
+        print("\nguests, from the panel")
+        star = "document.querySelector('.visit-panel button.star[data-name=B]')"
+        check("A's panel has a star by B, not lit", await a.until("%s && %s.textContent" % (star, star)), "☆")
+        await a.js("%s.click()" % star)
+        check("A clicks it: B is A's guest, by B's key", await a.until("v.guests.length === 1 && v.guests[0].key === v.offices.find(o => o.name === 'B').key && v.guests[0].name"), "B")
+        check("and the star is lit", await a.until("%s.textContent === '★'" % star), True)
+        await a.js("window.knocksSeen = 0; v.on('knock', () => window.knocksSeen++)")
+        await b.js("v.knock(v.offices.find(o => o.name === 'A').id)")
+        check("B knocks: in A's room at once, the door being open", await b.until("v.visiting && v.visiting.host.name"), "A")
+        check("A's panel never asked: B walked in", (await a.until("v.visitors.length === 1 && document.querySelector('.visit-panel').textContent.includes('walked in')"),
+                                                     await a.js("window.knocksSeen")), (True, 0))
+        await b.js("v.leave()")
+        await a.until("v.visitors.length === 0")
+        await a.js("(s => { s.value = 'closed'; s.dispatchEvent(new Event('change', { bubbles: true })); })(document.querySelector('.visit-panel select[data-v=door]'))")
+        check("A closes its door from the panel", await a.until("v.door === 'closed' && v.door"), "closed")
+        await b.js("v.knock(v.offices.find(o => o.name === 'A').id)")
+        check("then B knocks, and A's panel asks", await a.until("!!document.querySelector('.visit-panel .knock')"), True)
+        await a.js("document.querySelector('.visit-panel .knock button[data-v=out]').click()")
+        await a.js("v.setDoor(true); v.removeGuest(v.guests[0].key)")
+        check("door open again, B no guest", await a.until("v.door === 'open' && v.guests.length === 0"), True)
+
         print("\nwhat a host sends is only data")
         r = await b.js("""(() => { const c = Visit._test.cleanScene, budget = { vertices: 0, objects: 0 };
           const j = c({ materials: [{ uuid: "m", type: "RawShaderMaterial", vertexShader: "x" }],

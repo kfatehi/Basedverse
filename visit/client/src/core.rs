@@ -16,6 +16,7 @@ use crate::{
     frames::{self, Frame},
     link::{LinkCmd, Links, Relays, Role},
     lobby::LobbyOut,
+    state::{self, Guest, Saved},
     VERSION,
 };
 
@@ -89,6 +90,8 @@ struct Visit {
     resync_due: bool,
     /// Points taken from the visitor in the current second (host side): at most POINTS_PER_SECOND.
     points: (Instant, u32),
+    /// A guest let in without knocking, through the open door (host side).
+    guest: bool,
 }
 
 /// The most control messages a link's other side may send a second; more are dropped (a peer flooding
@@ -102,6 +105,8 @@ const INPUTS_PER_SECOND: u32 = 120;
 /// The most points a second taken from a visitor (a click at the middle of its view: 8.3); more are dropped.
 /// Its page sends at most one every 200 ms.
 const POINTS_PER_SECOND: u32 = 5;
+/// How long a guest let in through the open door is waited for, to be agreed as a visit by the lobby.
+const ADMITTED_FOR: Duration = Duration::from_secs(120);
 
 pub struct Core {
     lobby: mpsc::UnboundedSender<LobbyOut>,
@@ -113,9 +118,15 @@ pub struct Core {
     page_gone: Instant,
     idle_exit: u64,
     online: bool,
-    /// The page took this office out of the lobby (leave_lobby), until join_lobby: kept in `state_file`.
-    away: bool,
+    /// What outlasts a run, kept in `state_file`: whether the page took this office out of the lobby
+    /// (leave_lobby, until join_lobby), its key, its door and its guests.
+    saved: Saved,
     state_file: Option<PathBuf>,
+    /// The office's key, as others see it: its link endpoint's public key.
+    key: String,
+    /// Guests let in through the open door (knocker's office id -> its key, and when), until the lobby agrees
+    /// their visit: then the visitor's link must be that key.
+    admitted: HashMap<String, (String, Instant)>,
     office: Value,
     status: String,
     max_visitors: u8,
@@ -132,8 +143,9 @@ pub struct Core {
 
 impl Core {
     pub fn new(lobby: mpsc::UnboundedSender<LobbyOut>, me: mpsc::UnboundedSender<Ev>, relays: Option<Relays>, max_visitors: u8, idle_exit: u64,
-               away: bool, state_file: Option<PathBuf>) -> Core {
-        Core {
+               saved: Saved, fresh: bool, state_file: Option<PathBuf>) -> Core {
+        let key = saved.key.public().to_string();
+        let core = Core {
             lobby,
             me,
             relays,
@@ -143,8 +155,10 @@ impl Core {
             page_gone: Instant::now(),
             idle_exit,
             online: false,
-            away,
+            saved,
             state_file,
+            key,
+            admitted: HashMap::new(),
             office: Value::Null,
             status: "available".into(),
             max_visitors,
@@ -154,7 +168,11 @@ impl Core {
             next_channel: 1,
             hosting: None,
             input_seq: 0,
+        };
+        if fresh {
+            core.save_state();   // a key made just now: kept, so it is this office's from now on
         }
+        core
     }
 
     /// Runs until shut down; the exit code.
@@ -168,6 +186,7 @@ impl Core {
                 }
                 Ev::Tick => {
                     self.resyncs();
+                    self.admitted.retain(|_, (_, at)| at.elapsed() < ADMITTED_FOR);
                     if self.idle_exit > 0 && self.page.is_none() && self.page_gone.elapsed() >= Duration::from_secs(self.idle_exit) {
                         info!("no page for {} s: exiting", self.idle_exit);
                         break;
@@ -275,8 +294,8 @@ impl Core {
         self.page = Some(Page { id, text, frames });
         let visits: Vec<Value> = self.visits.values().filter(|v| v.up).map(started).collect();
         self.to_page(json!({
-            "type": "ready", "version": VERSION, "office": self.office, "online": self.online, "away": self.away, "status": self.status,
-            "max_visitors": self.max_visitors, "visits": visits,
+            "type": "ready", "version": VERSION, "office": self.office, "online": self.online, "away": self.saved.away, "status": self.status,
+            "max_visitors": self.max_visitors, "visits": visits, "key": self.key, "door": self.door(), "guests": self.guests(),
         }));
         if let Some(view) = self.lobby_view.clone() {
             self.to_page(view);
@@ -316,6 +335,40 @@ impl Core {
                 None => self.page_error("bad_message", "n must be 0 to 8", Some("max_visitors")),
             },
             "leave_lobby" => self.set_away(true),
+            // The door, and who walks in through it without knocking (kept in the state file).
+            "door" => match m.get("open").and_then(Value::as_bool) {
+                Some(open) => {
+                    self.saved.door_open = open;
+                    self.save_state();
+                    self.tell_guests();
+                }
+                None => self.page_error("bad_message", "open must be true or false", Some("door")),
+            },
+            "guest_add" => match m.get("key").and_then(Value::as_str).filter(|k| state::key_ok(k)) {
+                Some(k) if k == self.key => self.page_error("bad_message", "that is this office's own key", Some("guest_add")),
+                Some(k) => {
+                    let (k, name) = (k.to_string(), state::clip_name(m.get("name").and_then(Value::as_str).unwrap_or("")));
+                    let full = self.saved.guests.len() >= state::MAX_GUESTS;
+                    match self.saved.guests.iter_mut().find(|g| g.key == k) {
+                        Some(g) => g.name = name,
+                        None if full => {
+                            return self.page_error("too_many_guests", &format!("at most {} guests", state::MAX_GUESTS), Some("guest_add"));
+                        }
+                        None => self.saved.guests.push(Guest { key: k, name }),
+                    }
+                    self.save_state();
+                    self.tell_guests();
+                }
+                None => self.page_error("bad_message", "key is an office's key, as the lobby lists it", Some("guest_add")),
+            },
+            "guest_remove" => match m.get("key").and_then(Value::as_str) {
+                Some(k) => {
+                    self.saved.guests.retain(|g| g.key != k);
+                    self.save_state();
+                    self.tell_guests();
+                }
+                None => self.page_error("bad_message", "key is the guest's key", Some("guest_remove")),
+            },
             "join_lobby" => self.set_away(false),
             "host" => match m.get("three").and_then(Value::as_str).filter(|r| revision(r)) {
                 Some(r) => {
@@ -440,7 +493,7 @@ impl Core {
             let _ = self.lobby.send(LobbyOut::Msg(m));
         } else {
             let re = m.get("type").and_then(Value::as_str).map(str::to_string);
-            if self.away {
+            if self.saved.away {
                 self.page_error("away", "this office is out of the lobby: join_lobby to come back", re.as_deref());
             } else {
                 self.page_error("offline", "the lobby is not reachable right now", re.as_deref());
@@ -451,10 +504,10 @@ impl Core {
     /// In or out of the lobby, as the page asks. Out: its visits end, its knocks go, the lobby hears bye,
     /// and it stays out (across restarts too, with a state file) until asked back.
     fn set_away(&mut self, away: bool) {
-        if away == self.away {
+        if away == self.saved.away {
             return;
         }
-        self.away = away;
+        self.saved.away = away;
         self.save_state();
         if away {
             info!("leaving the lobby: the page asked");
@@ -472,11 +525,22 @@ impl Core {
 
     fn save_state(&self) {
         let Some(path) = &self.state_file else { return };
-        let tmp = path.with_extension("tmp");
-        let body = json!({ "away": self.away }).to_string();
-        if let Err(e) = std::fs::write(&tmp, body).and_then(|_| std::fs::rename(&tmp, path)) {
-            warn!("could not keep the away state in {}: {e}", path.display());
+        if let Err(e) = self.saved.save(path) {
+            warn!("could not keep this office's state in {}: {e}", path.display());
         }
+    }
+
+    fn door(&self) -> &'static str {
+        if self.saved.door_open { "open" } else { "closed" }
+    }
+
+    fn guests(&self) -> Value {
+        json!(self.saved.guests.iter().map(|g| json!({ "key": g.key, "name": g.name })).collect::<Vec<_>>())
+    }
+
+    fn tell_guests(&mut self) {
+        let (door, guests) = (self.door(), self.guests());
+        self.to_page(json!({ "type": "guests", "door": door, "guests": guests }));
     }
 
     /// Its link to the lobby, so others can visit: only while its page hosts its scene.
@@ -505,7 +569,7 @@ impl Core {
     }
 
     async fn lobby_msg(&mut self, m: Value) {
-        if self.away {
+        if self.saved.away {
             return;   // the last words of a session it has left
         }
         let t = m.get("type").and_then(Value::as_str).unwrap_or("").to_string();
@@ -515,6 +579,7 @@ impl Core {
                 // The knocks still waiting on this office come again after the welcome.
                 self.knocks.clear();
                 if !resumed {
+                    self.admitted.clear();
                     self.end_all("gone");
                 } else if let Some(live) = m.get("visits").and_then(Value::as_array) {
                     // Back after a drop: a visit that ended while this office was away is over (the lobby
@@ -532,7 +597,7 @@ impl Core {
                         let urls: Vec<String> = m.get("relays").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
                         if urls.is_empty() { Relays::Default } else { Relays::Custom(urls) }
                     });
-                    match Links::start(relays, self.me.clone()).await {
+                    match Links::start(relays, self.saved.key.clone(), self.me.clone()).await {
                         Ok(l) => self.links = Some(l),
                         Err(e) => warn!("could not start the link endpoint: {e:#}"),
                     }
@@ -547,6 +612,9 @@ impl Core {
                 self.to_page(m);
             }
             "knock" => {
+                if self.let_guest_in(&m) {
+                    return;
+                }
                 if let Some(id) = m.get("id").and_then(Value::as_str) {
                     self.knocks.insert(id.to_string(), (m.clone(), Instant::now()));
                 }
@@ -568,6 +636,28 @@ impl Core {
         }
     }
 
+    /// A knock from a guest, with the door open and the room hosted: answered yes here, at once, without the
+    /// page (which hears the visit start). The knocker's key is the lobby's word until the visit is agreed: then
+    /// the visitor's link must be that key (visit_agreed), and the link makes it prove it.
+    fn let_guest_in(&mut self, m: &Value) -> bool {
+        let from = m.get("from");
+        let (Some(kid), Some(fid), Some(fkey)) = (
+            m.get("id").and_then(Value::as_str),
+            from.and_then(|f| f.get("id")).and_then(Value::as_str),
+            from.and_then(|f| f.get("key")).and_then(Value::as_str),
+        ) else {
+            return false;
+        };
+        if !self.saved.door_open || self.hosting.is_none() || !self.saved.guests.iter().any(|g| g.key == fkey) {
+            return false;
+        }
+        info!(knock = kid, from = fid, "a guest at the open door: let in");
+        self.admitted.insert(fid.to_string(), (fkey.to_string(), Instant::now()));
+        let kid = kid.to_string();
+        self.to_lobby(json!({ "type": "answer", "knock": kid, "accept": true }));
+        true
+    }
+
     // ---------- visits ----------
 
     fn visit_agreed(&mut self, m: &Value) {
@@ -586,6 +676,24 @@ impl Core {
         };
         let role = if role == "host" { Role::Host } else { Role::Visitor };
         let peer_link = m.get("peer_link").cloned().unwrap_or(Value::Null);
+        let endpoint = peer_link.get("endpoint").and_then(Value::as_str).map(str::to_string);
+        // The other office, with its key: the link proves it (the host admits only that endpoint; the visitor
+        // dials that very one).
+        let mut peer = m.get("peer").cloned().unwrap_or(Value::Null);
+        if let (Some(p), Some(k)) = (peer.as_object_mut(), &endpoint) {
+            p.insert("key".into(), json!(k));
+        }
+        let mut guest = false;
+        if role == Role::Host {
+            let pid = peer.get("id").and_then(Value::as_str).unwrap_or("");
+            if let Some((key, _)) = self.admitted.remove(pid) {
+                if endpoint.as_deref() != Some(key.as_str()) {
+                    warn!(visit = id, "a guest let in whose link is another key: ended");
+                    return self.to_lobby(json!({ "type": "end", "visit": id, "reason": "kicked" }));
+                }
+                guest = true;
+            }
+        }
         let cmd = match role {
             Role::Host => links.host(id, ticket, &peer_link),
             Role::Visitor => links.visitor(id, ticket, &peer_link),
@@ -595,9 +703,9 @@ impl Core {
                 let channel = self.channel();
                 info!(visit = id, ?role, channel, "visit agreed");
                 self.visits.insert(id.to_string(), Visit {
-                    id: id.to_string(), channel, role, peer: m.get("peer").cloned().unwrap_or(Value::Null), up: false, cmd,
+                    id: id.to_string(), channel, role, peer, up: false, cmd,
                     last_seq: 0, inputs: (Instant::now(), 0), want_key: false, host_state: None, ctl: (Instant::now(), 0), key_asked: None, resync_asked: None, resync_due: false,
-                    points: (Instant::now(), 0),
+                    points: (Instant::now(), 0), guest,
                 });
             }
             Err(e) => {
@@ -773,6 +881,9 @@ fn started(v: &Visit) -> Value {
     let mut m = json!({ "type": "visit_started", "id": v.id, "channel": v.channel, "role": if v.role == Role::Host { "host" } else { "visitor" }, "peer": v.peer });
     if let Some(state) = &v.host_state {
         m["state"] = state.clone();
+    }
+    if v.guest {
+        m["guest"] = json!(true);
     }
     m
 }

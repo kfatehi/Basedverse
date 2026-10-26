@@ -19,7 +19,7 @@ use anyhow::{anyhow, bail, Result};
 use bytes::Bytes;
 use iroh::{
     endpoint::{presets, Connection, ConnectionError, Incoming, QuicTransportConfig, RecvStream, SendStream, VarInt},
-    Endpoint, EndpointAddr, EndpointId, RelayMode, Watcher,
+    Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey, Watcher,
 };
 use serde_json::{json, Value};
 use tokio::{sync::mpsc, task::JoinHandle, time::Instant};
@@ -105,9 +105,9 @@ pub struct Links {
 }
 
 impl Links {
-    /// Binds the endpoint, starts admitting dialled links, and reports its address (and every change of
-    /// it) to the core, to publish to the lobby.
-    pub async fn start(relays: Relays, core: mpsc::UnboundedSender<Ev>) -> Result<Links> {
+    /// Binds the endpoint, with the office's key, starts admitting dialled links, and reports its address (and
+    /// every change of it) to the core, to publish to the lobby.
+    pub async fn start(relays: Relays, key: SecretKey, core: mpsc::UnboundedSender<Ev>) -> Result<Links> {
         let relay_mode = match relays {
             Relays::Default => RelayMode::Default,
             Relays::Off => RelayMode::Disabled,
@@ -117,7 +117,7 @@ impl Links {
         };
         // Cubic, QUIC's default, for congestion control: BBRv3 was tried (tests/perf) and was slower here.
         let transport = QuicTransportConfig::builder().send_window(SEND_WINDOW).build();
-        let ep = Endpoint::builder(presets::Minimal).alpns(vec![ALPN.to_vec()]).relay_mode(relay_mode).transport_config(transport).bind().await?;
+        let ep = Endpoint::builder(presets::Minimal).alpns(vec![ALPN.to_vec()]).relay_mode(relay_mode).transport_config(transport).secret_key(key).bind().await?;
         info!(endpoint = %ep.id(), "link endpoint up");
         let expected: Ledger = Arc::default();
         tokio::spawn(accept_loop(ep.clone(), expected.clone()));
