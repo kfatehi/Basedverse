@@ -11,7 +11,7 @@ keep the names, so offices on different versions still meet and visit each other
 
 ## v0.9.0 — unreleased (the `v0.9` branch)
 
-**A map of your world, avatars, and interactions by type.**
+**A map of your world, avatars, interactions by type, and a huddle.**
 
 - **The map** (the panel's **Map**, `Visit.map`): your world from above. Drag a friend's room where you want it,
   turn it, or type where its middle goes; it snaps to half units and flush against what is near. Flush against a
@@ -27,25 +27,34 @@ keep the names, so offices on different versions still meet and visit each other
   not, and one that is not is refused unless the room says its user agreed to it (`agreed: true`). The guide
   says, for whoever integrates: **don't implement any interactions other than cosmetic ones unless specifically
   agreed upon by the user.**
+- **The huddle** (SPEC 8.7, the panel's **Join huddle**): voice with everyone you are linked to (a visit, a link,
+  a plot in your world or yours in theirs) who joins too. Your microphone, echo cancelled, Opus at about 24 kbps,
+  straight over the link between your visit-clients (no server in between); you hear an office only while both of
+  you are in. **Mute**, **Leave**; the panel shows who is in and who is speaking. Headphones are best.
+- A link with someone who is your guest goes into your world, not the corner (#5, kfatehi): their plot was there
+  already, as a guest's.
 
 Protocol names are unchanged: an older Visit never asks for an avatar nor sends one, and an older visitor sees
 `userData.visitPoint` types as plain marks (its host decides each point, as before).
 
 ### What changed
 
-- visit-client: page messages `link_where`, `avatar_clear`, `avatar_want`, `avatars`, `avatar_use`; to the page
-  `avatars` (also in `ready`), `avatar`, and `where` in `visit_started`; a page frame flag for its own avatar
-  (5.4, bit 2); a link control message `avatar_want` and a stream of the visitor's avatar (7.4, kind 2). The
+- visit-client: page messages `link_where`, `avatar_clear`, `avatar_want`, `avatars`, `avatar_use`, `huddle`; to
+  the page `avatars` (also in `ready`), `avatar`, `huddle`, `huddle_peer`, and `where` and `huddle` in
+  `visit_started`; page frame flags for its own avatar (5.4, bit 2) and voice (bit 3, both ways); link control
+  messages `avatar_want` and `huddle`, a stream of the visitor's avatar (7.4, kind 2), and voice datagrams. The
   state file keeps whose look visitors have (`avatars`).
 - visit.js: `v.interactions`, the `interaction` event; `v.avatar`, `v.useAvatars`, `v.useAvatar`, `v.avatarUse`,
-  `v.avatars`, `avatar` on `v.visitors`; `Visit.map`. The panel: Map, visitors look like, their look / your
-  model. The visitor's crosshair shows an interaction's label.
+  `v.avatars`, `avatar` on `v.visitors`; `Visit.map`; `v.huddle`, `v.mute`, `v.huddling`, `v.muted`,
+  `v.huddlers`. The panel: Map, visitors look like, their look / your model, Join huddle / Mute / Leave. The
+  visitor's crosshair shows an interaction's label.
 - The test room: an interaction (`spin`), a box marked with a type it does not take, its own avatar, visitors
-  drawn as theirs. The tests: the browser test's interactions, map, avatars and reloads; the end-to-end test's
-  avatars.
-- [visit/SPEC.md](visit/SPEC.md): sections 4.1, 5.2 to 5.4, 7.2, 7.4, 8.3, 8.5, 8.6 (new), 9, 13.
-  [visit/INTEGRATING.md](visit/INTEGRATING.md): step 5 (interactions, avatars), steps 6, 7 and 9 (the map),
-  the checklist.
+  drawn as theirs. The tests: the browser test's interactions, map, avatars, huddle (two Chromes' fake
+  microphones) and reloads; the end-to-end test's avatars and huddle. The browser test's Chromes have a fake
+  microphone (`run-browser.sh`).
+- [visit/SPEC.md](visit/SPEC.md): sections 4.1, 5.2 to 5.4, 7.2, 7.4, 8.3, 8.5, 8.6 and 8.7 (new), 9, 13.
+  [visit/INTEGRATING.md](visit/INTEGRATING.md): step 5 (interactions, avatars, the huddle), steps 6, 7 and 9
+  (the map), the checklist.
 
 ### What an integration does
 
@@ -55,7 +64,9 @@ Protocol names are unchanged: an older Visit never asks for an avatar nor sends 
    ones only, unless your user agreed to another, by name. Points still reach you raw meanwhile.
 3. Draw a visitor's `avatar` when its entry has one, your model otherwise (step 5). Optional: give your own,
    `visit.avatar(body)`.
-4. Run step 8 again, and step 9's check (the Map now).
+4. If your page has its own lobby UI (not `Visit.panel`), offer the huddle: `visit.huddle(true)` from a click.
+   A Content-Security-Policy needs `blob:` for worklets as for workers.
+5. Run step 8 again, and step 9's check (the Map now).
 
 ## v0.8.0 — 2026-10-26
 

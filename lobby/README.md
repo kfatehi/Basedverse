@@ -105,5 +105,6 @@ sees your room, and anyone in the group can let more people in**: leave the grou
 from a three.js room) they are sent your room's scene, all of it: everything under `root`, whether in their
 view or not (of objects' `userData`, only what Visit itself reads). In version 3 your guests, with your door open, also watch your
 plot (Visit 0.7's worlds): they get the same, without a knock. Someone you let link with you (Visit 0.8) gets it too, seeing
-your room from outside it until either of you ends the link; your panel lists them. Whatever your room shows, they see: if it shows your work (issue
+your room from outside it until either of you ends the link; your panel lists them. A huddle's voice (Visit 0.9) goes
+straight between visit-clients, never through the lobby, and only between offices that both joined. Whatever your room shows, they see: if it shows your work (issue
 titles, what your agents are doing), so does the scene, or the video.
