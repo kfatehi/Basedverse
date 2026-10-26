@@ -423,12 +423,54 @@ async def t_keys():
         await c.send(type="bye")
 
 
+async def t_watch():
+    """Watches (Visit 0.7's world): a knock with watch: true, to see a plot from outside it. Counted apart from
+    visits, never moving the watcher out of the room it is in, not stopped by busy; errors say ref: watch."""
+    a, b, c = (await join("W A", proto=lobby.PROTO3), await join("W B", proto=lobby.PROTO3), await join("W C", proto=lobby.PROTO3))
+    await a.send(type="knock", to=c.id)
+    await a.expect("knock_sent")
+    await c.send(type="answer", knock=(await c.expect("knock"))["id"], accept=True)
+    await a.expect("answered")
+    vv = await a.expect("visit")
+    await a.quiet()
+    await c.quiet()
+    await b.send(type="status", status="busy")
+    await b.quiet()
+    await a.send(type="knock", to=b.id, watch=True)
+    sent = await a.expect("knock_sent")
+    k = await b.expect("knock")
+    check("a knock to watch: says so both ways (and busy does not stop it)", (sent.get("watch"), k.get("watch"), k["from"]["key"]), (True, True, "ep-W A"))
+    await b.send(type="answer", knock=k["id"], accept=True)
+    ans = await a.expect("answered")
+    wa, wb = await a.expect("visit"), await b.expect("visit")
+    check("let in: a watch, both told so, the watcher's room visit untouched",
+          (ans["accept"], ans.get("watch"), wa.get("watch"), wb.get("watch"), wa["role"], wb["role"], lobby.OFFICES2[a.id].visiting == vv["id"]),
+          (True, True, True, True, "visitor", "host", True))
+    lob = await c.last_lobby()
+    check("the lobby counts watchers apart from visitors", (office(lob, "W B")["watchers"], office(lob, "W B")["visitors"], office(lob, "W C")["visitors"]), (1, 0, 1))
+    await a.send(type="knock", to=b.id, watch=True)
+    e = await a.expect("error")
+    check("watching the same plot twice: already_watching, ref watch", (e["code"], e.get("ref")), ("already_watching", "watch"))
+    await c.send(type="knock", to=b.id, watch=True)
+    await c.expect("knock_sent")
+    k = await b.expect("knock")
+    await b.send(type="answer", knock=k["id"], accept=False)
+    ans = await c.expect("answered")
+    check("a watch declined: the knocker told, a watch's answer", (ans["accept"], ans.get("reason"), ans.get("watch")), (False, "declined", True))
+    await a.send(type="end", visit=wa["id"])
+    e1, e2 = await a.expect("visit_ended"), await b.expect("visit_ended")
+    check("a watch ends like a visit", (e1["id"], e2["id"], e1["reason"]), (wa["id"], wa["id"], "left"))
+    check("and the lobby forgets it", (len(lobby.OFFICES2[b.id].watched), len(lobby.OFFICES2[a.id].watching)), (0, 0))
+    for c_ in (a, b, c):
+        await c_.send(type="bye")
+
+
 async def main():
     global URL
     async with serve(lobby.handler, "127.0.0.1", 0, max_size=lobby.LIMITS["frame"], process_request=lobby.health) as server:
         URL = "ws://127.0.0.1:%d" % server.sockets[0].getsockname()[1]
         for t in (t_hello, t_hello_rules_and_separation, t_knock_refusals, t_visit, t_end_and_full, t_resume, t_resume_replays_visits, t_rename,
-                  t_resume_window_and_bye, t_knock_timeout_and_health, t_version_3, t_keys):
+                  t_resume_window_and_bye, t_knock_timeout_and_health, t_version_3, t_keys, t_watch):
             print("\n" + t.__name__[2:])
             try:
                 await t()

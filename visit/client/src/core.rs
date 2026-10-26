@@ -2,7 +2,7 @@
 //! on its door, the visits) and routes what comes in from the page, the lobby and the links (../SPEC.md
 //! sections 4-8). Everything else talks to it through `Ev`s.
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, VecDeque},
     path::PathBuf,
     time::{Duration, Instant},
 };
@@ -92,6 +92,11 @@ struct Visit {
     points: (Instant, u32),
     /// A guest let in without knocking, through the open door (host side).
     guest: bool,
+    /// A watch (../WORLD.md): the visitor sees the host's plot from outside it, until it steps in (`inside`).
+    watch: bool,
+    /// The visitor is in the host's room: its input and points count, and the host has it. Always, for a visit;
+    /// for a watch, from `enter` to `exit`.
+    inside: bool,
 }
 
 /// The most control messages a link's other side may send a second; more are dropped (a peer flooding
@@ -107,6 +112,14 @@ const INPUTS_PER_SECOND: u32 = 120;
 const POINTS_PER_SECOND: u32 = 5;
 /// How long a guest let in through the open door is waited for, to be agreed as a visit by the lobby.
 const ADMITTED_FOR: Duration = Duration::from_secs(120);
+/// The world (../WORLD.md): a knock to watch a guest's plot not yet answered is not made again for this long;
+/// one declined (or refused by the lobby), for this long.
+const WATCH_PENDING: Duration = Duration::from_secs(15);
+const WATCH_DECLINED: Duration = Duration::from_secs(60);
+/// The most plots an office watches at once (the lobby's own limit is the same).
+const MAX_WATCHING: usize = 8;
+/// With no page for this long, its world's watches end (they are only for a page to draw).
+const WORLD_NO_PAGE: Duration = Duration::from_secs(60);
 
 pub struct Core {
     lobby: mpsc::UnboundedSender<LobbyOut>,
@@ -127,6 +140,15 @@ pub struct Core {
     /// Guests let in through the open door (knocker's office id -> its key, and when), until the lobby agrees
     /// their visit: then the visitor's link must be that key.
     admitted: HashMap<String, (String, Instant)>,
+    /// The page draws a world (../WORLD.md): this office watches its guests' plots, by itself.
+    world: bool,
+    /// Knocks to watch: sent (office id -> when, and in the order sent: the lobby answers each, in order, with
+    /// knock_sent or an error), sent and named by the lobby (knock id -> office id), and declined or refused
+    /// (key -> when): not made again for a while.
+    watch_pending: HashMap<String, Instant>,
+    watch_order: VecDeque<String>,
+    watch_knocks: HashMap<String, String>,
+    watch_declined: HashMap<String, Instant>,
     office: Value,
     status: String,
     max_visitors: u8,
@@ -159,6 +181,11 @@ impl Core {
             state_file,
             key,
             admitted: HashMap::new(),
+            world: false,
+            watch_pending: HashMap::new(),
+            watch_order: VecDeque::new(),
+            watch_knocks: HashMap::new(),
+            watch_declined: HashMap::new(),
             office: Value::Null,
             status: "available".into(),
             max_visitors,
@@ -187,6 +214,11 @@ impl Core {
                 Ev::Tick => {
                     self.resyncs();
                     self.admitted.retain(|_, (_, at)| at.elapsed() < ADMITTED_FOR);
+                    if self.world && self.page.is_none() && self.page_gone.elapsed() >= WORLD_NO_PAGE {
+                        info!("no page for a minute: its world's watches end");
+                        self.set_world(false);
+                    }
+                    self.watch_guests();
                     if self.idle_exit > 0 && self.page.is_none() && self.page_gone.elapsed() >= Duration::from_secs(self.idle_exit) {
                         info!("no page for {} s: exiting", self.idle_exit);
                         break;
@@ -381,12 +413,48 @@ impl Core {
                 self.page_error("not_hosting", "an office takes part once its page hosts its three.js scene (visit.host)", Some("knock"));
             }
             "knock" | "answer" => {
+                let mut m = m;
                 if t == "answer" {   // answered: no longer waiting, so not shown again to a page that reconnects
                     if let Some(k) = m.get("knock").and_then(Value::as_str) {
                         self.knocks.remove(k);
                     }
+                } else if let Some(o) = m.as_object_mut() {
+                    o.remove("watch");   // a page knocks to visit; watching is this visit-client's own (world)
                 }
                 self.to_lobby(m);
+            }
+            // The world (../WORLD.md): this office watches its guests' plots for its page to draw, steps into one
+            // (`enter`, where in its own terms) and out again.
+            "world" => match m.get("on").and_then(Value::as_bool) {
+                Some(on) => self.set_world(on),
+                None => self.page_error("bad_message", "on must be true or false", Some("world")),
+            },
+            "enter" => {
+                let ch = m.get("channel").and_then(Value::as_u64).unwrap_or(0) as u16;
+                let Some(id) = self.visits.values().find(|v| v.channel == ch && v.up && v.role == Role::Visitor && v.watch).map(|v| v.id.clone()) else {
+                    return self.page_error("no_such_visit", "you are not watching on that channel", Some("enter"));
+                };
+                // In one room at a time: out of any other first (a visit there ends, as moving rooms ends one).
+                let others: Vec<(String, bool)> = self.visits.values().filter(|v| v.role == Role::Visitor && v.inside && v.id != id).map(|v| (v.id.clone(), v.watch)).collect();
+                for (other, watch) in others {
+                    if watch {
+                        self.step_out(&other);
+                    } else {
+                        self.to_lobby(json!({ "type": "end", "visit": other }));
+                    }
+                }
+                let pose = clamp_pose(m.get("pose").unwrap_or(&Value::Null));
+                if let Some(v) = self.visits.get_mut(&id) {
+                    v.inside = true;
+                    let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "enter": pose })));
+                }
+            }
+            "exit" => {
+                let ch = m.get("channel").and_then(Value::as_u64).unwrap_or(0) as u16;
+                match self.visits.values().find(|v| v.channel == ch && v.role == Role::Visitor && v.watch).map(|v| v.id.clone()) {
+                    Some(id) => self.step_out(&id),
+                    None => self.page_error("no_such_visit", "you are not watching on that channel", Some("exit")),
+                }
             }
             // The lobby renames the office if the name is free; if not, it stays as it was (and says why).
             "rename" => match m.get("name").and_then(Value::as_str) {
@@ -578,6 +646,7 @@ impl Core {
                 let resumed = m.get("resumed").and_then(Value::as_bool).unwrap_or(false);
                 // The knocks still waiting on this office come again after the welcome.
                 self.knocks.clear();
+                self.watch_order.clear();   // what was waiting for an answer from the last connection gets none
                 if !resumed {
                     self.admitted.clear();
                     self.end_all("gone");
@@ -610,6 +679,44 @@ impl Core {
             "lobby" => {
                 self.lobby_view = Some(m.clone());
                 self.to_page(m);
+                self.watch_guests();
+            }
+            // This office's own knocks to watch, and what became of them: never the page's.
+            "knock_sent" if m.get("watch").and_then(Value::as_bool) == Some(true) => {
+                self.watch_order.pop_front();
+                if let (Some(kid), Some(to)) = (m.get("id").and_then(Value::as_str), m.get("to").and_then(Value::as_str)) {
+                    self.watch_knocks.insert(kid.to_string(), to.to_string());
+                }
+            }
+            "answered" if m.get("watch").and_then(Value::as_bool) == Some(true) => {
+                let to = m.get("knock").and_then(Value::as_str).and_then(|k| self.watch_knocks.remove(k));
+                if let Some(to) = to {
+                    self.watch_pending.remove(&to);
+                    if m.get("accept").and_then(Value::as_bool) != Some(true) {
+                        if let Some(key) = self.office_key(&to) {
+                            self.watch_declined.insert(key, Instant::now());
+                        }
+                    }
+                }
+            }
+            "error" if m.get("ref").and_then(Value::as_str) == Some("watch") => {
+                // The oldest knock to watch the lobby has not answered: refused (not ready, full...). Not again for a while.
+                if let Some(to) = self.watch_order.pop_front() {
+                    debug!(code = ?m.get("code"), to, "a knock to watch refused by the lobby");
+                    self.watch_pending.remove(&to);
+                    if let Some(key) = self.office_key(&to) {
+                        self.watch_declined.insert(key, Instant::now());
+                    }
+                }
+            }
+            "knock" if m.get("watch").and_then(Value::as_bool) == Some(true) => {
+                // To watch: a guest through the open door is let in; anyone else declined. The page is never asked.
+                if !self.let_guest_in(&m) {
+                    if let Some(kid) = m.get("id").and_then(Value::as_str) {
+                        let kid = kid.to_string();
+                        self.to_lobby(json!({ "type": "answer", "knock": kid, "accept": false }));
+                    }
+                }
             }
             "knock" => {
                 if self.let_guest_in(&m) {
@@ -683,6 +790,10 @@ impl Core {
         if let (Some(p), Some(k)) = (peer.as_object_mut(), &endpoint) {
             p.insert("key".into(), json!(k));
         }
+        let watch = m.get("watch").and_then(Value::as_bool) == Some(true);
+        if watch && role == Role::Visitor {
+            self.watch_pending.remove(peer.get("id").and_then(Value::as_str).unwrap_or(""));
+        }
         let mut guest = false;
         if role == Role::Host {
             let pid = peer.get("id").and_then(Value::as_str).unwrap_or("");
@@ -705,7 +816,7 @@ impl Core {
                 self.visits.insert(id.to_string(), Visit {
                     id: id.to_string(), channel, role, peer, up: false, cmd,
                     last_seq: 0, inputs: (Instant::now(), 0), want_key: false, host_state: None, ctl: (Instant::now(), 0), key_asked: None, resync_asked: None, resync_due: false,
-                    points: (Instant::now(), 0), guest,
+                    points: (Instant::now(), 0), guest, watch, inside: !watch,
                 });
             }
             Err(e) => {
@@ -743,8 +854,69 @@ impl Core {
         }
     }
 
+    /// The visit whose room this office is in: where its input and points go.
     fn visiting(&self) -> Option<&Visit> {
-        self.visits.values().find(|v| v.role == Role::Visitor && v.up)
+        self.visits.values().find(|v| v.role == Role::Visitor && v.up && v.inside)
+    }
+
+    fn office_key(&self, id: &str) -> Option<String> {
+        self.lobby_view.as_ref()?.get("offices")?.as_array()?.iter()
+            .find(|o| o.get("id").and_then(Value::as_str) == Some(id))?
+            .get("key").and_then(Value::as_str).map(str::to_string)
+    }
+
+    /// The world on (the page draws its guests' plots) or off (its watches end).
+    fn set_world(&mut self, on: bool) {
+        self.world = on;
+        if on {
+            self.watch_declined.clear();   // asked anew: try everyone again
+            self.watch_guests();
+        } else {
+            let watches: Vec<String> = self.visits.values().filter(|v| v.role == Role::Visitor && v.watch).map(|v| v.id.clone()).collect();
+            for id in watches {
+                self.to_lobby(json!({ "type": "end", "visit": id }));
+            }
+        }
+    }
+
+    /// With the world on: a knock to watch each guest online and ready that this office does not watch yet,
+    /// unless one is waiting or was declined a while ago; at most MAX_WATCHING at once.
+    fn watch_guests(&mut self) {
+        if !self.world || !self.online || self.hosting.is_none() || self.link.is_none() {
+            return;
+        }
+        let now = Instant::now();
+        self.watch_pending.retain(|_, at| now.duration_since(*at) < WATCH_PENDING);
+        self.watch_declined.retain(|_, at| now.duration_since(*at) < WATCH_DECLINED);
+        let me = self.office.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+        let watched: Vec<String> = self.visits.values().filter(|v| v.role == Role::Visitor && v.watch)
+            .filter_map(|v| v.peer.get("id").and_then(Value::as_str).map(str::to_string)).collect();
+        let mut room = MAX_WATCHING.saturating_sub(watched.len() + self.watch_pending.len());
+        let offices: Vec<Value> = self.lobby_view.as_ref().and_then(|l| l.get("offices")).and_then(Value::as_array).cloned().unwrap_or_default();
+        for o in offices {
+            if room == 0 {
+                break;
+            }
+            let (Some(id), Some(key)) = (o.get("id").and_then(Value::as_str), o.get("key").and_then(Value::as_str)) else { continue };
+            if id == me || o.get("ready").and_then(Value::as_bool) != Some(true) || watched.iter().any(|w| w == id)
+                || self.watch_pending.contains_key(id) || self.watch_declined.contains_key(key) || !self.saved.guests.iter().any(|g| g.key == key)
+            {
+                continue;
+            }
+            debug!(to = id, "a knock to watch a guest's plot");
+            self.watch_pending.insert(id.to_string(), now);
+            self.watch_order.push_back(id.to_string());
+            let _ = self.lobby.send(LobbyOut::Msg(json!({ "type": "knock", "to": id, "watch": true })));
+            room -= 1;
+        }
+    }
+
+    /// Out of a watched plot's room (visitor side): its host no longer has this office; the watch goes on.
+    fn step_out(&mut self, id: &str) {
+        if let Some(v) = self.visits.get_mut(id).filter(|v| v.inside) {
+            v.inside = false;
+            let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "exit": true })));
+        }
     }
 
     /// Visitors' requests for the whole scene that may go to the page now (at most every RESYNC_EVERY each).
@@ -805,6 +977,28 @@ impl Core {
         }
         let ch = v.channel;
         match v.role {
+            // From a watcher: stepping into this room (where, in its terms), or out of it. In, it counts toward
+            // max_visitors: one past it is refused, and stays outside.
+            Role::Host if v.watch && m.get("enter").is_some() => {
+                if v.inside {
+                    return;
+                }
+                let pose = clamp_pose(&m["enter"]);
+                let full = self.visits.values().filter(|x| x.role == Role::Host && x.inside).count() >= self.max_visitors as usize;
+                let v = self.visits.get_mut(id).expect("just found");
+                if full {
+                    let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "enter_refused": "full" })));
+                } else {
+                    v.inside = true;
+                    self.to_page(json!({ "type": "enter", "channel": ch, "pose": pose }));
+                }
+            }
+            Role::Host if v.watch && m.get("exit").is_some() => {
+                if v.inside {
+                    v.inside = false;
+                    self.to_page(json!({ "type": "exit", "channel": ch }));
+                }
+            }
             // From the visitor.
             Role::Host => {
                 if m.get("scene_resync").is_some() {
@@ -813,7 +1007,7 @@ impl Core {
                 } else if m.get("keyframe").is_some() && v.key_asked.is_none_or(|t| t.elapsed() >= KEY_EVERY) {
                     v.key_asked = Some(Instant::now());
                     self.to_page(json!({ "type": "keyframe", "channel": ch }));
-                } else if let Some(p) = m.get("point") {
+                } else if let Some(p) = m.get("point").filter(|_| v.inside) {
                     if v.points.0.elapsed() >= Duration::from_secs(1) {
                         v.points = (Instant::now(), 0);
                     }
@@ -830,6 +1024,10 @@ impl Core {
             Role::Visitor => {
                 if let Some(p) = m.get("paused").and_then(Value::as_bool) {
                     self.to_page(json!({ "type": if p { "host_paused" } else { "host_resumed" }, "channel": ch }));
+                } else if let Some(reason) = m.get("enter_refused").filter(|_| v.watch && v.inside) {
+                    v.inside = false;
+                    let reason = reason.as_str().unwrap_or("refused").chars().take(40).collect::<String>();
+                    self.to_page(json!({ "type": "enter_refused", "channel": ch, "reason": reason }));
                 }
             }
         }
@@ -837,7 +1035,7 @@ impl Core {
 
     /// A visitor's input, checked and clamped, at most 60 a second, newest only.
     fn link_input(&mut self, id: &str, m: Value) {
-        let Some(v) = self.visits.get_mut(id).filter(|v| v.role == Role::Host) else { return };
+        let Some(v) = self.visits.get_mut(id).filter(|v| v.role == Role::Host && v.inside) else { return };
         let seq = m.get("seq").and_then(Value::as_u64).unwrap_or(0);
         if seq <= v.last_seq {
             return;
@@ -885,7 +1083,17 @@ fn started(v: &Visit) -> Value {
     if v.guest {
         m["guest"] = json!(true);
     }
+    if v.watch {
+        m["watch"] = json!(true);
+        m["inside"] = json!(v.inside);
+    }
     m
+}
+
+/// Where a watcher steps into a room, in that room's own terms: x, y, z and yaw, each a number in range.
+fn clamp_pose(m: &Value) -> Value {
+    let num = |k: &str| m.get(k).and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0.0, |x| x.clamp(-1e6, 1e6));
+    json!({ "x": num("x"), "y": num("y"), "z": num("z"), "yaw": num("yaw") })
 }
 
 /// A point (8.3): where the visitor looked as it clicked, `yaw` and `pitch` in the same terms as its input, each

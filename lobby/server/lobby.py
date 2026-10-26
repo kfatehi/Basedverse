@@ -363,6 +363,9 @@ LIMITS2 = {
     "name": 24, "message": 280, "frame": 64 * 1024, "knocks_per_minute": 6,
     "knock_ttl": int(os.environ.get("KNOCK_TTL", "60")),
     "max_visitors": 8,           # the most an office may take
+    "max_watchers": 8,           # the most offices watching one office's plot at once (Visit 0.7's world)
+    "max_watching": 8,           # the most plots one office watches at once
+    "watch_knocks_per_minute": 30,   # a world's knocks to watch are made by visit-clients, by themselves
     "link_addr": 2048,           # bytes of a link's `addr`, as JSON
     "connections_per_ip": 8,
     "resume": 30,                # seconds a dropped session is kept
@@ -384,15 +387,18 @@ class Office2:
         self.key = None              # the endpoint it last published: its key, kept while its link is withdrawn
         self.visiting = None         # the visit it is on, as a visitor
         self.hosting = set()         # the visits to it, as a host
+        self.watching = set()        # the watches it has of others' plots (visits with watch: they see, nothing else)
+        self.watched = set()         # the watches of its own plot
         self.knocked = collections.deque()
+        self.knocked_watch = collections.deque()
         self.held = None             # the timer that ends a dropped session
 
 
 OFFICES2 = {}                 # id -> Office2
 BY_NAME2 = {}                 # name.casefold() -> id
 RESUMES2 = {}                 # resume secret -> id
-KNOCKS2 = {}                  # knock id -> {"id", "from", "to", "message", "timer"}
-VISITS2 = {}                  # visit id -> {"id", "host", "visitor", "ticket"}
+KNOCKS2 = {}                  # knock id -> {"id", "from", "to", "message", "timer", "watch"}
+VISITS2 = {}                  # visit id -> {"id", "host", "visitor", "ticket", "watch"}
 
 
 def tell2(office, msg):
@@ -409,7 +415,7 @@ def lobby_view2(proto):
     return {"type": "lobby", "offices": [
         {"id": o.id, "name": o.name, "status": o.status, "sim": o.sim, "max_visitors": o.max_visitors,
          "visitors": len(o.hosting), "visiting": VISITS2[o.visiting]["host"] if o.visiting else None,
-         "ready": o.link is not None, "key": o.key}
+         "ready": o.link is not None, "key": o.key, "watchers": len(o.watched)}
         for o in sorted(OFFICES2.values(), key=lambda o: o.name.casefold()) if o.proto == proto]}
 
 
@@ -418,14 +424,19 @@ def announce2():
         broadcast([o.ws for o in OFFICES2.values() if o.ws is not None and o.proto == proto], json.dumps(lobby_view2(proto)))
 
 
-def start_visit(host, visitor):
-    """A visit agreed: the visitor leaves any room it is in, then both get `visit` with the other's link."""
-    if visitor.visiting:
+def start_visit(host, visitor, watch=False):
+    """A visit agreed: the visitor leaves any room it is in, then both get `visit` with the other's link. A
+    watch (Visit 0.7's world: seeing a plot from outside it) leaves nothing, and counts apart."""
+    if visitor.visiting and not watch:
         end_visit(visitor.visiting, "moved")
     vid, ticket = "v" + secrets.token_hex(6), secrets.token_hex(16)
-    VISITS2[vid] = {"id": vid, "host": host.id, "visitor": visitor.id, "ticket": ticket}
-    host.hosting.add(vid)
-    visitor.visiting = vid
+    VISITS2[vid] = {"id": vid, "host": host.id, "visitor": visitor.id, "ticket": ticket, "watch": watch}
+    if watch:
+        host.watched.add(vid)
+        visitor.watching.add(vid)
+    else:
+        host.hosting.add(vid)
+        visitor.visiting = vid
     for me in (host, visitor):
         tell2(me, visit_msg(VISITS2[vid], me))
     announce2()
@@ -438,8 +449,11 @@ def end_visit(vid, reason):
     host, visitor = OFFICES2.get(v["host"]), OFFICES2.get(v["visitor"])
     if host:
         host.hosting.discard(vid)
-    if visitor and visitor.visiting == vid:
-        visitor.visiting = None
+        host.watched.discard(vid)
+    if visitor:
+        visitor.watching.discard(vid)
+        if visitor.visiting == vid:
+            visitor.visiting = None
     for o in (host, visitor):
         if o:
             tell2(o, {"type": "visit_ended", "id": vid, "reason": reason})
@@ -451,7 +465,7 @@ def expire2(kid):
     if not k:
         return
     if k["from"] in OFFICES2:
-        tell2(OFFICES2[k["from"]], {"type": "answered", "knock": kid, "accept": False, "reason": "timeout"})
+        tell2(OFFICES2[k["from"]], answered(k, False, "timeout"))
     if k["to"] in OFFICES2:
         tell2(OFFICES2[k["to"]], {"type": "knock_cancelled", "id": kid, "reason": "timeout"})
 
@@ -497,44 +511,65 @@ def text_field2(m, key, office, ref):
 
 
 def on2_knock(me, m):
+    """A knock to visit, or (`watch`: true, Visit 0.7's world) to watch: to see the door's plot from outside it.
+    A watch is not stopped by `busy` (the door's visit-client decides: its guests, through an open door), counts
+    toward max_watchers rather than max_visitors, and its errors say `ref: "watch"`."""
+    watch = m.get("watch") is True
+    ref = "watch" if watch else "knock"
     target = OFFICES2.get(m.get("to"))
     if target and target.proto != me.proto:   # in the other lobby: not one this office can see
         target = None
-    msg = text_field2(m, "message", me, "knock")
+    msg = text_field2(m, "message", me, ref)
     if msg is None:
         return
     if not target:
-        return error2(me, "not_found", "no office with that id", "knock")
+        return error2(me, "not_found", "no office with that id", ref)
     if target is me:
-        return error2(me, "self_knock", "an office cannot knock on itself", "knock")
-    if target.status != "available":
-        return error2(me, "not_available", "%s is not available" % target.name, "knock")
-    if len(target.hosting) >= target.max_visitors:
-        return error2(me, "full", "%s has all the visitors it takes" % target.name, "knock")
+        return error2(me, "self_knock", "an office cannot knock on itself", ref)
+    if not watch and target.status != "available":
+        return error2(me, "not_available", "%s is not available" % target.name, ref)
+    if not watch and len(target.hosting) >= target.max_visitors:
+        return error2(me, "full", "%s has all the visitors it takes" % target.name, ref)
+    if watch and len(target.watched) >= LIMITS2["max_watchers"]:
+        return error2(me, "full", "%s has all the watchers it takes" % target.name, ref)
+    if watch and len(me.watching) >= LIMITS2["max_watching"]:
+        return error2(me, "too_many", "you watch %d plots already" % LIMITS2["max_watching"], ref)
     if not target.link or not me.link:
-        return error2(me, "not_ready", "%s cannot be visited yet" % (target.name if not target.link else "you"), "knock")
-    if me.visiting and VISITS2[me.visiting]["host"] == target.id:
-        return error2(me, "already_visiting", "you are already in %s's room" % target.name, "knock")
-    if any(k["from"] == me.id and k["to"] == target.id for k in KNOCKS2.values()):
-        return error2(me, "knock_pending", "your knock on %s is still waiting" % target.name, "knock")
-    now = time.monotonic()
-    while me.knocked and now - me.knocked[0] > 60:
-        me.knocked.popleft()
-    if len(me.knocked) >= LIMITS2["knocks_per_minute"]:
-        return error2(me, "rate_limited", "at most %d knocks a minute" % LIMITS2["knocks_per_minute"], "knock")
-    me.knocked.append(now)
+        return error2(me, "not_ready", "%s cannot be visited yet" % (target.name if not target.link else "you"), ref)
+    if not watch and me.visiting and VISITS2[me.visiting]["host"] == target.id:
+        return error2(me, "already_visiting", "you are already in %s's room" % target.name, ref)
+    if watch and any(VISITS2[v]["host"] == target.id for v in me.watching):
+        return error2(me, "already_watching", "you already watch %s's plot" % target.name, ref)
+    if any(k["from"] == me.id and k["to"] == target.id and k["watch"] == watch for k in KNOCKS2.values()):
+        return error2(me, "knock_pending", "your knock on %s is still waiting" % target.name, ref)
+    now, (knocked, most) = time.monotonic(), (me.knocked_watch, LIMITS2["watch_knocks_per_minute"]) if watch else (me.knocked, LIMITS2["knocks_per_minute"])
+    while knocked and now - knocked[0] > 60:
+        knocked.popleft()
+    if len(knocked) >= most:
+        return error2(me, "rate_limited", "at most %d knocks a minute" % most, ref)
+    knocked.append(now)
     kid = "k" + secrets.token_hex(6)
     timer = asyncio.get_running_loop().call_later(LIMITS2["knock_ttl"], expire2, kid)
     KNOCKS2[kid] = {"id": kid, "from": me.id, "to": target.id, "message": msg, "timer": timer,
-                    "until": time.monotonic() + LIMITS2["knock_ttl"]}
+                    "until": time.monotonic() + LIMITS2["knock_ttl"], "watch": watch}
     tell2(target, knock_msg(kid))
-    tell2(me, {"type": "knock_sent", "id": kid, "to": target.id})
+    tell2(me, dict({"type": "knock_sent", "id": kid, "to": target.id}, **({"watch": True} if watch else {})))
 
 
 def knock_msg(kid):
     k, knocker = KNOCKS2[kid], OFFICES2[KNOCKS2[kid]["from"]]
-    return {"type": "knock", "id": kid, "from": {"id": knocker.id, "name": knocker.name, "sim": knocker.sim, "key": knocker.key},
-            "message": k["message"], "expires_in": max(0, round(k["until"] - time.monotonic()))}
+    return dict({"type": "knock", "id": kid, "from": {"id": knocker.id, "name": knocker.name, "sim": knocker.sim, "key": knocker.key},
+                 "message": k["message"], "expires_in": max(0, round(k["until"] - time.monotonic()))}, **({"watch": True} if k["watch"] else {}))
+
+
+def answered(k, accept, reason=None, msg=""):
+    """A knock's answer, for its knocker: a watch's says so."""
+    a = {"type": "answered", "knock": k["id"], "accept": accept, "message": msg}
+    if reason:
+        a["reason"] = reason
+    if k.get("watch"):
+        a["watch"] = True
+    return a
 
 
 def on2_answer(me, m):
@@ -552,15 +587,15 @@ def on2_answer(me, m):
     k["timer"].cancel()
     knocker = OFFICES2[k["from"]]   # a knocker that left took its knocks with it
     if not m["accept"]:
-        return tell2(knocker, {"type": "answered", "knock": k["id"], "accept": False, "reason": "declined", "message": msg})
-    if len(me.hosting) >= me.max_visitors:
-        tell2(knocker, {"type": "answered", "knock": k["id"], "accept": False, "reason": "full", "message": msg})
-        return error2(me, "full", "you have all the visitors you take", "answer")
+        return tell2(knocker, answered(k, False, "declined", msg))
+    if (len(me.watched) >= LIMITS2["max_watchers"]) if k["watch"] else (len(me.hosting) >= me.max_visitors):
+        tell2(knocker, answered(k, False, "full", msg))
+        return error2(me, "full", "you have all the %s you take" % ("watchers" if k["watch"] else "visitors"), "answer")
     if not me.link or not knocker.link:   # withdrawn meanwhile (version 3: a page that stopped hosting)
-        tell2(knocker, {"type": "answered", "knock": k["id"], "accept": False, "reason": "not_ready", "message": msg})
+        tell2(knocker, answered(k, False, "not_ready", msg))
         return error2(me, "not_ready", "%s cannot be visited right now" % ("you" if not me.link else knocker.name), "answer")
-    tell2(knocker, {"type": "answered", "knock": k["id"], "accept": True, "message": msg})
-    start_visit(me, knocker)
+    tell2(knocker, answered(k, True, None, msg))
+    start_visit(me, knocker, k["watch"])
 
 
 def on2_end(me, m):
@@ -606,8 +641,8 @@ def welcome2(me, resumed):
 def visit_msg(v, me):
     """A visit as told to one of its two offices: its role, the other office, and the other's link."""
     role, peer = ("host", OFFICES2[v["visitor"]]) if v["host"] == me.id else ("visitor", OFFICES2[v["host"]])
-    return {"type": "visit", "id": v["id"], "role": role, "peer": {"id": peer.id, "name": peer.name, "sim": peer.sim},
-            "ticket": v["ticket"], "peer_link": peer.link}
+    return dict({"type": "visit", "id": v["id"], "role": role, "peer": {"id": peer.id, "name": peer.name, "sim": peer.sim},
+                 "ticket": v["ticket"], "peer_link": peer.link}, **({"watch": True} if v.get("watch") else {}))
 
 
 def hello2(ws, m):
@@ -672,7 +707,7 @@ def depart2(oid):
         if k["from"] == me.id and k["to"] in OFFICES2:
             tell2(OFFICES2[k["to"]], {"type": "knock_cancelled", "id": kid, "reason": "gone"})
         if k["to"] == me.id and k["from"] in OFFICES2:
-            tell2(OFFICES2[k["from"]], {"type": "answered", "knock": kid, "accept": False, "reason": "gone"})
+            tell2(OFFICES2[k["from"]], answered(k, False, "gone"))
     for vid in [v["id"] for v in VISITS2.values() if me.id in (v["host"], v["visitor"])]:
         end_visit(vid, "gone")
     announce2()
