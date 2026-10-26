@@ -1,6 +1,6 @@
 # The world: plots instead of knocks
 
-**Status: built (Visit 0.7.0, the `world` branch), tested on one machine** (the end-to-end test, and two real
+**Status: built (Visit 0.7.0), tested on one machine** (the end-to-end test, and two real
 browsers on different three.js releases). What it settles is in [SPEC.md](SPEC.md): sections 2, 3 (points 9 to
 12), 5, 6.4, 7.2, 8.1 and **8.4**; [INTEGRATING.md](INTEGRATING.md) has the optional step for a workroom. This
 file keeps why it is the way it is, and what is still to come.
