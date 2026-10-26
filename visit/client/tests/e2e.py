@@ -58,7 +58,7 @@ class Page:
     async def send(self, **m):
         await self.ws.send(json.dumps(m))
 
-    async def expect(self, type_, timeout=10, skip=("lobby", "online", "knock_sent", "link_stats")):
+    async def expect(self, type_, timeout=10, skip=("lobby", "online", "knock_sent", "link_stats", "shared_adds")):
         """The next message of this type, passing over the kinds in `skip`; any other first is a failure."""
         while True:
             m = await asyncio.wait_for(self.texts.get(), timeout)
@@ -191,6 +191,8 @@ async def main():
         check("both pages: visit_started, A hosting, B visiting, one visit", (sa["role"], sb["role"], sa["id"] == sb["id"], sa["peer"]["name"], sb["peer"]["name"]),
               ("host", "visitor", True, "B", "A"))
         cha, chb, vid = sa["channel"], sb["channel"], sa["id"]
+        sh = await a.until(lambda m: m["type"] == "shared_adds")
+        check("B's visit-client says its page reads an add naming what it has by uuid: A's page hears it", sh, {"type": "shared_adds", "channel": cha})
 
         print("\nvisitor to host: input, key deltas, the link")
         await b.send(type="input", forward=1, strafe=-1, run=True, yaw=0.5, pitch=9, t=12345.5)

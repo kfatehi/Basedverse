@@ -97,6 +97,9 @@ struct Visit {
     /// The visitor is in the host's room: its input and points count, and the host has it. Always, for a visit;
     /// for a watch, from `enter` to `exit`.
     inside: bool,
+    /// The visitor's page reads an added object that names the geometries and materials it already has by uuid
+    /// only (8.3; Visit 0.7 on): its visit-client says so when the link is up (host side).
+    shared_adds: bool,
 }
 
 /// The most control messages a link's other side may send a second; more are dropped (a peer flooding
@@ -962,7 +965,7 @@ impl Core {
                 self.visits.insert(id.to_string(), Visit {
                     id: id.to_string(), channel, role, peer, up: false, cmd,
                     last_seq: 0, inputs: (Instant::now(), 0), want_key: false, host_state: None, ctl: (Instant::now(), 0), key_asked: None, resync_asked: None, resync_due: false,
-                    points: (Instant::now(), 0), guest, watch, inside: !watch,
+                    points: (Instant::now(), 0), guest, watch, inside: !watch, shared_adds: false,
                 });
             }
             Err(e) => {
@@ -1104,6 +1107,7 @@ impl Core {
         let started = started(v);
         match role {
             Role::Visitor => {
+                let _ = cmd.try_send(LinkCmd::Ctl(json!({ "shared_adds": true })));
                 if !first {   // back after a blip: where everything is now
                     let _ = cmd.try_send(LinkCmd::Ctl(json!({ "keyframe": true })));
                 }
@@ -1164,7 +1168,12 @@ impl Core {
             }
             // From the visitor.
             Role::Host => {
-                if m.get("scene_resync").is_some() {
+                if m.get("shared_adds") == Some(&json!(true)) {
+                    if !v.shared_adds {
+                        v.shared_adds = true;
+                        self.to_page(json!({ "type": "shared_adds", "channel": ch }));
+                    }
+                } else if m.get("scene_resync").is_some() {
                     v.resync_due = true;
                     self.resyncs();
                 } else if m.get("keyframe").is_some() && v.key_asked.is_none_or(|t| t.elapsed() >= KEY_EVERY) {
@@ -1245,6 +1254,9 @@ fn started(v: &Visit) -> Value {
     }
     if v.guest {
         m["guest"] = json!(true);
+    }
+    if v.shared_adds {
+        m["shared_adds"] = json!(true);
     }
     if v.watch {
         m["watch"] = json!(true);

@@ -277,7 +277,8 @@
   class SceneSync {
     constructor(cfg) {
       const t = cfg.three;
-      Object.assign(this, { cfg, objs: new Map(), next: 1, mats: new Map(), geos: new Map(), texs: new Map(), dynamic: new Set(), sent: new Set(),
+      // `shared`: every visitor this round's edit goes to reads an added object that names what it has by uuid.
+      Object.assign(this, { cfg, objs: new Map(), next: 1, mats: new Map(), geos: new Map(), texs: new Map(), dynamic: new Set(), sent: new Set(), shared: false,
         keyAt: 0, sceneSig: null, tmp: { p: new t.Vector3(), q: new t.Quaternion(), s: new t.Vector3() } });
       this.scan(0);   // where everything is now: what the first whole scene shows
     }
@@ -371,24 +372,26 @@
       return { edit: Object.keys(edit).length > 1 ? edit : null, moved };
     }
 
-    // An added object: its JSON (with what it is made of, but the geometries and materials its visitors have: those
-    // it names by uuid), each object's number, its lights' targets.
+    // An added object: its JSON (with what it is made of, but, when its visitors read that, the geometries and
+    // materials they have: those it names by uuid), each object's number, its lights' targets.
     _added(r) {
       const json = sharedJSON(r.o), ids = [];
-      for (const k of ["geometries", "materials"]) if (json[k]) json[k] = json[k].filter(x => !this.sent.has(x.uuid));
-      // A texture goes with each material (or object) that names it, an image with each texture, a shape with each
-      // geometry.
-      const named = new Set(), stack = [json.object, ...(json.materials || [])];
-      while (stack.length) {
-        const x = stack.pop();
-        if (!isObj(x)) continue;
-        for (const v of Object.values(x)) if (typeof v === "string") named.add(v);
-        if (Array.isArray(x.children)) stack.push(...x.children);
+      if (this.shared) {
+        for (const k of ["geometries", "materials"]) if (json[k]) json[k] = json[k].filter(x => !this.sent.has(x.uuid));
+        // A texture goes with each material (or object) that names it, an image with each texture, a shape with each
+        // geometry.
+        const named = new Set(), stack = [json.object, ...(json.materials || [])];
+        while (stack.length) {
+          const x = stack.pop();
+          if (!isObj(x)) continue;
+          for (const v of Object.values(x)) if (typeof v === "string") named.add(v);
+          if (Array.isArray(x.children)) stack.push(...x.children);
+        }
+        if (json.textures) json.textures = json.textures.filter(x => named.has(x.uuid));
+        const images = new Set((json.textures || []).map(t => t.image)), shapes = new Set((json.geometries || []).flatMap(g => list(g.shapes)));
+        if (json.images) json.images = json.images.filter(x => images.has(x.uuid));
+        if (json.shapes) json.shapes = json.shapes.filter(x => shapes.has(x.uuid));
       }
-      if (json.textures) json.textures = json.textures.filter(x => named.has(x.uuid));
-      const images = new Set((json.textures || []).map(t => t.image)), shapes = new Set((json.geometries || []).flatMap(g => list(g.shapes)));
-      if (json.images) json.images = json.images.filter(x => images.has(x.uuid));
-      if (json.shapes) json.shapes = json.shapes.filter(x => shapes.has(x.uuid));
       r.o.traverse(o => { const x = this.objs.get(o.uuid); if (x) ids.push([o.uuid, x.idx]); });
       for (const k of ["geometries", "materials", "textures", "images"]) for (const x of json[k] || []) this.sent.add(x.uuid);
       const parent = this.objs.get(r.parent);
@@ -616,7 +619,7 @@
         case "link_stats":
           if (this._viewer && this._viewer.channel === m.channel) { this.stats.rtt = Number(m.rtt_ms); this.stats.path = String(m.path); }
           break;
-        case "keyframe": case "input": case "scene_resync": case "point": this._hostMessage(m); break;
+        case "keyframe": case "input": case "scene_resync": case "point": case "shared_adds": this._hostMessage(m); break;
         case "scene": this._sceneEdit(m); break;
         case "scene_lost": { const w = this._viewing(m.channel); if (w) this._sceneResync(w); break; }
         case "error": this._emit("error", { code: m.code, message: m.message, ref: m.ref }); break;
@@ -674,7 +677,7 @@
         // A watcher (../../WORLD.md) sees this room's plot from outside it: sent the scene, never spawned, until it
         // steps in (`enter`).
         const h = { id: m.id, channel: m.channel, visitor: m.peer || {}, guest: m.guest === true, watch: m.watch === true, inside: m.watch !== true || m.inside === true,
-          pose: null, yaw0: 0, input: null, inputAt: 0, keyNext: true, fails: 0, sceneSent: false, posed: null };
+          pose: null, yaw0: 0, input: null, inputAt: 0, keyNext: true, fails: 0, sceneSent: false, posed: null, sharedAdds: m.shared_adds === true };
         if (m.state && m.state.pose && h.inside) { h.pose = m.state.pose; h.yaw0 = m.state.yaw0 || 0; }   // back after this page reloaded
         this._hosted.set(m.channel, h);
         if (h.inside) this._spawn(h);
@@ -776,6 +779,7 @@
       if (m.type === "input") { h.input = m; h.inputAt = performance.now(); this._step(h, h.inputAt); }   // at once: the next delta has it
       else if (m.type === "keyframe") h.keyNext = true;   // a key delta: where everything that moves is
       else if (m.type === "scene_resync") h.sceneSent = false;
+      else if (m.type === "shared_adds") h.sharedAdds = true;   // its page reads an add naming what it has by uuid (8.3)
       else if (m.type === "point") this._point(h, m);
     }
 
@@ -800,7 +804,9 @@
           this._sync = new SceneSync(this._hooks.scene);
           for (const h of hs) h.sceneSent = false;
         }
-        const sync = this._sync, { edit, moved } = sync.scan(now), ready = hs.filter(h => h.sceneSent);
+        const sync = this._sync, ready = hs.filter(h => h.sceneSent);
+        sync.shared = ready.every(h => h.sharedAdds);   // one visitor on an older Visit: every add whole, as it reads them
+        const { edit, moved } = sync.scan(now);
         if (edit && ready.length) this._sendScene(ready, edit);
         const key = now - sync.keyAt >= SCENE_KEY_MS;
         if (key) sync.keyAt = now;
@@ -1774,6 +1780,7 @@
           for (const o of s.own) o.visible = false;
           r.clippingPlanes = h.planes;
           r.render(h.holder, camera);
+          if (now - s.gcAt > 30000) { s.gcAt = now; v._sceneGc(s); }   // what its room no longer uses, freed
         }
       } finally { r.autoClear = auto; r.clippingPlanes = planes; }
     }

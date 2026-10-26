@@ -263,7 +263,7 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `lobby` | `offices`: [{`id`, `name`, `status`, `sim`, `max_visitors`, `visitors`, `visiting`, `ready`, `key`}] | every change (6.3) |
 | `knock` | `id`, `from` {`id`, `name`, `sim`, `key`}, `message`, `expires_in` | someone wants to visit you (never a guest at your open door: let in without asking) |
 | `knock_sent` / `knock_cancelled` / `answered` | as in section 6 | your knock's fate; a knock on you withdrawn |
-| `visit_started` | `id`, `channel`, `role` (`"host"` \| `"visitor"`), `peer` {`id`, `name`, `sim`, `key`}, `guest`?, `state`? | a visit began (its link is up). `peer.key` is the other office's key, as the link proved it; `guest: true`, a guest let in through the open door, without asking the page; `watch: true` (and `inside`), a watch (8.4); in `ready`, a host's visit carries the last `state` its page sent |
+| `visit_started` | `id`, `channel`, `role` (`"host"` \| `"visitor"`), `peer` {`id`, `name`, `sim`, `key`}, `guest`?, `shared_adds`?, `state`? | a visit began (its link is up). `peer.key` is the other office's key, as the link proved it; `guest: true`, a guest let in through the open door, without asking the page; `watch: true` (and `inside`), a watch (8.4); in `ready`, a host's visit carries the last `state` its page sent |
 | `visit_ended` | `id`, `channel`, `reason` (6.5) | a visit ended |
 | `host_paused` / `host_resumed` | `channel` | the host's page went away / came back (visitor side) |
 | `input` | `channel`, `seq`, `forward`, `strafe`, `run`, `yaw`, `pitch`, `t` | a visitor's latest input (host side) |
@@ -271,6 +271,7 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `link_stats` | `channel`, `path` (`"direct"` \| `"relay"`), `rtt_ms` | the visit's link, about once a second, both sides: a relayed path is slower and rate-limited |
 | `keyframe` | `channel` | send a key delta on this visit soon (host side) |
 | `scene_resync` | `channel` | send this visitor the whole scene again (host side): it asked, or the link dropped edits it had not sent |
+| `shared_adds` | `channel` | this visitor's page reads an `add` that names what it already has by uuid only (8.3; Visit 0.7 on), as `visit_started`'s `shared_adds: true` says when it is known by then (host side) |
 | `scene` | `channel`, `edit` | an edit of the host's scene, unpacked and checked (8.1) (visitor side) |
 | `scene_lost` | `channel` | an edit of the host's scene was dropped (malformed, too big, too many): ask for the whole scene (visitor side) |
 | `error` | `code`, `message`, `ref`? | a refusal (section 11) |
@@ -414,6 +415,7 @@ Messages are JSON, each prefixed by its length (u32 big-endian). In order, relia
 | visitor | `{"keyframe": true}` | send a key delta soon (passed to the host's page at most every 500 ms) |
 | visitor | `{"scene_resync": true}` | send the whole scene again (passed to the host's page at most every 2 s; one asked for sooner waits, and goes) |
 | visitor | `{"point": {"yaw", "pitch"}}` | a point (8.3): passed to the host's page with only those two, clamped, at most 5 a second |
+| visitor | `{"shared_adds": true}` | its page reads an `add` that names what it already has by uuid only (8.3; Visit 0.7 on): sent each time the link is up, passed to the host's page once as `shared_adds` |
 | host | `{"paused": true}` / `{"paused": false}` | the host's page went away / came back |
 | watcher | `{"enter": {"x", "y", "z", "yaw"}}` / `{"exit": true}` | stepping into the room watched, there (clamped, passed to the host's page as `enter`), or out (8.4); in, it counts toward `max_visitors` |
 | host | `{"enter_refused": "full"}` | the room is full: the watcher stays outside |
@@ -478,11 +480,11 @@ data.
 - **Edits** (`{"type": "edit", …}`): at most one every 33 ms, only when something changed, each field
   optional, applied in this order: `res` ({geometries, materials, textures, images, shapes}, in `toJSON` form:
   new ones, or ones changed in place, whose content the visitor's copy takes), `remove` ([number]), `add`
-  ([{parent, json (the new object's `toJSON()`, with what it is made of, except the geometries and
-  materials the visitor already has: sent before, in the whole scene or an edit, and used by the scene ever
-  since, which the JSON names only by uuid; a visitor that does not have one asks for the whole scene), ids,
-  targets}]), `parent` ([[number,
-  new parent's number]]), `assign` ([[number, material uuid (or uuids) or null, geometry uuid or null]]),
+  ([{parent, json (the new object's `toJSON()`, with what it is made of; when every visitor the edit goes to
+  reads it (`shared_adds`, Visit 0.7 on), except the geometries and materials they already have: sent before,
+  in the whole scene or an edit, and used by the scene ever since, which the JSON names only by uuid; a visitor
+  that does not have one asks for the whole scene), ids, targets}]), `parent` ([[number, new parent's
+  number]]), `assign` ([[number, material uuid (or uuids) or null, geometry uuid or null]]),
   `props` ([{uuid, …}]: materials' colours and values as they change: `color`, `emissive`, `specular`,
   `opacity`, `transparent`, `visible`, …), `scene` ({background (a colour, {texture: uuid}, or null), fog
   ({type, color, near, far, density} or null)}).

@@ -21,6 +21,13 @@ file), a guest list of keys and a **door**; through an open door a guest's knock
 sees your plot. Protocol names are unchanged: a 0.7 office and a 0.6 one still meet and visit (a 0.6 office is
 never watched: its lobby entry does not say `world`).
 
+**Lighter scene edits** (#3, kfatehi): an object added to a room's scene no longer carries the geometries and
+materials its visitors already have, only their uuids. A room whose figures share one rig used to send the
+whole rig for each figure that appeared (2.9 MB of JSON for one figure in kfatehi's room); in a test with a 5.3 MB
+figure, each one after the first now costs about 1.4 KB. A visitor's page that lacks one asks for the whole scene. A 0.7 visitor's visit-client
+says its page reads such adds (`shared_adds`); while any visitor on 0.6 or older is in a room, its adds go whole,
+as before.
+
 ### What changed
 
 - visit-client: the state file keeps the office's secret key (written readable by its owner only), its door,
@@ -30,19 +37,21 @@ never watched: its lobby entry does not say `world`).
   `enter_refused`. `ready` has `key`, `door`, `guests`, `layout`, `edges`; `visit_started` has the other's
   `peer.key` (as the link proved it), `guest`, and `watch` / `inside`. With the world on, it watches its guests'
   plots by itself; a knock to watch never reaches a page. Shutting the door, or taking a guest off, ends their
-  watches. Link control messages `enter`, `exit`, `enter_refused`, `edge`, `edge_ok`, `edge_no`, `edge_off`.
+  watches. Link control messages `enter`, `exit`, `enter_refused`, `edge`, `edge_ok`, `edge_no`, `edge_off`,
+  `shared_adds` (passed to the host's page as `shared_adds`, and in `visit_started`).
 - visit.js: `v.world({ scene, renderer })` with `frame` and `render`; `host({ plot, unit })`;
   `spawn(visitor, { at })`; `v.key`, `v.door`, `v.guests`, `v.layout`, `v.edges`, `v.edgeProposals`,
   `v.watchers`; `setDoor`, `addGuest`, `removeGuest`, `place`, `unplace`, `proposeEdge`, `acceptEdge`,
   `declineEdge`, `removeEdge`. A neighbour's scene is read with your three.js release. Deltas to a watcher not
   in the room are version 2 (no pose of its). The panel: "your door", a star by each office to make it a guest,
-  and edges proposed to you (Agree / No).
+  and edges proposed to you (Agree / No). Scene edits' `add` names what every visitor has by uuid only (8.3), and
+  a plot you watch frees what its room no longer uses, as a room you visit does.
 - The lobby: each office's `key`, `watchers` and `world` in `lobby`; `from.key` on a knock; knocks to watch
   (`watch: true`: counted apart, at most 8 watchers of a plot and 8 plots watched, 30 a minute, not stopped by
   busy, never moving the watcher out of the room it is in); hello's `world`.
 - The test room: `?world=1` (doorways, you as a block walking with WASD) and `?three=<r>`.
-- [visit/SPEC.md](visit/SPEC.md): sections 2, 3 (points 9 to 12), 4.1, 5, 6.2 to 6.6, 7.2, 8.1, 8.4 (new), 9, 10,
-  11, 13. [visit/INTEGRATING.md](visit/INTEGRATING.md): "Optional — your world", step 7, the checklist.
+- [visit/SPEC.md](visit/SPEC.md): sections 2, 3 (points 9 to 12), 4.1, 5, 6.2 to 6.6, 7.2, 8.1, 8.3, 8.4 (new), 9,
+  10, 11, 13. [visit/INTEGRATING.md](visit/INTEGRATING.md): "Optional — your world", step 7, the checklist.
 
 ### What an integration does
 
