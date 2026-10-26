@@ -1,3 +1,10 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset=".github/assets/logo-dark.svg">
+    <img alt="Basedverse" src=".github/assets/logo-light.svg" width="460">
+  </picture>
+</p>
+
 # basedverse — walk around each other's workrooms
 
 Everyone builds their own workroom (an agent-office sim, in their own engine), and basedverse is what
@@ -5,6 +12,12 @@ they share: a lobby to meet in, and **Visit**, to walk around each other's rooms
 Every room is made with three.js: a host shares its scene, and the visitor's browser draws the room itself,
 so walking in it is as quick as in your own. What everyone agrees on is a thin interface: a host's scene and
 two hooks, and two pieces everyone drops in unchanged.
+
+<p align="center">
+  <img alt="A workroom in a jungle: blocky agents at their desks, what each is doing written above it, a workplace safety sign, a rat-vs-snake tally, and you, walking around" src=".github/assets/jungle-sweatshop.png">
+  <br>
+  <em>A workroom: the jungle sweatshop. Time since last accident: 26 seconds (death by exhaustion). Rat vs. snake: 14–14.</em>
+</p>
 
 | | |
 |---|---|
