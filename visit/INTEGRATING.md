@@ -308,12 +308,18 @@ visit.host({
   clips named `idle` and `walk` in `body.animations` if you have them; at most 4 MiB gzipped, 300 000 vertices).
   It goes only to a room that asks for it. Whose look your own visitors have is your user's to choose: the panel's
   "visitors look like", and "their look" / "your model" by each visitor (or `visit.useAvatars`, `useAvatar`).
-- **The huddle** (voice, nothing to do with the panel): **Join huddle** asks for your user's microphone and lets
-  them talk with everyone they are linked to who joins too (a visit, a link, a plot in their world or theirs);
-  **Mute**, **Leave**. With a UI of your own: `visit.huddle(true | false)` (from a click: browsers ask for the
-  microphone only then), `visit.mute(on)`, `visit.huddlers`. A page's Content-Security-Policy needs `blob:` for
-  worklets too (as for the ticker's Worker), and the browser WebCodecs (Chrome, Edge, Safari, recent Firefox).
-  Headphones keep your user's speakers out of their microphone.
+- **Voice**: in a room, people hear each other by distance, from where each stands; nothing to join, and nobody
+  hears into another room. Your user turns their microphone on (the panel's 🎙, or `visit.setMic(true)` from a
+  click: browsers ask for the microphone only then); it stays on across reloads. Visit needs to know where your
+  user stands: with a world (step 9) it knows; without one, call `visit.listener({ x, y, z, yaw })` each frame. A
+  page's Content-Security-Policy needs `blob:` for worklets too (as for the ticker's Worker), and the browser
+  WebCodecs (Chrome, Edge, Safari, recent Firefox). Headphones keep your user's speakers out of their microphone.
+- **A phone** (optional): for your user to talk with a friend in another room, wherever each stands.
+  `visit.phone(true, { at: { x, y, z } })` puts it in your room (draw it there yourself); `visit.phones` lists
+  those linked to your user whose rooms have phones, to call (`visit.call(key)`); `visit.on("call", e => ...)`
+  says when it rings (ring your phone), and `visit.pickUp(key)`, `visit.hangUp(key)`. The handset is private;
+  `visit.speaker(key, true)` puts the call on speaker: everyone near your phone, your visitors too, hears it and
+  is heard in it. How it looks and works in your room (lifting the handset, a button for speaker) is yours.
 - **What carries**: objects moving, appearing and going, materials' colours and opacity, canvas textures you
   redraw (`texture.needsUpdate = true`), the background and the fog. **What does not**: custom shaders (a
   `ShaderMaterial` is code: it arrives plain grey), HTML overlays, post-processing (an `EffectComposer`), and
@@ -515,7 +521,8 @@ walking out of your door goes straight into theirs.
       data or accounts without that.
 - [ ] Visitors drawn as their own avatars (`entry.avatar`) when set, as your models otherwise; your own avatar given
       (`visit.avatar`), if you like.
-- [ ] The huddle works from your page (the panel's Join huddle, or yours): two rooms linked hear each other.
+- [ ] Voice: with the microphone on, a visitor near your user hears them, and they the visitor; farther, neither.
+- [ ] A phone, if you have one: a call rings, is picked up, heard on the handset; on speaker, by those near it.
 - [ ] Visiting: the host's room fills the window (`Visit.stage`, or your own view); WASD, Shift and the
       mouse work; Esc frees the pointer; there is a way to leave, and back to your room; your own keys wait
       while `visit.viewFocused`.

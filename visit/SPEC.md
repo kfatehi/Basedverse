@@ -247,7 +247,8 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `avatar_want` | `channel` | ask a visitor for its avatar (host side, 8.6): its visit-client sends it, now and whenever its page gives a new one |
 | `avatars` | `default` (`"mine"` \| `"theirs"`) | whose look visitors have in this room by default: this room's models, or their own avatars; kept in the state file |
 | `avatar_use` | `key`, `use` (`"mine"` \| `"theirs"` \| null: the default) | the same for one office, apart from the default; kept in the state file |
-| `huddle` | `on` (bool) | join the huddle (8.7), or leave it |
+| `phone` | `on` (bool) | this room has a phone (8.8), or no longer: every link is told |
+| `call` | `channel`, `act` (`"ring"` \| `"answer"` \| `"hangup"`) | a call on that visit (8.8): ring their phone (refused `no_phone` if their room has none), answer it, end it |
 | `knock` | `to` (office id), `message`? (≤ 280), `link`? (true: a link, 8.5) | ask to visit an office, or to link with it (refused `not_hosting` before `host`) |
 | `answer` | `knock`, `accept` (bool), `message`? | let a knocker in, or not |
 | `end` | `visit` | end a visit: yours as a visitor (leave), or a visitor's to you (kick) |
@@ -269,15 +270,15 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `edge_declined` | `key` | your proposal was declined |
 | `avatars` | `default`, `by`: [{`key`, `use`}] | whose look visitors have here (also in `ready`), after `avatars` or `avatar_use` |
 | `avatar` | `channel`, `avatar` {`unit`, `json`} | a visitor's avatar, which this page asked for (host side, 8.6): unpacked and checked as a scene edit is |
-| `huddle` | `on` | this office joined the huddle or left it (also in `ready`; a page that goes leaves it) |
-| `huddle_peer` | `channel`, `on` | the office on the other side of that visit joined the huddle or left it |
+| `phone` | `channel`, `on` | the other office's room has a phone now (8.8), or no longer (also `phone` in `visit_started`) |
+| `call` | `channel`, `act` | a call on that visit (8.8): they ring, answer, or hang up |
 | `enter` / `exit` | `channel`, `pose`? {`x`, `y`, `z`, `yaw`} (for `enter`) | a watcher stepped into this room, there (host side: spawn it, as a visitor), or out of it; no `pose`: a link going there, spawned where newcomers go |
 | `enter_refused` | `channel`, `reason` (`"full"`, or `"moved"`: a visit to a room began, and this office stepped out) | stepping into a watched room was refused, or undone: outside it |
 | `online` / `offline` | `office`, `knocking` / `away`? | the lobby session came up (after a drop: the same office if it resumed), with this office's own knocks still waiting ([{`id`, `to`, `link`?}]) / went down: `away: true` when the page took it out (`leave_lobby`), `false` when it is on its way back (`join_lobby`), absent when the lobby is out of reach |
 | `lobby` | `offices`: [{`id`, `name`, `status`, `sim`, `max_visitors`, `visitors`, `visiting`, `ready`, `key`, `watchers`, `world`, `links`}] | every change (6.3) |
 | `knock` | `id`, `from` {`id`, `name`, `sim`, `key`}, `message`, `expires_in`, `link`? | someone wants to visit you, or (`link`) to link with you (never a guest at your open door: let in without asking) |
 | `knock_sent` / `knock_cancelled` / `answered` | as in section 6 | your knock's fate; a knock on you withdrawn |
-| `visit_started` | `id`, `channel`, `role` (`"host"` \| `"visitor"`), `peer` {`id`, `name`, `sim`, `key`}, `guest`?, `watch`?, `inside`?, `link`?, `where`?, `shared_adds`?, `state`? | a visit began (its link is up). `peer.key` is the other office's key, as the link proved it; `guest: true`, a guest let in through the open door, without asking the page; `watch: true` (and `inside`), a watch (8.4); `link: true` too, a link (8.5), with `where: "world"` if the page put it in its world; `huddle: true`, the other office is in the huddle (8.7); in `ready`, a host's visit carries the last `state` its page sent |
+| `visit_started` | `id`, `channel`, `role` (`"host"` \| `"visitor"`), `peer` {`id`, `name`, `sim`, `key`}, `guest`?, `watch`?, `inside`?, `link`?, `where`?, `shared_adds`?, `state`? | a visit began (its link is up). `peer.key` is the other office's key, as the link proved it; `guest: true`, a guest let in through the open door, without asking the page; `watch: true` (and `inside`), a watch (8.4); `link: true` too, a link (8.5), with `where: "world"` if the page put it in its world; `phone: true`, the other office's room has a phone (8.8); in `ready`, a host's visit carries the last `state` its page sent |
 | `visit_ended` | `id`, `channel`, `reason` (6.5) | a visit ended |
 | `host_paused` / `host_resumed` | `channel` | the host's page went away / came back (visitor side) |
 | `input` | `channel`, `seq`, `forward`, `strafe`, `run`, `yaw`, `pitch`, `t` | a visitor's latest input (host side) |
@@ -298,7 +299,7 @@ Both directions, one scene delta (or, from the host's page, one scene edit) per 
 | bytes | field |
 |---|---|
 | 0–1 | `channel`, u16 big-endian |
-| 2 | flags: bit 0 = a key delta (everything that has moved, 8.1); bit 1 = a scene edit (host page to visit-client only, alone); bit 2 = this office's avatar (8.6: page to visit-client only, alone, its channel 0); bit 3 = a packet of voice (8.7: from the page, its own, channel 0; to it, another office's, on the visit's channel) |
+| 2 | flags: bit 0 = a key delta (everything that has moved, 8.1); bit 1 = a scene edit (host page to visit-client only, alone); bit 2 = this office's avatar (8.6: page to visit-client only, alone, its channel 0); bit 3 = a packet of voice (8.7: from the page, its own, on the visit it goes on; to it, the other office's, on the visit's channel); bit 4 = someone else's voice passed on (8.7, 8.8: who spoke, then the packet; either way, on the visit's channel) |
 | 3–10 | timestamp, u64 big-endian, microseconds: the host page's clock when it took the delta (unused for an edit) |
 | 11… | the delta (8.1), or the edit, gzipped JSON |
 
@@ -436,7 +437,8 @@ Messages are JSON, each prefixed by its length (u32 big-endian). In order, relia
 | visitor | `{"keyframe": true}` | send a key delta soon (passed to the host's page at most every 500 ms) |
 | visitor | `{"scene_resync": true}` | send the whole scene again (passed to the host's page at most every 2 s; one asked for sooner waits, and goes) |
 | visitor | `{"point": {"yaw", "pitch"}}` | a point (8.3): passed to the host's page with only those two, clamped, at most 5 a second |
-| either | `{"huddle": true}` / `{"huddle": false}` | this side joined the huddle or left it (8.7): sent on every link, and on each new one while in |
+| either | `{"phone": true}` / `{"phone": false}` | this side's room has a phone, or no longer (8.8): sent on every link, and on each new one while it has |
+| either | `{"call": "ring" \| "answer" \| "hangup"}` | a call (8.8), passed to the page as `call` |
 | host | `{"avatar_want": true}` | send this office's avatar (8.6): now, on a stream of its own (7.4), and again whenever its page gives a new one |
 | visitor | `{"shared_adds": true}` | its page reads an `add` that names what it already has by uuid only (8.3; Visit 0.7 on): sent each time the link is up, passed to the host's page once as `shared_adds` |
 | host | `{"paused": true}` / `{"paused": false}` | the host's page went away / came back |
@@ -479,8 +481,9 @@ And visitor to host, once its host asked (`avatar_want`):
   finished. The host's visit-client takes at most one every 2 s, unpacks it to at most 16 MiB of one JSON object
   nested at most 256 deep, and passes it to its page as `avatar`. A host on an older Visit never asks.
 
-Datagrams (unreliable): the visitor's input (7.3), JSON, so starting with `{`; and either side's voice in a
-huddle (8.7), one byte 0xA0 then one Opus packet.
+Datagrams (unreliable): the visitor's input (7.3), JSON, so starting with `{`; either side's voice (8.7), one
+byte 0xA0 then one Opus packet (at most 100 a second taken, each at most 1 000 bytes); and someone else's voice
+passed on (8.7, 8.8), one byte 0xA1 then who spoke and the packet (at most 400 a second).
 
 ### 7.5 Blips
 
@@ -677,23 +680,47 @@ visitor as the visitor's own body instead.
   stands. `v.visitors[i].avatar` is it while the room shows that visitor's own look, null otherwise: the room
   draws it (in its scene, it goes to every visitor; the visitor's own eyes do not see it).
 
-### 8.7 The huddle
+### 8.7 Voice
 
-Voice, with the offices you are linked to: any visit either way (a visit, a link, a watch of a plot in your world
-or of yours in theirs). Joining is each office's own (`huddle`, from its page); you hear an office only while both
-of you are in, and nobody else hears either.
+Voice goes by where people are, in the same room: nothing to join. Those in one room hear each other the nearer
+the louder, from where each stands (the listener's page pans it), and nobody farther than `voiceRange` (15 m) away.
+Nobody hears into another room: not next door in a world, not across a plot's edge.
 
-- **In or out.** A page joins (`v.huddle(true)`: its microphone, asked for with echo cancellation, noise
-  suppression and gain control) or leaves; its visit-client says so on every link (control `huddle`), and tells
-  its page which of its visits' other offices are in (`huddle_peer`, and `huddle` in `visit_started`). A page that
-  goes leaves the huddle: its microphone went with it.
-- **The voice**: 48 kHz mono, 20 ms a packet, Opus at about 24 kbps (WebCodecs), as a binary frame (5.4, bit 3)
-  to the visit-client, which sends it to each office in the huddle with it, once each (two visits may join them),
-  as a QUIC datagram on the link: unreliable, so late is lost. It takes at most 100 a second from a link, each at
-  most 1 000 bytes, and passes them to its page only while it is in the huddle, on the visit's channel. The page
-  decodes each office's in order and plays it a little behind now (60 ms, to ride out the network's unevenness;
-  past 400 ms behind, it catches up).
-- **Mute** (`v.mute`) stops sending; the microphone stays open, to unmute at once.
+- **The microphone** is each user's to turn on (`v.setMic`, the panel's 🎙), remembered in their browser (on again
+  at the next load, once permission is given); off, they still hear. It is asked for with echo cancellation, noise
+  suppression and gain control. Nothing is sent while nobody is near.
+- **Where people are.** A room keeps an empty object named `visit:me` in its scene where its own user stands
+  while they are at home (where its world, or `v.listener`, has them; hidden while they are away), so that whoever
+  is in the room hears them from there. A visitor is where its host has it. A page hears from where its user is:
+  in a room they went to, where that room has them; at home (in their own room, or a plot they walked onto in their
+  world), where their world has them.
+- **Who hears whom.** At home, a page sends its user's voice to each of its visitors near them, and hears them by
+  where it has them. In another's room, a visitor sends its voice to that room's owner, who hears it by where it
+  has the visitor, and passes it on to its other visitors near them (`relay`: who spoke, by that visit's id and
+  name); a visitor hears the owner from `visit:me`, and the voices passed on from where the room has their bodies
+  (`userData.visitor`). Visitors need no link to each other.
+- **The voice**: 48 kHz mono, 20 ms a packet, Opus at about 24 kbps (WebCodecs), as a binary frame (5.4, bit 3,
+  on the visit it goes on; bit 4, passed on, with who spoke) to the visit-client, which sends each as a QUIC
+  datagram on that link (7.4: unreliable, so late is lost), and passes the other side's to its page on the visit's
+  channel. The page decodes each speaker's in order and plays it a little behind now (60 ms, to ride out the
+  network's unevenness; past 400 ms behind, it catches up).
+
+### 8.8 Phones
+
+A phone joins two rooms' users wherever they stand: voice to voice, not by distance. A room may have one; Visit
+carries calls, and the room shows the phone (where it stands, its ringing, picking it up).
+
+- **A phone** (`v.phone(true, { at })`): the room says so on every link (control `phone`), and keeps an empty object
+  named `visit:phone` in its scene where it stands. A user calls only those linked to them (any visit either way)
+  whose rooms have phones (`v.phones`).
+- **A call**: `ring` (`v.call`), `answer` (`v.pickUp`), `hangup` (`v.hangUp`), as control messages on the visit
+  between them; unanswered, it stops ringing after 30 s. While on, each sends its voice on that visit (the
+  microphone runs for the call, on or off otherwise).
+- **The handset** (as a call starts): only the user, to their ear, sounding as a telephone does.
+- **Speaker** (`v.speaker(key, true)`, each side its own): the call's voice comes from the phone, heard by
+  everyone near it in that room by distance (the room passes it on to its visitors near the phone, as the phone's,
+  `relay` id `phone`), and everyone near the phone is heard on the call (the room passes its visitors' voices
+  there); the user, only while near it. The other side hears them all, each apart.
 
 ## 9. The library: `visit.js`
 
@@ -744,8 +771,13 @@ v.toWorld(id)      // a link's room as a plot in your world (v.world first), whi
 v.unlink(id)       // end a link
 v.watching(officeId)        // whether a plot of theirs is in your world (a guest's, or a link put there)
 v.avatar(object, { unit })  // your own body, for rooms that show their visitors' own looks (8.6); null: none
-v.huddle(on); v.mute(on)    // the huddle (8.7): voice with those you are linked to who are in it too
-v.huddling; v.muted; v.huddlers   // in it; muted; who is in it with you: [{ key, name, speaking }]
+v.setMic(on); v.mic         // your microphone (8.7): on, those near your user in the same room hear them (remembered)
+v.voices; v.voiceRange      // who your user can hear, near them: [{ key, name, distance (m), speaking }]; metres (15)
+v.listener({ x, y, z, yaw })   // where your user is in your room, for a room that draws no world (a world says it)
+v.phone(on, { at })         // a phone in your room (8.8), at that spot (your units)
+v.phones; v.calls           // those linked to you whose rooms have phones: [{ key, name }]; your calls: [{ key, name,
+                            //   state ("calling" | "ringing" | "on"), speaker, speaking }]
+v.call(key); v.pickUp(key); v.hangUp(key); v.speaker(key, on)   // and the "call" event: { key, name, state, speaker, why }
 v.useAvatars(use); v.useAvatar(key, use); v.avatarUse(key)   // "theirs" | "mine": whose look visitors have in
                    //   your room, by default and for one office (null: back to the default)
 v.leave()          // end your visit (the stage's link: unlink it)
@@ -803,7 +835,8 @@ Visit.panel(element, v)                          // an optional ready-made lobby
                                                  //   message; links asked of you (Link, Not now, ★ always: a guest from now on);
                                                  //   your links (Go there, Back to my room, Put in my world, Unlink); your visitors
                                                  //   and who is linked to you (Kick, Unlink, their look / your model); visitors
-                                                 //   look like (default); your world (Map); the huddle (Join huddle, Mute, Leave);
+                                                 //   look like (default); your world (Map); voice (🎙, who is near); calls (Pick up,
+                                                 //   speaker / handset, Hang up);
                                                  //   stars, door, status, Go offline / online:
                                                  //   { element, release() }
 Visit.map(v)                                     // an optional ready-made map of your world from above (the panel's Map): drag,

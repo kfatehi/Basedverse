@@ -1,6 +1,6 @@
 # Visit — walk around each other's workrooms
 
-**Status: built and tested on one machine (visit-client, visit.js, the lobby's version 3). Visit 0.4 has gone between two machines over the internet; 0.5 not yet. 0.7 adds worlds ([WORLD.md](WORLD.md)): your friends' rooms round yours, walked onto without knocking. 0.8 adds links ([SPEC.md](SPEC.md) 8.5): a room you link with shows in a corner first; go there, or put it in your world. 0.9 adds a map of your world, avatars (8.6), interactions by type (8.3: cosmetic ones unless the user agrees) and a voice huddle (8.7).**
+**Status: built and tested on one machine (visit-client, visit.js, the lobby's version 3). Visit 0.4 has gone between two machines over the internet; 0.5 not yet. 0.7 adds worlds ([WORLD.md](WORLD.md)): your friends' rooms round yours, walked onto without knocking. 0.8 adds links ([SPEC.md](SPEC.md) 8.5): a room you link with shows in a corner first; go there, or put it in your world. 0.9 adds a map of your world, avatars (8.6), interactions by type (8.3: cosmetic ones unless the user agrees), voice by who is near in a room (8.7), and phones (8.8).**
 
 Everyone builds their own workroom, with three.js, and Visit lets you walk around each other's with WASD
 and the mouse. The host sends its room's scene, as data; your browser draws it, with the host's very three.js
@@ -53,7 +53,7 @@ visit/
 
 - [x] The spec, and the guide for integrators.
 - [x] visit-client, tested end to end with the real lobby and two clients (`client/tests/run-e2e.sh`).
-- [x] visit.js, tested in two real browsers: knocking, walking, reloads, worlds, links, the map, avatars, interactions, the huddle (`client/tests/run-browser.sh`).
+- [x] visit.js, tested in two real browsers: knocking, walking, reloads, worlds, links, the map, avatars, interactions, voice, phones (`client/tests/run-browser.sh`).
 - [x] The lobby's version 2 (`../lobby/server/`, `test_lobby2.py`), live (`../bin/deploy-lobby`).
 - [x] A first workroom running it.
 - [ ] A relay of our own beside the lobby. Until there is one, links that cannot go direct use iroh's public

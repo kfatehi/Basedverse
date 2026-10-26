@@ -157,6 +157,7 @@ async function build(v) {
   av.animations = [new T.AnimationClip("idle", 2, [new T.NumberKeyframeTrack("head.position[y]", [0, 1, 2], [1.45, 1.5, 1.45])]),
                    new T.AnimationClip("walk", 0.6, [new T.NumberKeyframeTrack("torso.rotation[z]", [0, 0.3, 0.6], [-0.1, 0.1, -0.1])])];
   v.avatar(av);
+  v.phone(true);   // a phone in this room (SPEC 8.8): it takes calls, and v.call() makes them
   // A visitor pointing (SPEC 8.3): kept, with what it hit first, for the test to read.
   const ray = new t.THREE.Raycaster();
   window.points = [];

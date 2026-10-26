@@ -38,9 +38,12 @@
   // draws it with the very three.js release the host runs, fetched from a CDN and checked against the hashes
   // below (Subresource Integrity): nothing else ever runs from it, and what the host sends is only ever read as
   // data (cleanScene). The visitor walks at once, predicted here, and the host's answer corrects it.
-  const KEY = 1, EDIT = 2, AVATAR = 4, AUDIO = 8;   // frames' flags: bit 0 a key delta; bit 1 a scene edit, bit 2 this office's avatar (page to visit-client); bit 3 voice (SPEC 5.4)
-  // The huddle (SPEC 8.7): 20 ms of 48 kHz mono a packet, Opus at 24 kbps; played this far behind, to ride out jitter.
-  const VOICE_RATE = 48000, VOICE_FRAME = 960, VOICE_BITRATE = 24000, VOICE_LEAD = 0.06, VOICE_LATE = 0.4;
+  const KEY = 1, EDIT = 2, AVATAR = 4, AUDIO = 8, RELAY = 16;   // frames' flags: bit 0 a key delta; bit 1 a scene edit, bit 2 this office's avatar (page to visit-client); bit 3 voice (SPEC 5.4)
+  // Voice (SPEC 8.7): 20 ms of 48 kHz mono a packet, Opus at 24 kbps; played this far behind, to ride out jitter.
+  // Heard within VOICE_RANGE metres (v.voiceRange), fading to nothing there; sent a little farther.
+  const VOICE_RATE = 48000, VOICE_FRAME = 960, VOICE_BITRATE = 24000, VOICE_LEAD = 0.06, VOICE_LATE = 0.4, VOICE_RANGE = 15, VOICE_MARGIN = 5;
+  // A phone (SPEC 8.8) rings this long, unanswered, then stops.
+  const CALL_RING_MS = 30000;
   // The microphone's side: 20 ms at a time, to the page (an AudioWorklet, from a blob: as the ticker's Worker is).
   const MIC_WORKLET = `registerProcessor("visit-mic", class extends AudioWorkletProcessor {
     constructor() { super(); this.b = new Float32Array(${VOICE_FRAME}); this.n = 0; }
@@ -53,6 +56,19 @@
       return true;
     }
   });`;
+  // A binary frame to visit-client (SPEC 5.4): a channel, flags, the page's clock, and what it carries.
+  const frameOf = (ch, flags, data) => {
+    const buf = new Uint8Array(11 + data.byteLength), dv = new DataView(buf.buffer);
+    dv.setUint16(0, ch); dv.setUint8(2, flags); dv.setBigUint64(3, BigInt(Math.round(performance.now() * 1000)));
+    buf.set(data, 11);
+    return buf;
+  };
+  // Who spoke, before their voice passed on (SPEC 8.7): an id and a name, each a length byte and UTF-8.
+  const relayHead = (id, name, data) => {
+    const i = new TextEncoder().encode(id).slice(0, 64), n = new TextEncoder().encode(name).slice(0, 60), out = new Uint8Array(2 + i.length + n.length + data.length);
+    out[0] = i.length; out.set(i, 1); out[1 + i.length] = n.length; out.set(n, 2 + i.length); out.set(data, 2 + i.length + n.length);
+    return out;
+  };
   const rms = a => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * a[i]; return Math.sqrt(s / (a.length || 1)); };
   // An avatar (SPEC 8.6): at most this much, gzipped; and once read by a host, at most so many vertices and objects.
   const MAX_AVATAR = 4 << 20, AVATAR_VERTICES = 300000, AVATAR_OBJECTS = 2000;
@@ -504,12 +520,17 @@
       this.watchers = [];      // who sees your room from outside it (your guests' worlds, links): [{ id, visitor, inside, link }]
       this.links = [];         // your links (8.5): [{ id, host, where ("corner", "aside" or "world"), inside }]
       this.avatars = { default: "mine", by: [] };   // whose look your visitors have in your room (8.6): "theirs" or "mine"
-      this.huddling = false;   // in the huddle (8.7): your voice goes to those you are linked to who are in it, theirs to you
-      this.muted = false;
-      this.huddlers = [];      // in the huddle with you: [{ key, name, speaking }]
-      this._huddleOn = new Map();   // channel -> the office on the other side of that visit is in the huddle
-      this._voices = new Map();     // their key -> a decoder, and where its next moment plays
+      this.mic = false;        // your microphone on (8.7): those near you hear you
+      this.voices = [];        // who you can hear, near you: [{ key, name, distance (m), speaking }]
+      this.voiceRange = VOICE_RANGE;   // metres: farther, nobody is heard, and your voice does not go
+      this._voices = new Map();   // their key -> a decoder, its panner, and where its next moment plays
+      this._voiceTo = [];         // the visits' channels your voice goes on: those near you, and your calls
+      this._voiceRoom = null;     // the room your user is in, as voice last saw it
+      this._calls = new Map();    // their key -> a call: { key, name, channel, state, timer }
+      this._phoneOn = new Set();  // channels whose other office's room has a phone
+      this._phone = false;        // this room has one
       this._mic = null;
+      this._home = null;          // where your user is at home (your world's frame, or listener()), in your units
       this.visiting = null;    // the room in the stage: { id, host, paused, link, inside } (a link's: inside once you go there)
       this.visitors = [];      // { id, visitor, pose }
       this._on = {};
@@ -584,7 +605,7 @@
       });
     }
     _send(m) { if (this._ws && this._ws.readyState === 1) this._ws.send(JSON.stringify(m)); }
-    close() { this._closed = true; this._loop.stop(); this._micStop(); this._dropAll(); if (this._ws) this._ws.close(); }
+    close() { this._closed = true; this._loop.stop(); this._micStop(); for (const k of [...this._calls.keys()]) this.hangUp(k); this._dropAll(); if (this._ws) this._ws.close(); }
 
     _ready(m) {
       this.state = m.away ? "away" : m.online ? "online" : "offline";
@@ -597,9 +618,16 @@
       this.edgeProposals = [];
       this.knocks = []; this.knocking = [];
       this._avatarsFrom(m.avatars);
-      this._huddleOn.clear();
+      this._phoneOn.clear();
       for (const v of m.visits || []) this._started(v);
-      if (m.huddle && !this._mic) this._send({ type: "huddle", on: false });   // a huddle this page has no microphone for
+      if (this._phone) this._send({ type: "phone", on: true });   // a visit-client that came back: this room's phone again
+      if (!this._mic && !this._micAsked) {   // the microphone on last time, its permission given: on again
+        this._micAsked = true;
+        let want = false;
+        try { want = localStorage.getItem("visit:mic") === "on"; } catch (e) { /* not kept */ }
+        if (want && navigator.permissions) navigator.permissions.query({ name: "microphone" })
+          .then(p => { if (p.state === "granted") return this.setMic(true); }).catch(e => console.warn("visit: the microphone did not come back on", e));
+      }
       if (this._avatarOwn) this._avatarSend();   // a visit-client that came back has no avatar of this office's
       if (this._hooks) this._sendHost();   // a visit-client that came back: this page hosts, again
       if (this._world) this._send({ type: "world", on: true });
@@ -637,8 +665,8 @@
         case "guests": this._guests(m); break;
         case "avatars": this._avatarsFrom(m); this._avatarWants(); this._visitorsList(); break;
         case "avatar": this._avatarIn(m); break;
-        case "huddle_peer": if (m.on) this._huddleOn.set(m.channel, true); else this._huddleOn.delete(m.channel); this._huddlersList(); break;
-        case "huddle": if (!m.on && this._mic) this._micStop(); this.huddling = m.on === true && !!this._mic; this._huddlersList(); break;
+        case "phone": if (m.on) this._phoneOn.add(m.channel); else { this._phoneOn.delete(m.channel); const p = this._peerOf(m.channel); if (p && p.key) this._callEnd(p.key, "their phone went", false); } break;
+        case "call": this._callIn(m); break;
         case "layout": this.layout = Array.isArray(m.layout) ? m.layout : []; break;
         case "edges": this.edges = Array.isArray(m.edges) ? m.edges : []; this.edgeProposals = this.edgeProposals.filter(p => !this.edges.some(e => e.key === p.key)); break;
         case "edge_proposed": {
@@ -901,7 +929,7 @@
         this._viewer = { id: m.id, channel: m.channel, count: 0, scene: null, sceneQ: null, since: performance.now(), loading: false, failed: false };
         this._placeholder();
       }
-      if (m.huddle) this._huddleOn.set(m.channel, true);
+      if (m.phone) this._phoneOn.add(m.channel);
       this._visitorsList();
       this._emit("visit_started", { id: m.id, role: m.role, peer: m.peer, guest: m.guest === true, link: m.link === true });
     }
@@ -914,7 +942,8 @@
       const l = this._links.get(m.channel);
       if (l && l.id === m.id) { this._links.delete(m.channel); this._sceneDrop(l); }
       if (this.visiting && this.visiting.id === m.id) { this._dropViewer(); this.visiting = null; this._cornerNext(); }
-      this._huddleOn.delete(m.channel);
+      this._phoneOn.delete(m.channel);
+      for (const c of [...this._calls.values()]) if (c.channel === m.channel) this._callEnd(c.key, "their link went", false);
       this._visitorsList();
       this._emit("visit_ended", { id: m.id, reason: m.reason });
     }
@@ -936,43 +965,60 @@
         avatar: h.avatar && h.visitor.key && this.avatarUse(h.visitor.key) === "theirs" ? h.avatar.object : null }));
       this.watchers = hs.filter(h => h.watch).map(h => ({ id: h.id, visitor: h.visitor, inside: h.inside, link: h.link }));
       this.links = [...this._links.values()].map(w => ({ id: w.id, host: w.host, where: w.where, inside: w.inside }));
-      this._huddlersList();
     }
 
-    // ---------- the huddle (8.7) ----------
-    // Voice with everyone you are linked to (a visit either way, a link, a plot in your world or yours in theirs)
-    // who is in the huddle too: join (your microphone, with echo cancelled: headphones are better still), mute, leave.
-    // A page that goes leaves it (its microphone goes with it).
-    async huddle(on) {
-      if (!on) { this._micStop(); this.huddling = false; this._send({ type: "huddle", on: false }); this._huddlersList(); this._changed(); return; }
-      if (this._mic) return;
-      if (typeof AudioEncoder === "undefined" || typeof AudioDecoder === "undefined") throw new Error("visit.huddle: this browser cannot encode voice (WebCodecs)");
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
-      const ctx = this._audio();
-      await ctx.resume();
-      if (!this._micModule) {
-        this._micModule = URL.createObjectURL(new Blob([MIC_WORKLET], { type: "text/javascript" }));
-        await ctx.audioWorklet.addModule(this._micModule);
-      }
-      const src = ctx.createMediaStreamSource(stream), node = new AudioWorkletNode(ctx, "visit-mic"), hush = ctx.createGain();
-      hush.gain.value = 0; src.connect(node); node.connect(hush); hush.connect(ctx.destination);   // pulled by the graph, heard by nobody here
-      const enc = new AudioEncoder({ output: c => this._voiceOut(c), error: e => console.warn("visit: the voice encoder failed", e) });
-      enc.configure({ codec: "opus", sampleRate: VOICE_RATE, numberOfChannels: 1, bitrate: VOICE_BITRATE });
-      const mic = this._mic = { stream, src, node, hush, enc, t: 0, level: 0 };
-      node.port.onmessage = e => {
-        const pcm = e.data;
-        mic.level = rms(pcm);
-        if (this.muted || enc.state !== "configured") return;
-        enc.encode(new AudioData({ format: "f32-planar", sampleRate: VOICE_RATE, numberOfFrames: pcm.length, numberOfChannels: 1, timestamp: mic.t, data: pcm }));
-        mic.t += pcm.length * 1e6 / VOICE_RATE;
-      };
-      this.huddling = true;
-      this._send({ type: "huddle", on: true });
-      this._huddlersList();
+    // ---------- voice: by who is near, in the same room (8.7); and phones (8.8) ----------
+    // Your microphone on or off (remembered, in this browser). On, those in the same room as your user hear them,
+    // the nearer the louder, from where they are; nobody farther than voiceRange metres, and nobody in another room
+    // (next door in your world included). Off, you still hear those near you. Nothing to join. Its echo is
+    // cancelled; headphones are better still.
+    async setMic(on) {
+      try { localStorage.setItem("visit:mic", on ? "on" : "off"); } catch (e) { /* not kept */ }
+      this.mic = !!on;
+      if (on) await this._micStart(); else this._micMaybeStop();
       this._changed();
     }
-    mute(on) { this.muted = !!on; this._changed(); }
-    _audio() { return this._ctx && this._ctx.state !== "closed" ? this._ctx : (this._ctx = new AudioContext({ sampleRate: VOICE_RATE, latencyHint: "interactive" })); }
+    // Where your user stands and looks in your room, for a room that draws no world (a world says it itself, each
+    // frame): in your room's terms, { x, y, z, yaw } (y their feet). Where your voice comes from, and you hear from.
+    listener(pose) { this._home = isObj(pose) ? { x: Number(pose.x) || 0, y: Number(pose.y) || 0, z: Number(pose.z) || 0, yaw: Number(pose.yaw) || 0 } : null; }
+    // The audio, once: a browser starts it only at a click or a key; until then it waits, and starts at the first.
+    _audio() {
+      if (this._ctx && this._ctx.state !== "closed") return this._ctx;
+      const ctx = this._ctx = new AudioContext({ sampleRate: VOICE_RATE, latencyHint: "interactive" });
+      if (ctx.state !== "running") {
+        const go = () => { ctx.resume(); if (ctx.state === "running") for (const t of ["pointerdown", "keydown"]) removeEventListener(t, go, true); };
+        for (const t of ["pointerdown", "keydown"]) addEventListener(t, go, true);
+        ctx.resume().catch(() => {});
+      }
+      return ctx;
+    }
+    // The microphone runs while it is on, or a call is: what it hears goes where _voiceTo says (nobody: nothing).
+    async _micStart() {
+      if (this._mic || this._micStarting) return this._micStarting;
+      if (typeof AudioEncoder === "undefined" || typeof AudioDecoder === "undefined") throw new Error("visit: this browser cannot encode voice (WebCodecs)");
+      this._micStarting = (async () => {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+        const ctx = this._audio();
+        if (!this._micModule) {
+          this._micModule = URL.createObjectURL(new Blob([MIC_WORKLET], { type: "text/javascript" }));
+          await ctx.audioWorklet.addModule(this._micModule);
+        }
+        const src = ctx.createMediaStreamSource(stream), node = new AudioWorkletNode(ctx, "visit-mic"), hush = ctx.createGain();
+        hush.gain.value = 0; src.connect(node); node.connect(hush); hush.connect(ctx.destination);   // pulled by the graph, heard by nobody here
+        const enc = new AudioEncoder({ output: c => this._voiceOut(c), error: e => console.warn("visit: the voice encoder failed", e) });
+        enc.configure({ codec: "opus", sampleRate: VOICE_RATE, numberOfChannels: 1, bitrate: VOICE_BITRATE });
+        const mic = this._mic = { stream, src, node, hush, enc, t: 0, level: 0 };
+        node.port.onmessage = e => {
+          const pcm = e.data;
+          mic.level = rms(pcm);
+          if (!this._voiceTo.length || enc.state !== "configured") return;   // nobody to hear it: nothing encoded, nothing sent
+          enc.encode(new AudioData({ format: "f32-planar", sampleRate: VOICE_RATE, numberOfFrames: pcm.length, numberOfChannels: 1, timestamp: mic.t, data: pcm }));
+          mic.t += pcm.length * 1e6 / VOICE_RATE;
+        };
+      })().finally(() => { this._micStarting = null; });
+      return this._micStarting;
+    }
+    _micMaybeStop() { if (!this.mic && ![...this._calls.values()].some(c => c.state === "on")) this._micStop(); }
     _micStop() {
       const m = this._mic;
       if (!m) return;
@@ -981,45 +1027,183 @@
       for (const t of m.stream.getTracks()) t.stop();
       try { m.src.disconnect(); m.node.disconnect(); m.hush.disconnect(); } catch (e) { /* gone */ }
       if (m.enc.state !== "closed") m.enc.close();
-      for (const s of this._voices.values()) { if (s.dec.state !== "closed") s.dec.close(); s.gain.disconnect(); }
-      this._voices.clear();
     }
-    // A packet of your voice: to visit-client, which sends it to each office in the huddle with you.
+    // A packet of your voice: on each visit _voiceTo names (visit-client sends it there).
     _voiceOut(chunk) {
-      if (!this._ws || this._ws.readyState !== 1 || !this.huddling) return;
-      const buf = new Uint8Array(11 + chunk.byteLength), dv = new DataView(buf.buffer);
-      dv.setUint16(0, 0); dv.setUint8(2, AUDIO); dv.setBigUint64(3, BigInt(Math.round(performance.now() * 1000)));
-      chunk.copyTo(buf.subarray(11));
-      this._ws.send(buf);
+      if (!this._ws || this._ws.readyState !== 1) return;
+      const data = new Uint8Array(chunk.byteLength);
+      chunk.copyTo(data);
+      for (const ch of this._voiceTo) this._ws.send(frameOf(ch, AUDIO, data));
     }
-    // A packet of someone's voice: decoded, and played just after the last of theirs (a little behind now, to ride
-    // out the network's unevenness; too far behind, caught up).
-    _voiceIn(ch, data) {
-      if (!this.huddling || !this._ctx) return;
-      const p = this._peerOf(ch), key = (p && p.key) || "channel:" + ch;
-      let s = this._voices.get(key);
-      if (!s) {
-        const ctx = this._ctx, gain = ctx.createGain();
-        gain.connect(ctx.destination);
-        s = { key, gain, next: 0, ts: 0, level: 0, heardAt: 0, frames: 0, dec: null };
-        s.dec = new AudioDecoder({ output: d => this._voicePlay(s, d), error: e => { console.warn("visit: a voice could not be decoded", e); this._voices.delete(key); } });
-        s.dec.configure({ codec: "opus", sampleRate: VOICE_RATE, numberOfChannels: 1 });
-        this._voices.set(key, s);
+
+    // Which room your user is in: their own (at home), one they went to (a visit, a link gone there), or a plot they
+    // walked onto in their world; with where they hear from there, in metres: { kind, w (its visit), s (its scene),
+    // ears: { x, y, z, yaw } } (no ears: a room without a world that has not said listener()).
+    _room() {
+      const v = this._viewer;
+      if (this._inRoom() && v && v.scene && v.scene.pose) {
+        const s = v.scene, k = s.unit || 1;
+        return { kind: "visit", w: v, s, k, ears: { x: s.pose.x * k, y: (s.pose.y + s.vis.y) * k, z: s.pose.z * k, yaw: s.yaw0 + (this._view ? this._view.yaw : 0) } };
       }
-      if (s.dec.state !== "configured") return;
-      s.dec.decode(new EncodedAudioChunk({ type: "key", timestamp: (s.ts += 20000), data }));
+      const h = this._home, k = this._unit(), ears = h && { x: h.x * k, y: h.y * k + 1.6, z: h.z * k, yaw: h.yaw };
+      const wd = this._world, w = wd && wd.inside && this._watches.get(wd.in);
+      if (w && w.scene) return { kind: "plot", w, s: w.scene, k, ears };
+      return { kind: "home", k, ears };
     }
+    // Where something in a room's scene is, in metres in the frame the ears are in (a plot's: your world's).
+    _where(s, o, k) { o.updateWorldMatrix(true, false); const p = o.getWorldPosition(s.v); return { x: p.x * k, y: p.y * k, z: p.z * k }; }
+    // A visitor's body in a room's scene, by its visit there (as the room marks it: userData.visitor).
+    _body(s, id) {
+      const now = performance.now();
+      if (!s.bodies || now - s.bodiesAt > 1000) { s.bodiesAt = now; s.bodies = new Map(); s.root.traverse(o => { if (o.userData && typeof o.userData.visitor === "string") s.bodies.set(o.userData.visitor, o); }); }
+      const o = s.bodies.get(id);
+      return o && o.parent ? o : null;
+    }
+    // Who your user could hear in the room they are in, and where each is (metres): at home, your visitors (where
+    // you have them); in another's room, its owner (the mark its room keeps where they stand) and its other visitors
+    // whose voices it passes on (their bodies there). Each by a key of its own: an office's, or "relay:" a visit's.
+    _near(r) {
+      const out = new Map();
+      if (r.kind === "home") {
+        for (const h of this._hosted.values()) if (h.inside && h.pose && h.visitor.key) out.set(h.visitor.key, { key: h.visitor.key, name: h.visitor.name || "", channel: h.channel,
+          x: h.pose.x * r.k, y: (Number(h.pose.y) || 0) * r.k, z: h.pose.z * r.k });
+        return out;
+      }
+      const m = r.s.mark || (r.s.mark = r.s.root.getObjectByName("visit:me")), host = r.w.host || (this.visiting && this.visiting.host) || {};
+      let shown = !!m;
+      for (let o = m; o && shown; o = o.parent) if (!o.visible) shown = false;
+      if (shown && host.key) out.set(host.key, Object.assign({ key: host.key, name: host.name || "", channel: r.w.channel }, this._where(r.s, m, r.k)));
+      for (const [id, x] of r.s.relayed || []) {
+        const b = id === "phone" || id.startsWith("phone:") ? r.s.root.getObjectByName("visit:phone") : this._body(r.s, id);   // a call on the room's speaker: from its phone
+        if (b && performance.now() - x.at < 2000) out.set("relay:" + id, Object.assign({ key: "relay:" + id, name: x.name, channel: r.w.channel }, this._where(r.s, b, r.k)));
+      }
+      return out;
+    }
+    // 30 times a second: who is near enough in your user's room to hear them (where your voice goes: at home to each
+    // of them; in another's room, to its owner, who passes it on), your calls, and where each voice comes from.
+    _voiceTick() {
+      const r = this._room(), range = Number(this.voiceRange) > 0 ? Number(this.voiceRange) : VOICE_RANGE, near = r.ears ? this._near(r) : new Map();
+      for (const p of near.values()) p.distance = Math.hypot(p.x - r.ears.x, p.z - r.ears.z);
+      this._voiceRoom = r;
+      const to = new Set();
+      if (this.mic && r.ears) {
+        if (r.kind === "home") { for (const p of near.values()) if (p.distance <= range + VOICE_MARGIN) to.add(p.channel); }
+        else to.add(r.w.channel);   // their room's owner hears you by where you are, and passes you on to those near you
+      }
+      const ku = this._unit(), pa = this._phoneAt, phone = pa && r.ears && r.kind === "home" && { x: pa.x * ku, y: (pa.y || 0) * ku, z: pa.z * ku };   // your phone, in your room
+      for (const c of this._calls.values()) {   // on the handset, you to them; on speaker, you if you are near your phone
+        if (c.state === "on" && (!c.speaker || (r.kind === "home" && phone && Math.hypot(phone.x - r.ears.x, phone.z - r.ears.z) <= range))) to.add(c.channel);
+      }
+      this._voiceTo = [...to];
+      const now = performance.now();
+      this.voices = [...near.values()].filter(p => p.distance <= range).map(p => { const s = this._voices.get(p.key); return { key: p.key, name: p.name, distance: Math.round(p.distance * 10) / 10, speaking: !!s && now - s.heardAt < 400 }; });
+      for (const c of this._calls.values()) { const s = this._voices.get(c.key); c.speaking = !!s && now - s.heardAt < 400; }
+      const ctx = this._ctx;
+      if (ctx && r.ears) {
+        const l = ctx.listener, t = ctx.currentTime, fx = -Math.sin(r.ears.yaw), fz = -Math.cos(r.ears.yaw);
+        if (l.positionX) { l.positionX.setValueAtTime(r.ears.x, t); l.positionY.setValueAtTime(r.ears.y, t); l.positionZ.setValueAtTime(r.ears.z, t);
+          l.forwardX.setValueAtTime(fx, t); l.forwardY.setValueAtTime(0, t); l.forwardZ.setValueAtTime(fz, t); l.upX.setValueAtTime(0, t); l.upY.setValueAtTime(1, t); l.upZ.setValueAtTime(0, t); }
+        else { l.setPosition(r.ears.x, r.ears.y, r.ears.z); l.setOrientation(fx, 0, fz, 0, 1, 0); }
+      }
+      for (const s of this._voices.values()) {
+        const c = s.callKey && this._calls.get(s.callKey);
+        let p = near.get(s.key);
+        if (c && c.speaker) {   // a call on speaker: from your phone, heard where you are in your room
+          p = r.kind === "home" && phone ? Object.assign({ distance: Math.hypot(phone.x - r.ears.x, phone.z - r.ears.z) }, phone) : null;
+        } else if (c) continue;   // on the handset: to your ear, not from anywhere
+        s.near = !!p && p.distance <= range;
+        if (!p || !ctx) continue;
+        s.panner.maxDistance = range;
+        if (s.panner.positionX) { s.panner.positionX.setValueAtTime(p.x, ctx.currentTime); s.panner.positionY.setValueAtTime(p.y, ctx.currentTime); s.panner.positionZ.setValueAtTime(p.z, ctx.currentTime); }
+        else s.panner.setPosition(p.x, p.y, p.z);
+      }
+    }
+    // A packet of someone's voice. On a call: theirs, or (passed on) someone near their phone on speaker, heard as a
+    // call is (_callVoice). Passed on by the room your user is in: heard if near. From a visitor of yours: passed on
+    // to your other visitors near them, and to a call on speaker if they are near your phone; heard if near you.
+    _voiceIn(ch, data, relayed) {
+      let id = null, name = "";
+      if (relayed) {
+        if (data.length < 3) return;
+        const n = data[0];
+        id = new TextDecoder().decode(data.subarray(1, 1 + n));
+        const m = data[1 + n];
+        name = new TextDecoder().decode(data.subarray(2 + n, 2 + n + m)); data = data.subarray(2 + n + m);
+      }
+      const p = this._peerOf(ch), call = p && p.key && this._calls.get(p.key);
+      if (call && call.state === "on" && call.channel === ch) return this._callVoice(call, relayed ? "call:" + id : p.key, relayed ? name : p.name || "", data, id);
+      if (relayed) {
+        const r = this._voiceRoom;
+        if (!r || r.kind === "home" || r.w.channel !== ch) return;
+        (r.s.relayed || (r.s.relayed = new Map())).set(id, { name, at: performance.now() });
+        return this._voiceDecode(this._voiceOf("relay:" + id), data);   // where they are, and whether near: _voiceTick
+      }
+      const h = this._hosted.get(ch);
+      if (h && h.inside && h.pose) {
+        this._relay(h.pose, h.id, h.visitor.name || "", data, y => y !== h);
+        for (const c of this._calls.values()) {
+          if (c.state === "on" && c.speaker && this._nearPhone(h.pose) && this._ws && this._ws.readyState === 1) this._ws.send(frameOf(c.channel, RELAY, relayHead(h.id, h.visitor.name || "", data)));
+        }
+      }
+      if (p && p.key && this.voices.some(x => x.key === p.key)) this._voiceDecode(this._voiceOf(p.key), data);
+    }
+    // A call's voice: on the handset, to your ear; on speaker, from your phone (to you, by where you are in your
+    // room), and passed on to your visitors near it, as the phone's.
+    _callVoice(c, key, name, data, id) {
+      if (c.speaker && this._phoneAt) this._relay(this._phoneAt, id ? "phone:" + id : "phone", name, data, () => true);
+      const s = this._voiceOf(key);
+      s.callKey = c.key; s.name = name;
+      this._voiceDecode(s, data);
+    }
+    // Your visitors near a spot in your room (your units), but those `but` leaves out: someone's voice, passed on.
+    _relay(at, id, name, data, but) {
+      const k = this._unit(), range = (Number(this.voiceRange) > 0 ? Number(this.voiceRange) : VOICE_RANGE) + VOICE_MARGIN;
+      let head = null;
+      for (const y of this._hosted.values()) {
+        if (!y.inside || !y.pose || !but(y) || Math.hypot(y.pose.x - at.x, y.pose.z - at.z) * k > range) continue;
+        head = head || relayHead(id, name, data);
+        if (this._ws && this._ws.readyState === 1) this._ws.send(frameOf(y.channel, RELAY, head));
+      }
+    }
+    _nearPhone(pose) {
+      const a = this._phoneAt, range = Number(this.voiceRange) > 0 ? Number(this.voiceRange) : VOICE_RANGE;
+      return !!a && Math.hypot(pose.x - a.x, pose.z - a.z) * this._unit() <= range;
+    }
+    // Someone's voice: a decoder of its own, played by distance (a panner), or as a telephone (a filter).
+    _voiceOf(key) {
+      let s = this._voices.get(key);
+      if (s) return s;
+      const ctx = this._audio(), gain = ctx.createGain(), panner = ctx.createPanner(), phone = ctx.createBiquadFilter();
+      Object.assign(panner, { panningModel: "HRTF", distanceModel: "linear", refDistance: 1, maxDistance: VOICE_RANGE, rolloffFactor: 1 });
+      phone.type = "bandpass"; phone.frequency.value = 1400; phone.Q.value = 0.7;   // a call to your ear sounds as a telephone does
+      gain.connect(panner); panner.connect(ctx.destination); phone.connect(ctx.destination);
+      s = { key, gain, panner, phone, next: 0, ts: 0, level: 0, heardAt: 0, frames: 0, near: false, callKey: null, dec: null };
+      s.dec = new AudioDecoder({ output: d => this._voicePlay(s, d), error: e => { console.warn("visit: a voice could not be decoded", e); this._voiceDrop(key); } });
+      s.dec.configure({ codec: "opus", sampleRate: VOICE_RATE, numberOfChannels: 1 });
+      this._voices.set(key, s);
+      return s;
+    }
+    _voiceDecode(s, data) { if (s.dec.state === "configured") s.dec.decode(new EncodedAudioChunk({ type: "key", timestamp: (s.ts += 20000), data })); }
     _voicePlay(s, d) {
       const ctx = this._ctx, n = d.numberOfFrames, buf = ctx.createBuffer(1, n, d.sampleRate), pcm = buf.getChannelData(0);
       try { d.copyTo(pcm, { planeIndex: 0, format: "f32-planar" }); } catch (e) { d.close(); return; }
       d.close();
       s.level = rms(pcm); s.frames++;
       if (s.level > 0.01) s.heardAt = performance.now();
+      const c = s.callKey && this._calls.get(s.callKey), out = c && c.state === "on" ? (c.speaker ? (s.near ? s.gain : null) : s.phone) : s.near ? s.gain : null;
+      if (!out) return;
       const src = ctx.createBufferSource(), now = ctx.currentTime;
-      src.buffer = buf; src.connect(s.gain);
+      src.buffer = buf; src.connect(out);
       if (s.next < now || s.next > now + VOICE_LATE) s.next = now + VOICE_LEAD;
       src.start(s.next);
       s.next += buf.duration;
+    }
+    _voiceDrop(key) {
+      const s = this._voices.get(key);
+      if (!s) return;
+      this._voices.delete(key);
+      if (s.dec.state !== "closed") s.dec.close();
+      for (const n of [s.gain, s.panner, s.phone]) n.disconnect();
     }
     _peerOf(ch) {
       const h = this._hosted.get(ch);
@@ -1027,16 +1211,79 @@
       const w = this._viewing(ch) || this._links.get(ch);
       return w ? (w.host || (this.visiting && this.visiting.host)) : null;
     }
-    // Who is in the huddle with you: each office once (two visits may join you), speaking if heard just now.
-    _huddlersList() {
+
+    // ---------- phones (8.8) ----------
+    // A phone in your room: phone(true) says your room takes calls (a room without one is never rung). Calls go to
+    // those you are linked to whose rooms have phones (v.phones), wherever their users are: voice to voice, as a
+    // telephone sounds, not by where anyone stands. Your room shows the phone, and its ringing; Visit carries the
+    // call. call(key) rings theirs; pickUp(key) answers; hangUp(key) ends it (or declines it). v.calls: [{ key, name,
+    // state: "calling" | "ringing" | "on", speaking }]; "call" says each change ({ key, name, state, why }).
+    // `at`: where the phone stands in your room (your units): on speaker, its call comes from there, and those near it
+    // are heard in it.
+    phone(on = true, { at } = {}) {
+      this._phone = !!on;
+      if (isObj(at)) this._phoneAt = { x: Number(at.x) || 0, y: Number(at.y) || 0, z: Number(at.z) || 0 };
+      this._send({ type: "phone", on: this._phone });
+      if (!on) for (const k of [...this._calls.keys()]) this.hangUp(k);
+    }
+    // A call on speaker (your side): their voice from your phone, heard by everyone near it in your room (your
+    // visitors too: your room passes it on), and everyone near it heard by them; you only while you are near it.
+    // Off (the handset, as a call starts): only you, to your ear. The caller sees only their own links (phones).
+    speaker(key, on) { const c = this._calls.get(key); if (!c) return; c.speaker = !!on; this._callSaid(c); }
+    get phones() {
       const seen = new Map();
-      if (this.huddling) for (const ch of this._huddleOn.keys()) {
-        const p = this._peerOf(ch), key = p && (p.key || p.id);
-        if (!p || seen.has(key)) continue;
-        const s = this._voices.get(p.key);
-        seen.set(key, { key: p.key || null, name: p.name || "", speaking: !!s && performance.now() - s.heardAt < 400 });
-      }
-      this.huddlers = [...seen.values()];
+      for (const ch of this._phoneOn) { const p = this._peerOf(ch); if (p && p.key && !seen.has(p.key)) seen.set(p.key, { key: p.key, name: p.name || "" }); }
+      return [...seen.values()];
+    }
+    get calls() { return [...this._calls.values()].map(c => ({ key: c.key, name: c.name, state: c.state, speaker: !!c.speaker, speaking: !!c.speaking })); }
+    call(key) {
+      if (!this._phone) throw new Error("visit.call: your room has no phone (phone(true) first)");
+      const ch = [...this._phoneOn].find(c => { const p = this._peerOf(c); return p && p.key === key; });
+      if (ch == null) throw new Error("visit.call: their room has no phone, or you are not linked to them");
+      if (this._calls.has(key)) return;
+      const p = this._peerOf(ch), c = { key, name: p.name || "", channel: ch, state: "calling", timer: 0 };
+      c.timer = setTimeout(() => { if (this._calls.get(key) === c && c.state === "calling") this._callEnd(key, "no answer", true); }, CALL_RING_MS);
+      this._calls.set(key, c);
+      this._send({ type: "call", channel: ch, act: "ring" });
+      this._callSaid(c);
+    }
+    async pickUp(key) {
+      const c = this._calls.get(key);
+      if (!c || c.state !== "ringing") return;
+      c.state = "on"; clearTimeout(c.timer);
+      this._send({ type: "call", channel: c.channel, act: "answer" });
+      this._callSaid(c);
+      await this._micStart();
+    }
+    hangUp(key) { this._callEnd(key, "hung up", true); }
+    _callEnd(key, why, tell) {
+      const c = this._calls.get(key);
+      if (!c) return;
+      this._calls.delete(key); clearTimeout(c.timer);
+      for (const [k, s] of [...this._voices]) if (s.callKey === key) this._voiceDrop(k);
+      if (tell) this._send({ type: "call", channel: c.channel, act: "hangup" });
+      this._micMaybeStop();
+      this._emit("call", { key, name: c.name, state: "ended", why });
+      this._changed();
+    }
+    _callSaid(c) { this._emit("call", { key: c.key, name: c.name, state: c.state, speaker: !!c.speaker }); this._changed(); }
+    // From the other side: ringing (your room's phone rings, if it has one: else they hear it is not taken),
+    // answered, or hung up.
+    _callIn(m) {
+      const p = this._peerOf(m.channel), key = p && p.key;
+      if (!key) return;
+      const c = this._calls.get(key);
+      if (m.act === "ring") {
+        if (!this._phone || (c && c.state === "on")) return this._send({ type: "call", channel: m.channel, act: "hangup" });
+        const n = { key, name: p.name || "", channel: m.channel, state: "ringing", timer: 0 };
+        n.timer = setTimeout(() => { if (this._calls.get(key) === n && n.state === "ringing") this._callEnd(key, "missed", true); }, CALL_RING_MS);
+        this._calls.set(key, n);
+        this._callSaid(n);
+      } else if (m.act === "answer" && c && c.state === "calling") {
+        c.state = "on"; clearTimeout(c.timer);
+        this._callSaid(c);
+        this._micStart().catch(e => this._emit("error", { code: "mic", message: String(e.message || e) }));
+      } else if (m.act === "hangup" && c) this._callEnd(key, c.state === "calling" ? "not taken" : "hung up", false);
     }
 
     // ---------- links (8.5) ----------
@@ -1095,6 +1342,17 @@
       this._hooks = hooks;
       this._sync = null;
       this._plotFrom = null;
+      // Where this room's own user stands (8.7), for those who see it to hear them from there: an empty object in its
+      // scene, kept where your world (or listener()) has them while they are at home, hidden while they are away.
+      if (!this._mark || this._mark.parent !== sc.root) {
+        if (this._mark && this._mark.parent) this._mark.parent.remove(this._mark);
+        this._mark = new sc.three.Object3D();
+        this._mark.name = "visit:me"; this._mark.visible = false;
+        sc.root.add(this._mark);
+        this._phoneMark = new sc.three.Object3D();   // and where its phone stands (8.8): a call on speaker comes from there
+        this._phoneMark.name = "visit:phone"; this._phoneMark.visible = false;
+        sc.root.add(this._phoneMark);
+      }
       for (const h of this._hosted.values()) { if (h.inside) this._spawn(h); h.sceneSent = false; }
       for (const w of this._watches.values()) if (w.failed) Object.assign(w, { failed: false, since: performance.now(), askedAt: 0 });   // now it can read them
       this._sendHost();
@@ -1318,6 +1576,7 @@
       if (typeof r.colorManagement === "boolean" && T.ColorManagement && "enabled" in T.ColorManagement) T.ColorManagement.enabled = r.colorManagement;
       s.camera = new T.PerspectiveCamera(Math.min(150, Math.max(10, num(e.fov, 70))), 1, Math.max(0.001, num(e.near, 0.1)), Math.max(1, num(e.far, 1000)));
       s.camera.rotation.order = "YXZ";
+      s.unit = Number(e.unit) > 0 ? Math.min(1000, Number(e.unit)) : 1;   // metres in one of its units: how far voices are
       if (w.link) {   // seen from outside until you go there: its plot from above, or where its host says to look from
         s.plot = plotOf(e.plot, s.root, T);
         const p = e.preview;
@@ -1658,6 +1917,14 @@
         this._emit("stats", this.stats);
       }
       for (const w of this._watches.values()) if (!w.scene && !w.loading && !w.failed && now - (w.askedAt || w.since) > 3000) { w.askedAt = now; this._sceneResync(w); }
+      if (now - (this._voiceAt || 0) >= 33) {   // voice: who is near, where each is heard from; and this room's own user's mark
+        this._voiceAt = now;
+        const m = this._mark, h = this._home, away = this._inRoom() || (this._world && this._world.inside);
+        if (m) { m.visible = !!h && !away; if (h && !away) m.position.set(h.x, h.y + 1.5 / this._unit(), h.z); }
+        const pm = this._phoneMark, pa = this._phoneAt;
+        if (pm) { pm.visible = !!(this._phone && pa); if (pa) pm.position.set(pa.x, pa.y, pa.z); }
+        this._voiceTick();
+      }
       if (!this._hooks || !this._hosted.size) return;
       for (const h of [...this._hosted.values()]) if (h.inside) this._step(h, now);
       if (now - (this._avatarAt || 0) >= 33) {   // visitors' own avatars, walking or idle, 30 times a second
@@ -1862,7 +2129,8 @@
     // A delta of the scene of the room visited, or of a plot watched (SPEC 5.4).
     _frame(buf) {
       if (buf.byteLength < 11) return;
-      if (new DataView(buf).getUint8(2) === AUDIO) return this._voiceIn(new DataView(buf).getUint16(0), new Uint8Array(buf, 11));
+      const fl = new DataView(buf).getUint8(2);
+      if (fl === AUDIO || fl === RELAY) return this._voiceIn(new DataView(buf).getUint16(0), new Uint8Array(buf, 11), fl === RELAY);
       const dv = new DataView(buf), w = this._viewing(dv.getUint16(0));
       if (w) this._sceneDelta(w, dv, (dv.getUint8(2) & KEY) !== 0);
     }
@@ -2110,6 +2378,7 @@
       this.look = { yaw: me.yaw, pitch: me.pitch };
       if (this.bounce) { const b = this.bounce; this.bounce = null; this.home = b; return Object.assign({}, b, { yaw: me.yaw, pitch: me.pitch, in: null }); }
       const list = this._layout();
+      v._home = null;   // said below, where they end up
       let x = this.in != null ? list.find(y => y.w && y.w.channel === this.in) : null;
       if (x && !(x.w.inside && x.w.scene)) x = null;
       if (!x) {
@@ -2118,7 +2387,7 @@
         if (this.yHome != null) { me.y = this.yHome; this.yHome = null; }
         this.in = null;
         x = list.find(y => y.w && y.w.scene && !y.w.inside && (this.refused.get(y.w.channel) || 0) <= now && within(y.rect, me.x, me.z));
-        if (!x) { this.home = me; return Object.assign({}, me, { in: null }); }
+        if (!x) { this.home = me; v._home = { x: me.x, y: me.y, z: me.z, yaw: me.yaw }; return Object.assign({}, me, { in: null }); }
         this._enter(x, me, now);
       }
       const w = x.w, s = w.scene, h = this._holder(x), yaw = me.yaw - x.at.turn * Math.PI / 2;
@@ -2136,12 +2405,14 @@
         const out = new T.Vector3(hp.x, 0, hp.z).applyMatrix4(h.place.matrix);
         this.home = { x: out.x, y: this.yHome, z: out.z, yaw: me.yaw, pitch: me.pitch };
         this.yHome = null;
+        v._home = { x: out.x, y: this.home.y, z: out.z, yaw: me.yaw };
         return Object.assign({}, this.home, { in: null });
       }
       const at = new T.Vector3(s.pose.x + s.vis.x, 0, s.pose.z + s.vis.z).applyMatrix4(h.place.matrix);
       // Up or down as its host has us (a stair, a lift), from where we stepped on, in this world's units; the height
       // we came with stays ours, so a page that keeps the y it is given rises no further.
       const rise = s.yBase == null ? 0 : (s.pose.y + s.vis.y - s.yBase) * x.k;
+      v._home = { x: at.x, y: this.yHome + rise, z: at.z, yaw: me.yaw };   // in a plot: heard from there, in this world
       return { x: at.x, y: this.yHome + rise, z: at.z, yaw: me.yaw, pitch: me.pitch, in: { key: x.key, name: x.name } };
     }
 
@@ -2282,12 +2553,13 @@
         rows.push(`<div class="row knock"><b>${esc(p.name)}</b> proposes their plot's ${esc(p.theirs)} side against your ${esc(p.mine)} side
           <div class="btns"><button class="go" data-v="edge_yes" data-key="${esc(p.key)}">Agree</button><button data-v="edge_no" data-key="${esc(p.key)}">No</button></div></div>`);
       }
-      // The huddle (8.7): voice with those you are linked to who are in it too.
-      if (v.state === "online") {
-        if (!v.huddling) rows.push(`<div class="row"><span class="grow">huddle <span class="muted">· voice with those you are linked to</span></span><button data-v="huddle" title="your microphone, to everyone linked to you who joins too (headphones are best)">Join huddle</button></div>`);
-        else rows.push(`<div class="row lnk"><div>in the huddle${v.huddlers.length ? ": " + v.huddlers.map(h => `<b class="${h.speaking ? "speaking" : ""}">${h.speaking ? "🔊 " : ""}${esc(h.name)}</b>`).join(", ") : ` <span class="muted">(nobody else yet: those linked to you who join)</span>`}</div>
-          <div class="btns"><button data-v="mute" class="${v.muted ? "on" : ""}">${v.muted ? "Unmute" : "Mute"}</button><button data-v="unhuddle">Leave</button></div></div>`);
-      }
+      // Calls (8.8): ringing, calling, on.
+      for (const c of v.calls) rows.push(`<div class="row lnk"><div>📞 ${c.state === "ringing" ? `<b>${esc(c.name)}</b> is calling` : c.state === "calling" ? `calling <b>${esc(c.name)}</b>…`
+        : `on a call with <b class="${c.speaking ? "speaking" : ""}">${esc(c.name)}</b>`}</div><div class="btns">${c.state === "ringing" ? `<button class="go" data-v="pick_up" data-key="${esc(c.key)}">Pick up</button>` : ""}${c.state === "on"
+          ? `<button data-v="speaker" data-key="${esc(c.key)}" class="${c.speaker ? "go" : ""}" title="${c.speaker ? "on speaker: everyone near your phone hears and is heard (click: to your ear)" : "to your ear: only you (click: on speaker, for everyone near your phone)"}">${c.speaker ? "🔊 speaker" : "📞 handset"}</button>` : ""}<button data-v="hang_up" data-key="${esc(c.key)}">${c.state === "ringing" ? "Not now" : "Hang up"}</button></div></div>`);
+      // Voice (8.7): those near you in the room you are in; your microphone on or off.
+      if (v.state === "online") rows.push(`<div class="row"><span class="grow">${v.voices.length ? "near you: " + v.voices.map(x => `<b class="${x.speaking ? "speaking" : ""}">${x.speaking ? "🔊 " : ""}${esc(x.name)}</b>`).join(", ") : `voice <span class="muted">· nobody near you</span>`}</span>
+        <button data-v="mic" class="${v.mic ? "go" : ""}" title="${v.mic ? "those near you hear you (click: microphone off)" : "your microphone: those near you hear you, the nearer the louder (headphones are best)"}">${v.mic ? "🎙 on" : "🎙 off"}</button></div>`);
       if (v._world && v.state === "online") rows.push(`<div class="row"><span class="grow">your world: ${v._world.plots.length} ${v._world.plots.length === 1 ? "room" : "rooms"} round yours</span><button data-v="map" title="where your friends' rooms sit round yours, from above">Map</button></div>`);
       if (v.visiting && !v.visiting.link) rows.push(`<div class="row"><span class="grow">in <b>${esc(v.visiting.host.name)}</b>'s room${v.visiting.paused ? " (reloading)" : ""}</span><button data-v="leave">Leave</button></div>`);
       // Your links: in the corner (go there, or into your world), in their room, waiting for the corner, in your world.
@@ -2341,9 +2613,10 @@
       }
       else if (act === "leave") v.leave();
       else if (act === "map") (v._mapView || (v._mapView = map(v))).open();
-      else if (act === "huddle") v.huddle(true).catch(x => v._emit("error", { code: "huddle", message: String(x.message || x) }));
-      else if (act === "mute") v.mute(!v.muted);
-      else if (act === "unhuddle") v.huddle(false);
+      else if (act === "mic") v.setMic(!v.mic).catch(x => v._emit("error", { code: "mic", message: String(x.message || x) }));
+      else if (act === "pick_up") v.pickUp(b.dataset.key).catch(x => v._emit("error", { code: "mic", message: String(x.message || x) }));
+      else if (act === "hang_up") v.hangUp(b.dataset.key);
+      else if (act === "speaker") v.speaker(b.dataset.key, !(v.calls.find(c => c.key === b.dataset.key) || {}).speaker);
       else if (act === "look") v.useAvatar(b.dataset.key, b.dataset.use === v.avatars.default ? null : b.dataset.use);
       else if (act === "unlink") v.unlink(b.dataset.x);
       else if (act === "step_in") v.stepIn(b.dataset.x);
@@ -2375,7 +2648,7 @@
     root.addEventListener("focusout", () => setTimeout(draw, 0));
     v.on("change", draw);
     timer = setInterval(() => { if (v.knocks.length) draw(); }, 1000);   // the knocks' countdown
-    const speaking = setInterval(() => { if (v.huddling) { v._huddlersList(); draw(); } }, 250);   // who is speaking
+    const speaking = setInterval(() => { if (v.mic || v.voices.length || v._calls.size) draw(); }, 250);   // who is near, and speaking
     draw();
     return { element: root, release() { clearInterval(timer); clearInterval(speaking); v.off("change", draw); root.remove(); } };
   }

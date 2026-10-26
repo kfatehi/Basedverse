@@ -22,8 +22,12 @@ const KEY: u8 = 1;
 const EDIT: u8 = 2;
 /// A page's own avatar (8.6): gzipped JSON, kept by its visit-client for the hosts that ask.
 const AVATAR: u8 = 4;
-/// A moment of this office's voice, or a peer's, in a huddle (8.7): one Opus packet.
+/// A moment of this office's voice for one office near it, or theirs for it (8.7): one Opus packet.
 const AUDIO: u8 = 8;
+/// A moment of someone else's voice an office passes on (8.7, 8.8): a visitor's, from its room to another visitor
+/// near them; a call's, from a phone on speaker to those near it, and theirs to the call. Who spoke (an id, then a
+/// name, each a length byte and UTF-8), then the Opus packet.
+const RELAY: u8 = 16;
 /// The most one packet of voice takes (20 ms of Opus is some tens of bytes).
 pub const MAX_AUDIO: usize = 1000;
 /// The most an avatar takes gzipped, and unpacked.
@@ -107,15 +111,33 @@ pub fn avatar_from_page(b: &[u8]) -> Option<Bytes> {
     Some(Bytes::copy_from_slice(&b[11..]))
 }
 
-/// A packet of the page's voice (its channel and timestamp are ignored), if the frame is one and not too big.
-pub fn audio_from_page(b: &[u8]) -> Option<Bytes> {
+/// A packet of the page's voice and the visit's channel it is for, if the frame is one and not too big.
+pub fn audio_from_page(b: &[u8]) -> Option<(u16, Bytes)> {
     if b.len() < 12 || b[2] != AUDIO || b.len() - 11 > MAX_AUDIO {
         return None;
     }
-    Some(Bytes::copy_from_slice(&b[11..]))
+    Some((u16::from_be_bytes([b[0], b[1]]), Bytes::copy_from_slice(&b[11..])))
 }
 
-/// A peer's packet of voice for the page, on the channel of the visit it came by.
+/// Someone's voice the page passes on, and the visit's channel it goes on.
+pub fn relay_from_page(b: &[u8]) -> Option<(u16, Bytes)> {
+    if b.len() < 14 || b[2] != RELAY || b.len() - 11 > MAX_AUDIO + 128 {
+        return None;
+    }
+    Some((u16::from_be_bytes([b[0], b[1]]), Bytes::copy_from_slice(&b[11..])))
+}
+
+/// Someone's voice the other side passed on, for the page, on the channel of the visit it came by.
+pub fn relay_to_page(channel: u16, data: &[u8]) -> Bytes {
+    let mut out = BytesMut::with_capacity(11 + data.len());
+    out.put_u16(channel);
+    out.put_u8(RELAY);
+    out.put_u64(0);
+    out.extend_from_slice(data);
+    out.freeze()
+}
+
+/// The other office's packet of voice for the page, on the channel of the visit it came by.
 pub fn audio_to_page(channel: u16, data: &[u8]) -> Bytes {
     let mut out = BytesMut::with_capacity(11 + data.len());
     out.put_u16(channel);

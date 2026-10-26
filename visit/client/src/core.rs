@@ -49,8 +49,10 @@ pub enum Ev {
     SceneResync { visit: String },
     /// A visitor's avatar (8.6): unpacked, checked JSON, for the host's page.
     LinkAvatar { visit: String, json: String },
-    /// A packet of the other side's voice, in a huddle (8.7).
+    /// A packet of the other side's voice (8.7).
     LinkAudio { visit: String, data: Bytes },
+    /// Someone's voice the other side passed on (8.7, 8.8).
+    LinkRelay { visit: String, data: Bytes },
     Tick,
     Shutdown,
 }
@@ -111,8 +113,8 @@ struct Visit {
     in_world: bool,
     /// The host asked for this office's avatar (visitor side): it goes now, and again when the page gives a new one.
     avatar_asked: bool,
-    /// The other office is in the huddle (8.7): with this one in it too, each hears the other.
-    peer_huddle: bool,
+    /// The other office's room has a phone (8.8): it takes calls.
+    peer_phone: bool,
 }
 
 /// The most control messages a link's other side may send a second; more are dropped (a peer flooding
@@ -180,8 +182,8 @@ pub struct Core {
     lobby_view: Option<Value>,
     /// This office's own avatar, gzipped JSON (8.6), as its page last gave it: for the hosts that ask.
     avatar: Option<Bytes>,
-    /// This office is in the huddle (8.7): its page's voice goes to every office it is linked to that is in it too.
-    huddle: bool,
+    /// This office's room has a phone (8.8), as its page said: every link is told.
+    phone: bool,
     /// Knocks on this office's door still waiting, and when each came, for a page that connects later.
     knocks: BTreeMap<String, (Value, Instant)>,
     visits: HashMap<String, Visit>,
@@ -223,7 +225,7 @@ impl Core {
             max_visitors,
             lobby_view: None,
             avatar: None,
-            huddle: false,
+            phone: false,
             knocks: BTreeMap::new(),
             visits: HashMap::new(),
             next_channel: 1,
@@ -289,7 +291,7 @@ impl Core {
                     self.page_gone = Instant::now();
                     self.tell_hosted(json!({ "paused": true }));
                     self.set_hosting(None);   // no page, no room to show: not to be visited until one hosts again
-                    self.set_huddle(false);   // its microphone went with it
+                    self.set_phone(false);    // nor a phone to answer: the other side's calls end
                 }
             }
             Ev::PageMsg { id, msg } => {
@@ -345,9 +347,14 @@ impl Core {
                 }
             }
             Ev::LinkAudio { visit, data } => {
-                // Heard only by an office in the huddle, from one in it too; a page behind loses some (late is lost).
-                if let (true, Some(v), Some(p)) = (self.huddle, self.visits.get(&visit).filter(|v| v.peer_huddle), &self.page) {
+                // To the page, which plays it if the other office is near (8.7); a page behind loses some (late is lost).
+                if let (Some(v), Some(p)) = (self.visits.get(&visit), &self.page) {
                     let _ = p.frames.try_send(frames::audio_to_page(v.channel, &data));
+                }
+            }
+            Ev::LinkRelay { visit, data } => {
+                if let (Some(v), Some(p)) = (self.visits.get(&visit), &self.page) {
+                    let _ = p.frames.try_send(frames::relay_to_page(v.channel, &data));
                 }
             }
             Ev::LinkAvatar { visit, json } => {
@@ -383,7 +390,7 @@ impl Core {
         self.to_page(json!({
             "type": "ready", "version": VERSION, "office": self.office, "online": self.online, "away": self.saved.away, "status": self.status,
             "max_visitors": self.max_visitors, "visits": visits, "key": self.key, "door": self.door(), "guests": self.guests(),
-            "layout": self.saved.layout_json(), "edges": self.saved.edges_json(), "avatars": self.saved.avatars_json(), "huddle": self.huddle,
+            "layout": self.saved.layout_json(), "edges": self.saved.edges_json(), "avatars": self.saved.avatars_json(),
         }));
         if let Some(view) = self.lobby_view.clone() {
             self.to_page(view);
@@ -570,11 +577,22 @@ impl Core {
             // host's page asks for a visitor's (`avatar_want`). Whose look visitors have here (`avatars`: by default;
             // `avatar_use`: for a key, or back to the default): kept in the state file.
             "avatar_clear" => self.avatar = None,
-            // The huddle (8.7): in or out; this office's voice then goes to every office it is linked to that is in it.
-            "huddle" => match m.get("on").and_then(Value::as_bool) {
-                Some(on) => self.set_huddle(on),
-                None => self.page_error("bad_message", "on must be true or false", Some("huddle")),
+            // A phone (8.8): this room has one (or not), and a call on one of its visits: ring, answer, hang up.
+            "phone" => match m.get("on").and_then(Value::as_bool) {
+                Some(on) => self.set_phone(on),
+                None => self.page_error("bad_message", "on must be true or false", Some("phone")),
             },
+            "call" => {
+                let ch = m.get("channel").and_then(Value::as_u64).unwrap_or(0) as u16;
+                let Some(act) = m.get("act").and_then(Value::as_str).filter(|a| ["ring", "answer", "hangup"].contains(a)).map(str::to_string) else {
+                    return self.page_error("bad_message", "act is \"ring\", \"answer\" or \"hangup\"", Some("call"));
+                };
+                match self.visits.values().find(|v| v.channel == ch && v.up) {
+                    Some(v) if v.peer_phone || act != "ring" => { let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "call": act }))); }   // only ringing needs their phone
+                    Some(_) => self.page_error("no_phone", "their room has no phone", Some("call")),
+                    None => self.page_error("no_such_visit", "no visit on that channel", Some("call")),
+                }
+            }
             "avatar_want" => {
                 let ch = m.get("channel").and_then(Value::as_u64).unwrap_or(0) as u16;
                 match self.visits.values().find(|v| v.channel == ch && v.role == Role::Host && v.up) {
@@ -692,17 +710,15 @@ impl Core {
 
     /// A delta of this office's scene for one of its visitors, or an edit of it.
     fn page_frame(&mut self, data: &[u8]) {
-        if let Some(audio) = frames::audio_from_page(data) {
-            if !self.huddle {
-                return;
+        if let Some((ch, data)) = frames::relay_from_page(data) {   // someone's voice, passed on (a visitor's, a call's)
+            if let Some(v) = self.visits.values().find(|v| v.channel == ch && v.up) {
+                let _ = v.cmd.try_send(LinkCmd::Relay(data));
             }
-            let mut to: Vec<&str> = Vec::new();   // each office once, though two links may join them (both watching)
-            for v in self.visits.values().filter(|v| v.up && v.peer_huddle) {
-                let key = v.peer.get("key").and_then(Value::as_str).unwrap_or(&v.id);
-                if !to.contains(&key) {
-                    to.push(key);
-                    let _ = v.cmd.try_send(LinkCmd::Audio(audio.clone()));
-                }
+            return;
+        }
+        if let Some((ch, audio)) = frames::audio_from_page(data) {   // this office's voice, for the office near it on that visit
+            if let Some(v) = self.visits.values().find(|v| v.channel == ch && v.up) {
+                let _ = v.cmd.try_send(LinkCmd::Audio(audio));
             }
             return;
         }
@@ -860,16 +876,15 @@ impl Core {
         true
     }
 
-    /// In the huddle or out of it: every link told, and the page.
-    fn set_huddle(&mut self, on: bool) {
-        if self.huddle == on {
+    /// This room has a phone, or no longer: every link told (and each new one, while it has).
+    fn set_phone(&mut self, on: bool) {
+        if self.phone == on {
             return;
         }
-        self.huddle = on;
+        self.phone = on;
         for v in self.visits.values().filter(|v| v.up) {
-            let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "huddle": on })));
+            let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "phone": on })));
         }
-        self.to_page(json!({ "type": "huddle", "on": on }));
     }
 
     fn tell_avatars(&mut self) {
@@ -1096,7 +1111,7 @@ impl Core {
                 self.visits.insert(id.to_string(), Visit {
                     id: id.to_string(), channel, role, peer, up: false, cmd,
                     last_seq: 0, inputs: (Instant::now(), 0), want_key: false, host_state: None, ctl: (Instant::now(), 0), key_asked: None, resync_asked: None, resync_due: false,
-                    points: (Instant::now(), 0), guest, watch, inside: !watch, shared_adds: false, link, in_world: false, avatar_asked: false, peer_huddle: false,
+                    points: (Instant::now(), 0), guest, watch, inside: !watch, shared_adds: false, link, in_world: false, avatar_asked: false, peer_phone: false,
                 });
             }
             Err(e) => {
@@ -1232,12 +1247,12 @@ impl Core {
     }
 
     fn link_up(&mut self, id: &str, first: bool) {
-        let (has_page, huddle) = (self.page.is_some(), self.huddle);
+        let (has_page, phone) = (self.page.is_some(), self.phone);
         let Some(v) = self.visits.get_mut(id) else { return };
         v.up = true;
         let (role, cmd) = (v.role, v.cmd.clone());
-        if huddle {   // in the huddle: the other side hears of it, as every link does
-            let _ = cmd.try_send(LinkCmd::Ctl(json!({ "huddle": true })));
+        if phone {   // this room has a phone: the other side hears of it, as every link does
+            let _ = cmd.try_send(LinkCmd::Ctl(json!({ "phone": true })));
         }
         let started = started(v);
         match role {
@@ -1274,9 +1289,13 @@ impl Core {
             return;
         }
         let ch = v.channel;
-        if let Some(on) = m.get("huddle").and_then(Value::as_bool) {   // the other office joined the huddle, or left it
-            v.peer_huddle = on;
-            return self.to_page(json!({ "type": "huddle_peer", "channel": ch, "on": on }));
+        if let Some(on) = m.get("phone").and_then(Value::as_bool) {   // the other room has a phone now, or no longer
+            v.peer_phone = on;
+            return self.to_page(json!({ "type": "phone", "channel": ch, "on": on }));
+        }
+        if let Some(act) = m.get("call").and_then(Value::as_str).filter(|a| ["ring", "answer", "hangup"].contains(a)) {
+            let act = act.to_string();
+            return self.to_page(json!({ "type": "call", "channel": ch, "act": act }));
         }
         if self.link_edge(id, &m) {
             return;
@@ -1406,8 +1425,8 @@ fn started(v: &Visit) -> Value {
     if v.shared_adds {
         m["shared_adds"] = json!(true);
     }
-    if v.peer_huddle {
-        m["huddle"] = json!(true);
+    if v.peer_phone {
+        m["phone"] = json!(true);
     }
     if v.link {
         m["link"] = json!(true);
