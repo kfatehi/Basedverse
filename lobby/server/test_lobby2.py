@@ -472,12 +472,57 @@ async def t_watch():
         await c_.send(type="bye")
 
 
+async def t_link():
+    """Links (Visit 0.8): a knock with link: true, answered by its door as any knock, that starts a watch (the
+    knocker sees the room in a corner, and may step in). To a door that does not take links, an ordinary knock."""
+    a, b = await join("L A", proto=lobby.PROTO3, world=True, links=True), await join("L B", proto=lobby.PROTO3, world=True, links=True)
+    old = await join("L Old", proto=lobby.PROTO3, world=True)
+    lob = await a.last_lobby()
+    check("the lobby says who takes links", (office(lob, "L B")["links"], office(lob, "L Old")["links"]), (True, False))
+    await b.send(type="status", status="busy")
+    await b.quiet()
+    await a.send(type="knock", to=b.id, link=True)
+    e = await a.expect("error")
+    check("busy stops a link, as a knock", (e["code"], e.get("ref")), ("not_available", "knock"))
+    await b.send(type="status", status="available")
+    await b.quiet()
+    await a.send(type="knock", to=b.id, link=True, message="look")
+    sent = await a.expect("knock_sent")
+    k = await b.expect("knock")
+    check("a link: says so both ways, with the knocker's key and message, not a watch",
+          (sent.get("link"), sent.get("watch"), k.get("link"), k.get("watch"), k["from"]["key"], k["message"]), (True, None, True, None, "ep-L A", "look"))
+    await b.send(type="answer", knock=k["id"], accept=True)
+    ans = await a.expect("answered")
+    va, vb = await a.expect("visit"), await b.expect("visit")
+    check("let in: a watch that is a link, both told so",
+          (ans["accept"], ans.get("link"), va.get("watch"), va.get("link"), vb.get("watch"), vb.get("link"), va["role"], vb["role"]),
+          (True, True, True, True, True, True, "visitor", "host"))
+    lob = await a.last_lobby()
+    check("counted as a watcher, not a visitor", (office(lob, "L B")["watchers"], office(lob, "L B")["visitors"]), (1, 0))
+    await a.send(type="knock", to=b.id, link=True)
+    e = await a.expect("error")
+    check("linked already: already_watching", (e["code"], e.get("ref")), ("already_watching", "knock"))
+    await a.send(type="knock", to=old.id, link=True)
+    sent = await a.expect("knock_sent")
+    k = await old.expect("knock")
+    check("to a door that does not take links: an ordinary knock", (sent.get("link"), k.get("link")), (None, None))
+    await old.send(type="answer", knock=k["id"], accept=True)
+    await a.expect("answered")
+    vo = await a.expect("visit")
+    check("which is an ordinary visit, the link going on", (vo.get("watch"), vo.get("link"), len(lobby.OFFICES2[a.id].watching)), (None, None, 1))
+    await a.send(type="end", visit=va["id"])
+    e1, e2 = await a.expect("visit_ended"), await b.expect("visit_ended")
+    check("a link ends like a visit", (e1["id"], e2["id"], len(lobby.OFFICES2[b.id].watched)), (va["id"], va["id"], 0))
+    for c_ in (a, b, old):
+        await c_.send(type="bye")
+
+
 async def main():
     global URL
     async with serve(lobby.handler, "127.0.0.1", 0, max_size=lobby.LIMITS["frame"], process_request=lobby.health) as server:
         URL = "ws://127.0.0.1:%d" % server.sockets[0].getsockname()[1]
         for t in (t_hello, t_hello_rules_and_separation, t_knock_refusals, t_visit, t_end_and_full, t_resume, t_resume_replays_visits, t_rename,
-                  t_resume_window_and_bye, t_knock_timeout_and_health, t_version_3, t_keys, t_watch):
+                  t_resume_window_and_bye, t_knock_timeout_and_health, t_version_3, t_keys, t_watch, t_link):
             print("\n" + t.__name__[2:])
             try:
                 await t()

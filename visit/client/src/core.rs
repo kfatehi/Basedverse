@@ -100,6 +100,9 @@ struct Visit {
     /// The visitor's page reads an added object that names the geometries and materials it already has by uuid
     /// only (8.3; Visit 0.7 on): its visit-client says so when the link is up (host side).
     shared_adds: bool,
+    /// A link (8.5): a watch begun by a knock its host let in, not by the world. The door and the guest list do
+    /// not end it, nor does the world going off: it ends as a visit does.
+    link: bool,
 }
 
 /// The most control messages a link's other side may send a second; more are dropped (a peer flooding
@@ -395,7 +398,7 @@ impl Core {
                     self.save_state();
                     self.tell_guests();
                     if !open {
-                        self.end_watchers(|_| true);   // the door shut: nobody watches this plot any more
+                        self.end_watchers(|_| true);   // the door shut: no guest watches this plot any more
                     }
                 }
                 None => self.page_error("bad_message", "open must be true or false", Some("door")),
@@ -469,7 +472,8 @@ impl Core {
                         self.to_lobby(json!({ "type": "end", "visit": other }));
                     }
                 }
-                let pose = clamp_pose(m.get("pose").unwrap_or(&Value::Null));
+                // Where it steps in, in the room's terms; none (a link's "go there"): where the room puts newcomers.
+                let pose = m.get("pose").filter(|p| p.is_object()).map(clamp_pose).unwrap_or(Value::Null);
                 if let Some(v) = self.visits.get_mut(&id) {
                     v.inside = true;
                     let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "enter": pose })));
@@ -932,6 +936,7 @@ impl Core {
             p.insert("key".into(), json!(k));
         }
         let watch = m.get("watch").and_then(Value::as_bool) == Some(true);
+        let link = watch && m.get("link").and_then(Value::as_bool) == Some(true);
         if watch && role == Role::Visitor {
             self.watch_pending.remove(peer.get("id").and_then(Value::as_str).unwrap_or(""));
         }
@@ -965,7 +970,7 @@ impl Core {
                 self.visits.insert(id.to_string(), Visit {
                     id: id.to_string(), channel, role, peer, up: false, cmd,
                     last_seq: 0, inputs: (Instant::now(), 0), want_key: false, host_state: None, ctl: (Instant::now(), 0), key_asked: None, resync_asked: None, resync_due: false,
-                    points: (Instant::now(), 0), guest, watch, inside: !watch, shared_adds: false,
+                    points: (Instant::now(), 0), guest, watch, inside: !watch, shared_adds: false, link,
                 });
             }
             Err(e) => {
@@ -1022,7 +1027,7 @@ impl Core {
             self.watch_declined.clear();   // asked anew: try everyone again
             self.watch_guests();
         } else {
-            let watches: Vec<String> = self.visits.values().filter(|v| v.role == Role::Visitor && v.watch).map(|v| v.id.clone()).collect();
+            let watches: Vec<String> = self.visits.values().filter(|v| v.role == Role::Visitor && v.watch && !v.link).map(|v| v.id.clone()).collect();
             for id in watches {
                 self.to_lobby(json!({ "type": "end", "visit": id }));
             }
@@ -1063,10 +1068,11 @@ impl Core {
         }
     }
 
-    /// The watches of this office's plot whose watcher's key passes `which`: ended (`kicked`).
+    /// The watches of this office's plot whose watcher's key passes `which`: ended (`kicked`). Not links: their
+    /// host let them in itself.
     fn end_watchers(&mut self, which: impl Fn(&str) -> bool) {
         let ends: Vec<String> = self.visits.values()
-            .filter(|v| v.role == Role::Host && v.watch && which(v.peer.get("key").and_then(Value::as_str).unwrap_or("")))
+            .filter(|v| v.role == Role::Host && v.watch && !v.link && which(v.peer.get("key").and_then(Value::as_str).unwrap_or("")))
             .map(|v| v.id.clone()).collect();
         for id in ends {
             self.to_lobby(json!({ "type": "end", "visit": id, "reason": "kicked" }));
@@ -1150,14 +1156,18 @@ impl Core {
                 if v.inside {
                     return;
                 }
-                let pose = clamp_pose(&m["enter"]);
+                let pose = m["enter"].is_object().then(|| clamp_pose(&m["enter"]));
                 let full = self.visits.values().filter(|x| x.role == Role::Host && x.inside).count() >= self.max_visitors as usize;
                 let v = self.visits.get_mut(id).expect("just found");
                 if full {
                     let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "enter_refused": "full" })));
                 } else {
                     v.inside = true;
-                    self.to_page(json!({ "type": "enter", "channel": ch, "pose": pose }));
+                    let mut enter = json!({ "type": "enter", "channel": ch });
+                    if let Some(pose) = pose {   // none: a link stepping in, where the room puts newcomers
+                        enter["pose"] = pose;
+                    }
+                    self.to_page(enter);
                 }
             }
             Role::Host if v.watch && m.get("exit").is_some() => {
@@ -1257,6 +1267,9 @@ fn started(v: &Visit) -> Value {
     }
     if v.shared_adds {
         m["shared_adds"] = json!(true);
+    }
+    if v.link {
+        m["link"] = json!(true);
     }
     if v.watch {
         m["watch"] = json!(true);
