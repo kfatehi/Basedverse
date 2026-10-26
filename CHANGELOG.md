@@ -48,6 +48,7 @@ a second; the host spends 0.4 ms per update on its scene, 30 a second.
 - The lobby: version 3 (version 2 with a link that can be withdrawn), its own lobby beside versions 1 and 2.
 - [visit/SPEC.md](visit/SPEC.md) throughout (sections 7 and 8 rewritten); [visit/INTEGRATING.md](visit/INTEGRATING.md)
   "Before you start", step 5 (rewritten), step 6, the checklist, troubleshooting.
+- `bin/setup`: piped or redirected on Windows, it no longer stops at a ⚠ or ✓ the console cannot write (#1).
 
 ### What an integration does
 

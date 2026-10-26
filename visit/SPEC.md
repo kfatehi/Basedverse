@@ -1,8 +1,8 @@
 # Visit — the specification
 
 **Status: built** (visit-client and visit.js in `client/`, the lobby's version 3 in `../lobby/server/`) and
-tested on one machine; not yet between two machines over the internet. This is the contract they are built
-to. Where it says MUST, SHOULD or MAY, those words mean what RFC 2119 says they mean.
+tested on one machine (Visit 0.4 went between two machines over the internet; 0.5 not yet). This is the
+contract they are built to. Where it says MUST, SHOULD or MAY, those words mean what RFC 2119 says they mean.
 
 Visit lets the people running agent-office sims ("workrooms") walk around each other's rooms. Every room
 is made with three.js. A visitor moves with WASD and the mouse; the host sends its room's scene, as data,
@@ -33,7 +33,7 @@ how-to. This file is the contract behind it, for whoever builds or changes the s
 | **visit-client** | the local client: a Rust binary, one per sim per machine. Owns **all** networking: the lobby session, the links to other visit-clients, visit state. Listens on 127.0.0.1 only. | shared, identical for everyone |
 | **visit.js** | the library, in the sim's page. Talks only to its own visit-client. Sends the room's three.js scene to its visitors and moves them with the sim's hooks; draws the scene of the room it visits; captures input. Served by the visit-client itself, so the two always match. | shared, identical for everyone |
 | **lobby server** | presence, knocks, and introducing visit-clients to each other (`basedverse-lobby/3`, section 6). | shared, one server |
-| **relay** | an [iroh](https://iroh.computer) relay, for links between machines that cannot reach each other directly. Encrypted end to end; it cannot read what it carries. | shared, beside the lobby |
+| **relay** | an [iroh](https://iroh.computer) relay, for links between machines that cannot reach each other directly. Encrypted end to end; it cannot read what it carries. | shared: the ones the lobby names (`relays` in its welcome); until one runs beside the lobby, iroh's public relays |
 | **the sim** | its own room, made with three.js (r125 to r186); a launcher step; its scene and two host hooks (`spawn`, `move`); its UI (or the library's default panel). | each sim |
 
 The rule that holds it together: **a page only ever talks to its own visit-client**, and **only
@@ -602,6 +602,7 @@ match never opens: the visit ends `"link_failed"`.
 - **Audio.** None in version 1.
 - **The version-1 group view.** Version-1 sims stream their own view to a group; whether version 2 keeps a
   "just watch" mode (a visit that never moves from its spawn) or retires it.
-- **The relay's deployment.** It runs beside the lobby on the same server; the details (ports, TLS through
-  Caddy) belong to the build.
+- **The relay's deployment.** It is to run beside the lobby on the same server; the details (ports, TLS
+  through Caddy) belong to the build. Until it does, the lobby names no relays and links use iroh's public
+  ones.
 - **Touch and gamepads.** Input is keyboard and mouse only for now.

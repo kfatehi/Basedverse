@@ -1,6 +1,6 @@
 # Visit — walk around each other's workrooms
 
-**Status: built and tested on one machine (visit-client, visit.js, the lobby's version 3). Not yet between two machines over the internet.**
+**Status: built and tested on one machine (visit-client, visit.js, the lobby's version 3). Visit 0.4 has gone between two machines over the internet; 0.5 not yet.**
 
 Everyone builds their own workroom, with three.js, and Visit lets you walk around each other's with WASD
 and the mouse. The host sends its room's scene, as data; your browser draws it, with the host's very three.js
@@ -28,8 +28,8 @@ visit/
     build            a static binary into client/bin/ (Linux, in Docker)
     cargo            cargo in Docker, for working on visit-client
     web/visit.js     the library
-    tests/           the end-to-end and browser tests (with ../lobby/'s server), and room.html, a small
-                     workroom to try it with
+    tests/           the end-to-end and browser tests (with ../lobby/'s server), perf/ (visits through
+                     simulated networks), and room.html, a small workroom to try it with
 ```
 
 ## The pieces
@@ -57,5 +57,5 @@ visit/
 - [x] A first workroom running it.
 - [ ] A relay of our own beside the lobby. Until there is one, links that cannot go direct use iroh's public
       relays (still encrypted end to end).
-- [ ] A visit between two machines over the internet.
-- [ ] A second workroom.
+- [x] A visit between two machines over the internet.
+- [x] A second workroom.

@@ -59,7 +59,8 @@ visit-clients).
 
    It copies `lobby/` to `~/basedverse-lobby/` on the server (a tar stream over ssh: nothing to install
    there first) and runs `lobby/deploy/setup.sh` there. That installs Docker, writes the server's
-   `deploy/.env` (its public and private addresses from the EC2 metadata, and a fresh TURN secret),
+   `deploy/.env` (its public and private addresses from the EC2 metadata, or, on another server, from
+   checkip.amazonaws.com and `hostname -I`, and a fresh TURN secret),
    starts the lobby, Caddy and coturn, waits for the certificate, and prints the address:
 
    ```
@@ -99,6 +100,7 @@ working, read `docker compose logs caddy`.
 Nobody signs in: anyone who reaches the server can join under a free name, see who is online, and knock.
 Nothing of your room is visible until you let someone in. Then, in version 1, **everyone in your group
 sees your room, and anyone in the group can let more people in**: leave the group, or set yourself
-`busy`, to stop that. In version 2 each visitor is let in by you, and sees what your sim renders for
-them. Whatever your room shows, they see: if it shows your work (issue titles, what your agents are
-doing), so does the video.
+`busy`, to stop that. In versions 2 and 3 each visitor is let in by you. In version 3 (and in version 2,
+from a three.js room) they are sent your room's scene, all of it: everything under `root`, whether in their
+view or not, and each object's `userData`. Whatever your room shows, they see: if it shows your work (issue
+titles, what your agents are doing), so does the scene, or the video.

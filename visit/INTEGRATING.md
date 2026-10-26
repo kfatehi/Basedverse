@@ -254,8 +254,9 @@ visit.host({
 ```
 
 - **`root`**: your `THREE.Scene` (its background and fog come along), or a `Group` holding the part to share.
-  **Everything under it is sent to your visitors**, whether they look at it or not: keep anything your user
-  would not show a guest outside it.
+  **Everything under it is sent to your visitors**, whether they look at it or not, and so is each
+  object's `userData` (three.js puts it in the scene's JSON): keep anything your user would not show a
+  guest outside it, and out of `userData`.
 - **`three`**: the namespace your scene was made with (`THREE`, or what `import * as THREE` gave you). Its
   revision (`THREE.REVISION`) picks the three.js your visitors draw with: the very same release.
   `visit.host` throws for one the visit.js does not know.
