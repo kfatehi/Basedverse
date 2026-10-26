@@ -105,7 +105,7 @@ async function build(v) {
       if (!world.inside) Object.assign(me, Visit.walk(me, input, dt, { speed: 3, blocked }));   // at home: our own walking, our own walls
       const at = world.frame(dt, me, input);
       Object.assign(me, { x: at.x, z: at.z });
-      window.room.where = at.in;
+      window.room.where = at.in; window.room.atY = at.y;
       meBody.position.set(me.x, 0.85, me.z); meBody.rotation.y = me.yaw;
       top.position.set(me.x + Math.sin(me.yaw) * 7, 6, me.z + Math.cos(me.yaw) * 7); top.lookAt(me.x, 0.8, me.z);
       world.render(top);
@@ -131,7 +131,8 @@ async function build(v) {
   v.host({
     // Where a visitor appears; in a world, where it stepped in (`at`), if that is not in a wall.
     spawn: (who, { at } = {}) => at && !blocked(at.x, at.z) ? { x: at.x, y: 1.6, z: at.z, yaw: at.yaw, pitch: 0 } : { x: 2, y: 1.6, z: 6, yaw: 0, pitch: 0 },
-    move: (pose, input, dt, who) => { window.movedFor = who && who.id; return Visit.walk(pose, input, dt, { speed: 2.5, blocked }); },
+    // room.lift (the test sets it): a lift under every visitor, that far up from where they came in
+    move: (pose, input, dt, who) => { window.movedFor = who && who.id; const p = Visit.walk(pose, input, dt, { speed: 2.5, blocked }); return window.room.lift != null ? Object.assign({}, p, { y: 1.6 + window.room.lift }) : p; },
     fov: 70,
     scene: { root: t.scene, three: t.THREE, renderer: t.renderer, near: 0.05, far: 100 },
     walk: { speed: 2.5 },   // as move() walks: the visitor's page walks at once, before the answer

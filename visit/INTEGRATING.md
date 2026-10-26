@@ -425,6 +425,10 @@ walks onto your plot from their world may have no way back out.
    world.render(camera);                                             // in place of renderer.render(scene, camera)
    ```
 
+   In a plot, `at.y` follows its host up and down from where you stepped on: a room with stairs or a lift moves a
+   visitor's `pose.y` in its `move`, and your user rises with it. A flat room never moves it, so `at.y` stays the y
+   you gave. Likewise, if your room has floors, let `move` change `pose.y` and a visitor goes up with it.
+
    `world.render` draws your room clipped to your plot: anything of yours outside it (a sky dome, a huge ground)
    is cut there; use `scene.background` for a sky. A post-processing chain (`EffectComposer`) does not fit it.
 5. **Edges, if you like:** `visit.proposeEdge(friend.key, { mine: "east", theirs: "west" })`; the panel asks the

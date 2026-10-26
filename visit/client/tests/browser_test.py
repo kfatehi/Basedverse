@@ -343,6 +343,10 @@ async def main():
             "(s => s.own.length === 1 && !s.own[0].visible)([...v._watches.values()][0].scene)"), True)
         await a.shot("a_in_b.png")
         await b.shot("b_has_a.png")
+        await b.js("room.lift = 3")
+        check("B lifts A 3 m: A's world has A up there, as B's room has it", await a.until("Math.abs(room.atY - 3) < 0.05"), True)
+        await b.js("room.lift = 0")
+        check("and back down", await a.until("Math.abs(room.atY) < 0.05"), True)
         bx = await b.js("v.visitors[0].pose.x")
         await walk(a, await a.js("room.me.x"), await a.js("room.me.z"), 3.14159 / 2, 2.0, "room.where === null")   # turned round: back out west
         check("A walks back off B's plot: home again, and B's visitor gone", (await a.until("room.where === null && room.world.in === null"), await b.until("v.visitors.length === 0")), (True, True))

@@ -649,7 +649,8 @@ v.host({
 });
 
 // a world (8.4): after host(). Every frame, where your page has its user (in its room's terms) and what they press;
-// what comes back is where they are now: at home as given, or in a plot as its host has them (in: { key, name }).
+// what comes back is where they are now: at home as given, or in a plot as its host has them (in: { key, name }), its
+// y the one given plus however far that host has since moved them up or down (a stair, a lift: its move() sets pose.y).
 // Then world.render(camera), in place of renderer.render(scene, camera).
 const world = v.world({ scene, renderer, ground, gap, clipOwn });   // your whole scene and its renderer (host()'s by default)
 const me = world.frame(dt, { x, y, z, yaw, pitch }, { forward, strafe, run });
