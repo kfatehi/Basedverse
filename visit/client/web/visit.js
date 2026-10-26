@@ -1700,25 +1700,29 @@
       if (s.walk && !w.paused) { const q = walk({ x: s.pose.x, z: s.pose.z, yaw }, inp, dt, s.walk); s.pose.x = q.x; s.pose.z = q.z; }
       s.hist.push([now, s.pose.x, s.pose.z]);
       while (s.hist.length > 2 && now - s.hist[0][0] > 2000) s.hist.shift();
-      const fade = Math.exp(-dt / 0.1); s.vis.x *= fade; s.vis.z *= fade;
+      const fade = Math.exp(-dt / 0.1); s.vis.x *= fade; s.vis.y *= fade; s.vis.z *= fade;
       this._input(w, inp, yaw, me.pitch, now);
       const hp = s.hostPose, pl = s.plot, margin = 0.3 / x.k;
+      if (hp && s.yBase == null) { s.yBase = s.pose.y; s.vis.y = 0; }   // the height its host first had us at: where we stepped on
       if (!hp && now - s.inAt > ENTER_WAIT) { this._refused(w, "no answer"); return this.frame(0, me, {}); }   // its host never had us: back out
       if (hp && (Math.abs(hp.x - pl.center[0]) > pl.size[0] / 2 + margin || Math.abs(hp.z - pl.center[1]) > pl.size[1] / 2 + margin)) {
         this._exit(w);   // its host has us off its plot: home again, walking on from there
         const out = new T.Vector3(hp.x, 0, hp.z).applyMatrix4(h.place.matrix);
-        this.home = { x: out.x, y: me.y, z: out.z, yaw: me.yaw, pitch: me.pitch };
+        this.home = { x: out.x, y: s.yHome, z: out.z, yaw: me.yaw, pitch: me.pitch };
         return Object.assign({}, this.home, { in: null });
       }
       const at = new T.Vector3(s.pose.x + s.vis.x, 0, s.pose.z + s.vis.z).applyMatrix4(h.place.matrix);
-      return { x: at.x, y: me.y, z: at.z, yaw: me.yaw, pitch: me.pitch, in: { key: x.key, name: x.name } };
+      // Up or down as its host has us (a stair, a lift), from where we stepped on, in this world's units; the height
+      // we came with stays ours, so a page that keeps the y it is given rises no further.
+      const rise = s.yBase == null ? 0 : (s.pose.y + s.vis.y - s.yBase) * x.k;
+      return { x: at.x, y: s.yHome + rise, z: at.z, yaw: me.yaw, pitch: me.pitch, in: { key: x.key, name: x.name } };
     }
 
     _enter(x, me, now) {
       const w = x.w, s = w.scene, h = this._holder(x), p = new this.T.Vector3(me.x, 0, me.z).applyMatrix4(h.inverse), yaw = me.yaw - x.at.turn * Math.PI / 2;
       this.v._send({ type: "enter", channel: w.channel, pose: { x: p.x, y: me.y / x.k, z: p.z, yaw } });
       w.inside = true; this.in = w.channel;
-      Object.assign(s, { pose: { x: p.x, y: 0, z: p.z }, yaw0: 0, hist: [], vis: { x: 0, y: 0, z: 0 }, hostPose: null, inAt: now });
+      Object.assign(s, { pose: { x: p.x, y: 0, z: p.z }, yaw0: 0, hist: [], vis: { x: 0, y: 0, z: 0 }, hostPose: null, inAt: now, yHome: me.y, yBase: null });
       this.v._changed();
     }
 
