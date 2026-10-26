@@ -9,6 +9,21 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.7.2 — 2026-10-26
+
+**In a friend's plot, up and down with their room** (#4, kfatehi). A room with floors (stairs, a lift) moves a
+visitor's `pose.y` in its `move`; in a world, `world.frame`'s `y` now follows it, from where your user stepped on,
+so your page draws them upstairs when that room has them there. Before, they stayed at street level in your
+picture, whatever floor the room had them on. However they leave the plot (walking off, its door shut, its page
+gone), they are back at the height they came with. A flat room never moves `pose.y`: nothing changes for it.
+Only visit.js changes: a visitor on 0.7.1 still meets a 0.7.2 room, and stays at street level in it, as before.
+
+### What an integration does
+
+1. Get visit-client 0.7.2 (`bin/setup` again, download; or this release).
+2. Draw your user at the `y` that `world.frame` returns (INTEGRATING.md step 9). If your room has floors, let
+   `move` set a visitor's `pose.y`, and they go up with it.
+
 ## v0.7.1 — 2026-10-26
 
 **The world is a step of the guide, not an option.** [visit/INTEGRATING.md](visit/INTEGRATING.md)'s world
