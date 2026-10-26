@@ -352,11 +352,21 @@
       return { edit: Object.keys(edit).length > 1 ? edit : null, moved };
     }
 
-    // An added object: its JSON (with what it is made of that its visitors do not have yet: the rest they know by
-    // uuid), each object's number, its lights' targets.
+    // An added object: its JSON (with what it is made of, but the geometries and materials its visitors have: those
+    // it names by uuid), each object's number, its lights' targets.
     _added(r) {
       const json = r.o.toJSON(), ids = [];
-      for (const k of ["geometries", "materials", "textures"]) if (json[k]) json[k] = json[k].filter(x => !this.sent.has(x.uuid));
+      for (const k of ["geometries", "materials"]) if (json[k]) json[k] = json[k].filter(x => !this.sent.has(x.uuid));
+      // A texture goes with each material (or object) that names it, an image with each texture, a shape with each
+      // geometry.
+      const named = new Set(), stack = [json.object, ...(json.materials || [])];
+      while (stack.length) {
+        const x = stack.pop();
+        if (!isObj(x)) continue;
+        for (const v of Object.values(x)) if (typeof v === "string") named.add(v);
+        if (Array.isArray(x.children)) stack.push(...x.children);
+      }
+      if (json.textures) json.textures = json.textures.filter(x => named.has(x.uuid));
       const images = new Set((json.textures || []).map(t => t.image)), shapes = new Set((json.geometries || []).flatMap(g => list(g.shapes)));
       if (json.images) json.images = json.images.filter(x => images.has(x.uuid));
       if (json.shapes) json.shapes = json.shapes.filter(x => shapes.has(x.uuid));
@@ -841,6 +851,7 @@
         if (!isObj(a)) continue;
         try {
           const o = this._sceneParse(s, cleanScene(a.json, s.budget));
+          if (!o) { console.warn("visit: an object added to the scene made of what this page does not have: the whole scene again"); this._sceneResync(w); continue; }
           this._sceneAdopt(s, o);
           const byUuid = new Map();
           o.traverse(c => byUuid.set(c.uuid, c));
@@ -874,10 +885,20 @@
       this._sceneOwn(s);
     }
 
-    // An added object, read with the geometries, materials and textures this scene already has: the host sends
-    // each once, and an added object names the ones sent before only by uuid.
+    // An added object, read with the geometries and materials this scene already has: the host sends each once,
+    // and an added object names the ones sent before only by uuid. Null when it names one this page does not have
+    // (an edit or a whole scene that never arrived, or an add that could not be read).
     _sceneParse(s, json) {
-      const L = s.loader, P = Object.getPrototypeOf(L), had = { parseGeometries: s.geos, parseTextures: s.texs, parseMaterials: s.mats };
+      const has = (k, map) => { const here = new Set((json[k] || []).map(x => x.uuid)); return u => here.has(u) || map.has(u); };
+      const geo = has("geometries", s.geos), mat = has("materials", s.mats), stack = [json.object];
+      while (stack.length) {
+        const o = stack.pop();
+        if (!isObj(o)) continue;
+        if (o.geometry !== undefined && !geo(o.geometry)) return null;
+        for (const u of list(o.material)) if (!mat(u)) return null;
+        if (Array.isArray(o.children)) stack.push(...o.children);
+      }
+      const L = s.loader, P = Object.getPrototypeOf(L), had = { parseGeometries: s.geos, parseMaterials: s.mats };
       for (const [k, map] of Object.entries(had)) L[k] = (...a) => Object.assign(Object.fromEntries(map), P[k].apply(L, a));
       try { return L.parse(json); } finally { for (const k of Object.keys(had)) delete L[k]; }
     }
