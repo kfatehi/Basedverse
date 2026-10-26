@@ -478,7 +478,10 @@ data.
 - **Edits** (`{"type": "edit", …}`): at most one every 33 ms, only when something changed, each field
   optional, applied in this order: `res` ({geometries, materials, textures, images, shapes}, in `toJSON` form:
   new ones, or ones changed in place, whose content the visitor's copy takes), `remove` ([number]), `add`
-  ([{parent, json (the new object's `toJSON()`, with what it is made of), ids, targets}]), `parent` ([[number,
+  ([{parent, json (the new object's `toJSON()`, with what it is made of, except the geometries and
+  materials the visitor already has: sent before, in the whole scene or an edit, and used by the scene ever
+  since, which the JSON names only by uuid; a visitor that does not have one asks for the whole scene), ids,
+  targets}]), `parent` ([[number,
   new parent's number]]), `assign` ([[number, material uuid (or uuids) or null, geometry uuid or null]]),
   `props` ([{uuid, …}]: materials' colours and values as they change: `color`, `emissive`, `specular`,
   `opacity`, `transparent`, `visible`, …), `scene` ({background (a colour, {texture: uuid}, or null), fog
