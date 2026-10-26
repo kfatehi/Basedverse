@@ -104,7 +104,7 @@ async function build(v) {
       me.yaw += ((k("KeyQ") ? 1 : 0) - (k("KeyE") ? 1 : 0)) * 2 * dt;
       if (!world.inside) Object.assign(me, Visit.walk(me, input, dt, { speed: 3, blocked }));   // at home: our own walking, our own walls
       const at = world.frame(dt, me, input);
-      Object.assign(me, { x: at.x, z: at.z });
+      Object.assign(me, { x: at.x, y: at.y, z: at.z });   // all of it kept, y too: it must not climb, nor stay up
       window.room.where = at.in; window.room.atY = at.y;
       meBody.position.set(me.x, 0.85, me.z); meBody.rotation.y = me.yaw;
       top.position.set(me.x + Math.sin(me.yaw) * 7, 6, me.z + Math.cos(me.yaw) * 7); top.lookAt(me.x, 0.8, me.z);

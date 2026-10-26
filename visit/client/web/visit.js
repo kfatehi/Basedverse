@@ -1557,7 +1557,7 @@
       this.scene = scene || (hk.scene.root.isScene ? hk.scene.root : null);
       this.renderer = renderer || hk.scene.renderer;
       if (!this.scene || !this.renderer) throw new Error("visit.world needs { scene, renderer }: your whole scene, and the renderer that draws it");
-      Object.assign(this, { gap: Number(gap) >= 0 ? Number(gap) : WORLD_GAP, clipOwn: clipOwn !== false, in: null, home: null, bounce: null,
+      Object.assign(this, { gap: Number(gap) >= 0 ? Number(gap) : WORLD_GAP, clipOwn: clipOwn !== false, in: null, home: null, bounce: null, yHome: null,
         refused: new Map(), holders: new Map(), sent: { at: 0, sig: "" }, look: { yaw: 0, pitch: 0 }, list: [], listAt: -1, plots: [] });
       const T = this.T;
       this.commons = new T.Scene();   // the ground between plots, and the outlines of agreed neighbours not seen
@@ -1690,6 +1690,9 @@
       let x = this.in != null ? list.find(y => y.w && y.w.channel === this.in) : null;
       if (x && !(x.w.inside && x.w.scene)) x = null;
       if (!x) {
+        // Out of a plot by any way but walking off it (its door shut, its page gone, leave()): home at the height we
+        // came with, not one its host had us at, which a page that keeps the y it is given would otherwise keep.
+        if (this.yHome != null) { me.y = this.yHome; this.yHome = null; }
         this.in = null;
         x = list.find(y => y.w && y.w.scene && !y.w.inside && (this.refused.get(y.w.channel) || 0) <= now && within(y.rect, me.x, me.z));
         if (!x) { this.home = me; return Object.assign({}, me, { in: null }); }
@@ -1708,21 +1711,23 @@
       if (hp && (Math.abs(hp.x - pl.center[0]) > pl.size[0] / 2 + margin || Math.abs(hp.z - pl.center[1]) > pl.size[1] / 2 + margin)) {
         this._exit(w);   // its host has us off its plot: home again, walking on from there
         const out = new T.Vector3(hp.x, 0, hp.z).applyMatrix4(h.place.matrix);
-        this.home = { x: out.x, y: s.yHome, z: out.z, yaw: me.yaw, pitch: me.pitch };
+        this.home = { x: out.x, y: this.yHome, z: out.z, yaw: me.yaw, pitch: me.pitch };
+        this.yHome = null;
         return Object.assign({}, this.home, { in: null });
       }
       const at = new T.Vector3(s.pose.x + s.vis.x, 0, s.pose.z + s.vis.z).applyMatrix4(h.place.matrix);
       // Up or down as its host has us (a stair, a lift), from where we stepped on, in this world's units; the height
       // we came with stays ours, so a page that keeps the y it is given rises no further.
       const rise = s.yBase == null ? 0 : (s.pose.y + s.vis.y - s.yBase) * x.k;
-      return { x: at.x, y: s.yHome + rise, z: at.z, yaw: me.yaw, pitch: me.pitch, in: { key: x.key, name: x.name } };
+      return { x: at.x, y: this.yHome + rise, z: at.z, yaw: me.yaw, pitch: me.pitch, in: { key: x.key, name: x.name } };
     }
 
     _enter(x, me, now) {
       const w = x.w, s = w.scene, h = this._holder(x), p = new this.T.Vector3(me.x, 0, me.z).applyMatrix4(h.inverse), yaw = me.yaw - x.at.turn * Math.PI / 2;
       this.v._send({ type: "enter", channel: w.channel, pose: { x: p.x, y: me.y / x.k, z: p.z, yaw } });
       w.inside = true; this.in = w.channel;
-      Object.assign(s, { pose: { x: p.x, y: 0, z: p.z }, yaw0: 0, hist: [], vis: { x: 0, y: 0, z: 0 }, hostPose: null, inAt: now, yHome: me.y, yBase: null });
+      Object.assign(s, { pose: { x: p.x, y: 0, z: p.z }, yaw0: 0, hist: [], vis: { x: 0, y: 0, z: 0 }, hostPose: null, inAt: now, yBase: null });
+      this.yHome = me.y;
       this.v._changed();
     }
 

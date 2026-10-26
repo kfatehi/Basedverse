@@ -370,7 +370,13 @@ async def main():
         check("and back: home in A's own room", (await a.until("room.where === null"), 0 < await a.js("room.me.x") < 10.01), (True, True))
 
         print("\nthe door shut: an outline")
+        await walk(a, 8.5, 4, -3.14159 / 2, 1.8, "!!room.where")   # into B's again, to be lifted there
+        check("A in B's room again", (await a.until("room.where && room.where.name"), await b.until("v.visitors.length === 1")), ("B", True))
+        await b.js("room.lift = 3")
+        check("B lifts A 3 m again", await a.until("Math.abs(room.atY - 3) < 0.05"), True)
         await b.js("v.setDoor(false)")
+        check("B shuts its door with A up there: A is home, at its own height", await a.until("room.where === null && Math.abs(room.atY) < 0.05"), True)
+        await b.js("room.lift = null")
         check("B shuts its door: A no longer sees B's plot, only where it is (agreed), and who",
               await a.until("(p => p && !p.seen && p.edge && p.name)(room.world.plots[0])", 10), "B")
         check("drawn as an outline with a name", await a.until("room.world.outlines.children.length === 2"), True)
