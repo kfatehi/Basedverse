@@ -864,6 +864,15 @@
     _guests(m) {
       this.door = m.door === "closed" ? "closed" : "open";
       this.guests = (Array.isArray(m.guests) ? m.guests : []).map(g => ({ key: String(g.key), name: String(g.name || "") }));
+      this._guestLinksToWorld();
+    }
+    // A link with a guest is that guest's plot in your world, as watching it would be: visit-client counts the link
+    // as watching that office and starts no world watch of it beside (watch_guests), so in the corner it would take
+    // a guest's plot off your ground. With a world, such a link goes there (when it starts, or when its office
+    // becomes a guest); a link with anyone else stays in the corner.
+    _guestLinksToWorld() {
+      if (!this._world) return;
+      for (const w of [...this._links.values()]) if (w.where !== "world" && !w.inside && this.isGuest(w.host.key)) this.toWorld(w.id);
     }
 
     // ---------- visits ----------
@@ -884,6 +893,7 @@
         if (w.link) this._links.set(m.channel, w); else this._watches.set(m.channel, w);
         if (m.inside) this._send({ type: "exit", channel: m.channel });   // this page lost where it was: it starts at home
         if (w.link && m.where === "world") { w.wantWorld = true; if (this._world) this.toWorld(w.id); }   // where it was put, before a reload
+        else if (w.link && this._world && this.isGuest(w.host.key)) this.toWorld(w.id);   // a guest's: its plot (_guestLinksToWorld)
         else if (w.link && !this._viewer) this._toCorner(w);
       } else {
         if (this._viewer && this._viewer.link) this._aside(this._viewer);   // a visit: the corner's link waits aside
@@ -1981,6 +1991,7 @@
       v._world = this;
       v._send({ type: "world", on: true });
       for (const w of [...v._links.values()]) if (w.wantWorld) v.toWorld(w.id);   // links that were in it before this page reloaded
+      v._guestLinksToWorld();   // a guest's link already in the corner: its plot now there is a world
     }
 
     get inside() { return this.in != null; }
