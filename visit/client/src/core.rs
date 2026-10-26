@@ -932,6 +932,14 @@ impl Core {
         if watch && role == Role::Visitor {
             self.watch_pending.remove(peer.get("id").and_then(Value::as_str).unwrap_or(""));
         }
+        if !watch && role == Role::Visitor {
+            // A visit to another room: out of any plot this office had stepped into (in one room at a time).
+            let inside: Vec<(String, u16)> = self.visits.values().filter(|v| v.role == Role::Visitor && v.watch && v.inside).map(|v| (v.id.clone(), v.channel)).collect();
+            for (other, ch) in inside {
+                self.step_out(&other);
+                self.to_page(json!({ "type": "enter_refused", "channel": ch, "reason": "moved" }));
+            }
+        }
         let mut guest = false;
         if role == Role::Host {
             let pid = peer.get("id").and_then(Value::as_str).unwrap_or("");

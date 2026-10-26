@@ -258,7 +258,7 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `edge_proposed` | `key`, `name`, `mine`, `theirs`, `along`, `size` (theirs), all in this office's terms | a friend proposes an edge: answer with `edge_accept` or `edge_decline` |
 | `edge_declined` | `key` | your proposal was declined |
 | `enter` / `exit` | `channel`, `pose` {`x`, `y`, `z`, `yaw`} (for `enter`) | a watcher stepped into this room, there (host side: spawn it, as a visitor), or out of it |
-| `enter_refused` | `channel`, `reason` (`"full"`) | stepping into a watched room was refused: still outside |
+| `enter_refused` | `channel`, `reason` (`"full"`, or `"moved"`: a visit to a room began, and this office stepped out) | stepping into a watched room was refused, or undone: outside it |
 | `online` / `offline` | `office`, `knocking` / `away`? | the lobby session came up (after a drop: the same office if it resumed), with this office's own knocks still waiting ([{`id`, `to`}]) / went down: `away: true` when the page took it out (`leave_lobby`), `false` when it is on its way back (`join_lobby`), absent when the lobby is out of reach |
 | `lobby` | `offices`: [{`id`, `name`, `status`, `sim`, `max_visitors`, `visitors`, `visiting`, `ready`, `key`}] | every change (6.3) |
 | `knock` | `id`, `from` {`id`, `name`, `sim`, `key`}, `message`, `expires_in` | someone wants to visit you (never a guest at your open door: let in without asking) |
