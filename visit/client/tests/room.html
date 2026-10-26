@@ -95,9 +95,12 @@ async function build(v) {
     for (const x of v.visitors) {
       if (!x.pose) continue;
       here.add(x.id);
+      // A visitor as itself (its own avatar, when this room shows its look: SPEC 8.6), else as one of ours: a box.
       let b = bodies.get(x.id);
+      if (b && b !== x.avatar && (x.avatar || b.name.startsWith("avatar:"))) { scene.remove(b); bodies.delete(x.id); b = null; }   // its look changed
+      if (!b && x.avatar) { b = x.avatar; scene.add(b); bodies.set(x.id, b); }
       if (!b) { b = new THREE.Mesh(new THREE.BoxGeometry(0.4, 1.7, 0.4), lambert(0x58a6ff)); b.userData.visitor = x.id; b.name = "body:" + x.visitor.name; scene.add(b); bodies.set(x.id, b); }
-      b.position.set(x.pose.x, 0.85, x.pose.z); b.rotation.y = x.pose.yaw;
+      b.position.set(x.pose.x, x.avatar ? 0 : 0.85, x.pose.z); b.rotation.y = x.pose.yaw;
     }
     for (const [id, b] of bodies) if (!here.has(id)) { scene.remove(b); bodies.delete(id); }
     const c = renderer.domElement;
@@ -144,6 +147,16 @@ async function build(v) {
     unit: 1,   // metres
   });
   if (WORLD) window.room.world = v.world({ scene: t.scene, renderer: t.renderer });
+  // Our own avatar (SPEC 8.6): how a room that shows its visitors' own looks shows us. Its feet at its origin, facing
+  // -z; it bobs its head standing about, and sways walking.
+  const T = t.THREE, av = new T.Group();
+  const torso = new T.Mesh(new T.CylinderGeometry(0.25, 0.25, 1.2, 12), new T.MeshLambertMaterial({ color: 0xa371f7 }));
+  const head = new T.Mesh(new T.SphereGeometry(0.22, 12, 8), new T.MeshLambertMaterial({ color: 0xffd7a8 }));
+  torso.name = "torso"; torso.position.y = 0.6; head.name = "head"; head.position.y = 1.45;
+  av.add(torso, head);
+  av.animations = [new T.AnimationClip("idle", 2, [new T.NumberKeyframeTrack("head.position[y]", [0, 1, 2], [1.45, 1.5, 1.45])]),
+                   new T.AnimationClip("walk", 0.6, [new T.NumberKeyframeTrack("torso.rotation[z]", [0, 0.3, 0.6], [-0.1, 0.1, -0.1])])];
+  v.avatar(av);
   // A visitor pointing (SPEC 8.3): kept, with what it hit first, for the test to read.
   const ray = new t.THREE.Raycaster();
   window.points = [];

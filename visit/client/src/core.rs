@@ -47,6 +47,8 @@ pub enum Ev {
     SceneLost { visit: String },
     /// This office's scene edits for a visitor were dropped (its link far behind): the page sends it all again.
     SceneResync { visit: String },
+    /// A visitor's avatar (8.6): unpacked, checked JSON, for the host's page.
+    LinkAvatar { visit: String, json: String },
     Tick,
     Shutdown,
 }
@@ -105,6 +107,8 @@ struct Visit {
     link: bool,
     /// Where the page put a link (visitor side): in its world, kept for a page that reloads.
     in_world: bool,
+    /// The host asked for this office's avatar (visitor side): it goes now, and again when the page gives a new one.
+    avatar_asked: bool,
 }
 
 /// The most control messages a link's other side may send a second; more are dropped (a peer flooding
@@ -170,6 +174,8 @@ pub struct Core {
     status: String,
     max_visitors: u8,
     lobby_view: Option<Value>,
+    /// This office's own avatar, gzipped JSON (8.6), as its page last gave it: for the hosts that ask.
+    avatar: Option<Bytes>,
     /// Knocks on this office's door still waiting, and when each came, for a page that connects later.
     knocks: BTreeMap<String, (Value, Instant)>,
     visits: HashMap<String, Visit>,
@@ -210,6 +216,7 @@ impl Core {
             status: "available".into(),
             max_visitors,
             lobby_view: None,
+            avatar: None,
             knocks: BTreeMap::new(),
             visits: HashMap::new(),
             next_channel: 1,
@@ -329,6 +336,15 @@ impl Core {
                     }
                 }
             }
+            Ev::LinkAvatar { visit, json } => {
+                if let Some(v) = self.visits.get(&visit).filter(|v| v.role == Role::Host) {
+                    // Already checked JSON: wrapped as it is, not parsed again.
+                    let msg = format!("{{\"type\":\"avatar\",\"channel\":{},\"avatar\":{json}}}", v.channel);
+                    if let Some(p) = &self.page {
+                        let _ = p.text.send(PageOut::Text(msg));
+                    }
+                }
+            }
             Ev::SceneLost { visit } | Ev::SceneResync { visit } => {
                 let lost = self.visits.get(&visit).map(|v| (v.channel, v.role));
                 match lost {
@@ -353,7 +369,7 @@ impl Core {
         self.to_page(json!({
             "type": "ready", "version": VERSION, "office": self.office, "online": self.online, "away": self.saved.away, "status": self.status,
             "max_visitors": self.max_visitors, "visits": visits, "key": self.key, "door": self.door(), "guests": self.guests(),
-            "layout": self.saved.layout_json(), "edges": self.saved.edges_json(),
+            "layout": self.saved.layout_json(), "edges": self.saved.edges_json(), "avatars": self.saved.avatars_json(),
         }));
         if let Some(view) = self.lobby_view.clone() {
             self.to_page(view);
@@ -536,6 +552,44 @@ impl Core {
                 self.save_state();
                 self.tell_edges();
             }
+            // Avatars (8.6). The page's own (its frame, or `avatar_clear`): kept in memory, to go to hosts that ask. A
+            // host's page asks for a visitor's (`avatar_want`). Whose look visitors have here (`avatars`: by default;
+            // `avatar_use`: for a key, or back to the default): kept in the state file.
+            "avatar_clear" => self.avatar = None,
+            "avatar_want" => {
+                let ch = m.get("channel").and_then(Value::as_u64).unwrap_or(0) as u16;
+                match self.visits.values().find(|v| v.channel == ch && v.role == Role::Host && v.up) {
+                    Some(v) => { let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "avatar_want": true }))); }
+                    None => self.page_error("no_such_visit", "no visit to you on that channel", Some("avatar_want")),
+                }
+            }
+            "avatars" => match state::use_from(m.get("default")) {
+                Some(theirs) => {
+                    self.saved.avatars_theirs = theirs;
+                    self.saved.avatars_by.retain(|(_, t)| *t != theirs);   // the same as the default now: no longer apart
+                    self.save_state();
+                    self.tell_avatars();
+                }
+                None => self.page_error("bad_message", "default is \"mine\" or \"theirs\"", Some("avatars")),
+            },
+            "avatar_use" => {
+                let Some(key) = m.get("key").and_then(Value::as_str).filter(|k| state::key_ok(k)).map(str::to_string) else {
+                    return self.page_error("bad_message", "key is an office's key", Some("avatar_use"));
+                };
+                let use_ = state::use_from(m.get("use"));
+                if use_.is_none() && !m.get("use").is_none_or(Value::is_null) {
+                    return self.page_error("bad_message", "use is \"mine\", \"theirs\" or null (the default)", Some("avatar_use"));
+                }
+                self.saved.avatars_by.retain(|(k, _)| *k != key);
+                if let Some(theirs) = use_.filter(|t| *t != self.saved.avatars_theirs) {
+                    if self.saved.avatars_by.len() >= state::MAX_GUESTS {
+                        return self.page_error("too_many", &format!("at most {} apart", state::MAX_GUESTS), Some("avatar_use"));
+                    }
+                    self.saved.avatars_by.push((key, theirs));
+                }
+                self.save_state();
+                self.tell_avatars();
+            }
             // Where the page put a link: its world, or the corner (kept for a page that reloads: visit_started says).
             "link_where" => {
                 let ch = m.get("channel").and_then(Value::as_u64).unwrap_or(0) as u16;
@@ -619,6 +673,13 @@ impl Core {
 
     /// A delta of this office's scene for one of its visitors, or an edit of it.
     fn page_frame(&mut self, data: &[u8]) {
+        if let Some(gz) = frames::avatar_from_page(data) {   // this office's avatar: to every host that asked for it
+            for v in self.visits.values().filter(|v| v.role == Role::Visitor && v.up && v.avatar_asked) {
+                let _ = v.cmd.try_send(LinkCmd::Avatar(gz.clone()));
+            }
+            self.avatar = Some(gz);
+            return;
+        }
         if let Some((ch, gz)) = frames::scene_from_page(data) {
             let resync = match self.visits.values().find(|v| v.channel == ch && v.role == Role::Host && v.up) {
                 Some(v) => v.cmd.try_send(LinkCmd::Scene(gz)).is_err(),
@@ -764,6 +825,11 @@ impl Core {
             return false;
         }
         true
+    }
+
+    fn tell_avatars(&mut self) {
+        let avatars = self.saved.avatars_json();
+        self.to_page(json!({ "type": "avatars", "default": avatars["default"], "by": avatars["by"] }));
     }
 
     fn tell_guests(&mut self) {
@@ -985,7 +1051,7 @@ impl Core {
                 self.visits.insert(id.to_string(), Visit {
                     id: id.to_string(), channel, role, peer, up: false, cmd,
                     last_seq: 0, inputs: (Instant::now(), 0), want_key: false, host_state: None, ctl: (Instant::now(), 0), key_asked: None, resync_asked: None, resync_due: false,
-                    points: (Instant::now(), 0), guest, watch, inside: !watch, shared_adds: false, link, in_world: false,
+                    points: (Instant::now(), 0), guest, watch, inside: !watch, shared_adds: false, link, in_world: false, avatar_asked: false,
                 });
             }
             Err(e) => {
@@ -1219,7 +1285,12 @@ impl Core {
             }
             // From the host.
             Role::Visitor => {
-                if let Some(p) = m.get("paused").and_then(Value::as_bool) {
+                if m.get("avatar_want").is_some() {   // the host's page would draw this office as itself (8.6)
+                    v.avatar_asked = true;
+                    if let Some(gz) = self.avatar.clone() {
+                        let _ = v.cmd.try_send(LinkCmd::Avatar(gz));
+                    }
+                } else if let Some(p) = m.get("paused").and_then(Value::as_bool) {
                     self.to_page(json!({ "type": if p { "host_paused" } else { "host_resumed" }, "channel": ch }));
                 } else if let Some(reason) = m.get("enter_refused").filter(|_| v.watch && v.inside) {
                     v.inside = false;

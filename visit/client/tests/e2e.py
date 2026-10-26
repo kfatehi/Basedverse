@@ -555,6 +555,37 @@ async def main():
         await b.until(lambda m: m["type"] == "visit_ended")
         check("B ends it: every visit over", len(lobby.VISITS2), 0)
 
+        print("\navatars: asked for by a host, sent by the visitor's visit-client")
+        await a.drain()
+        await b.drain()
+        av = {"unit": 1, "json": {"metadata": {"version": 4.5}, "object": {"type": "Group", "uuid": "av-1", "name": "me"}}}
+        await a.ws.send(struct.pack(">HBQ", 0, 4, 0) + gzip.compress(json.dumps(av).encode()))   # A's own, kept by A's visit-client
+        await a.send(type="knock", to=ids["B"])
+        await b.send(type="answer", knock=(await b.expect("knock"))["id"], accept=True)
+        vb = await b.until(lambda m: m["type"] == "visit_started")
+        va = await a.until(lambda m: m["type"] == "visit_started")
+        await b.send(type="avatar_want", channel=vb["channel"])
+        got = await b.until(lambda m: m["type"] == "avatar")
+        check("B asks for A's avatar: A's visit-client sends the one A's page gave it, and B's page has it, whole", (got["channel"], got["avatar"]), (vb["channel"], av))
+        av["json"]["object"]["name"] = "me again"
+        await asyncio.sleep(2.1)   # (a host takes one at most every 2 s)
+        await a.ws.send(struct.pack(">HBQ", 0, 4, 0) + gzip.compress(json.dumps(av).encode()))
+        got = await b.until(lambda m: m["type"] == "avatar")
+        check("A's page gives a new one: it goes to B at once, B having asked", got["avatar"]["json"]["object"]["name"], "me again")
+        await a.send(type="end", visit=va["id"])
+        await a.until(lambda m: m["type"] == "visit_ended")
+        await b.until(lambda m: m["type"] == "visit_ended")
+        await a.send(type="avatars", default="theirs")
+        x = await a.until(lambda m: m["type"] == "avatars")
+        await a.send(type="avatar_use", key=kb, use="mine")
+        y = await a.until(lambda m: m["type"] == "avatars")
+        check("A shows visitors' own looks by default, but B's as A's models: kept in its state file",
+              (x["default"], y["by"], json.load(open(state))["avatars"]), ("theirs", [{"key": kb, "use": "mine"}], {"default": "theirs", "by": [{"key": kb, "use": "mine"}]}))
+        await a.send(type="avatar_use", key=kb, use=None)
+        await a.send(type="avatars", default="mine")
+        z = [await a.until(lambda m: m["type"] == "avatars"), await a.until(lambda m: m["type"] == "avatars")][-1]
+        check("and back: B with the default, the default A's models", (z["default"], z["by"]), ("mine", []))
+
         print("\naway: out of the lobby on purpose, and back")
         await a.drain()
         await b.drain()

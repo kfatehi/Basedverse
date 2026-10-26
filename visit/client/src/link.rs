@@ -46,6 +46,10 @@ const BEHIND_US: u64 = 100_000;
 /// What each of a link's streams starts with: a key delta and those after it, or a scene's edits.
 const STREAM_DELTAS: u8 = 0;
 const STREAM_SCENE: u8 = 1;
+/// A stream the visitor opens, its host having asked: the visitor's avatar (8.6), gzipped JSON.
+const STREAM_AVATAR: u8 = 2;
+/// The least time between two avatars a host takes from one visitor.
+const AVATAR_EVERY: Duration = Duration::from_secs(2);
 /// The most of a scene's edits (gzipped) that may wait to go: past it, a link is far slower than the room
 /// changes, and what waits is dropped (the host's page then sends the whole scene again).
 const SCENE_QUEUE: usize = 32 << 20;
@@ -63,6 +67,8 @@ pub enum LinkCmd {
     Frame(Frame),
     /// An edit of the host's scene, gzipped JSON (../SPEC.md section 8.3).
     Scene(Bytes),
+    /// This office's avatar, gzipped JSON, for the host (8.6).
+    Avatar(Bytes),
     /// End the link, saying why.
     Close(String),
 }
@@ -350,6 +356,7 @@ async fn run(role: Role, visit: &str, est: Established, cmds: &mut mpsc::Receive
         Role::Host => {
             let (tx, rx) = mpsc::channel::<Frame>(32);
             tasks.push(tokio::spawn(write_deltas(conn.clone(), rx, need_key.clone(), newest.clone(), visit.to_string(), core.clone())));
+            tasks.push(tokio::spawn(read_avatars(conn.clone(), visit.to_string(), core.clone())));
             Some(tx)
         }
         Role::Visitor => {
@@ -395,6 +402,9 @@ async fn run(role: Role, visit: &str, est: Established, cmds: &mut mpsc::Receive
                         q.bytes.fetch_add(gz.len(), Ordering::SeqCst);
                         let _ = tx.send((q.gen.load(Ordering::SeqCst), gz));
                     }
+                },
+                Some(LinkCmd::Avatar(gz)) => if role == Role::Visitor {
+                    tasks.push(tokio::spawn(write_avatar(conn.clone(), gz, visit.to_string())));
                 },
                 Some(LinkCmd::Close(why)) => {
                     let _ = frames::write_msg(&mut send, &json!({ "bye": why })).await;
@@ -500,6 +510,50 @@ async fn write_scene(conn: Connection, mut rx: mpsc::UnboundedReceiver<(u64, Byt
             }
         }
         q.bytes.fetch_sub(gz.len(), Ordering::SeqCst);
+    }
+}
+
+/// The visitor's avatar, on a stream of its own (its host asked for it).
+async fn write_avatar(conn: Connection, gz: Bytes, visit: String) {
+    let sent = async {
+        let mut s = conn.open_uni().await?;
+        s.write_all(&[STREAM_AVATAR]).await?;
+        frames::write_scene_msg(&mut s, &gz).await?;
+        s.finish()?;
+        anyhow::Ok(())
+    };
+    if let Err(e) = sent.await {
+        debug!(%visit, "the avatar did not go: {e:#}");
+    }
+}
+
+/// The host's side: the visitor's avatar, each time it sends one (at most every AVATAR_EVERY), unpacked and
+/// checked as a scene edit is, then passed to the page; any other stream is ignored.
+async fn read_avatars(conn: Connection, visit: String, core: mpsc::UnboundedSender<Ev>) {
+    let mut last: Option<Instant> = None;
+    while let Ok(mut stream) = conn.accept_uni().await {
+        let mut kind = [0u8];
+        if !matches!(tokio::time::timeout(HANDSHAKE, stream.read_exact(&mut kind)).await, Ok(Ok(()))) || kind[0] != STREAM_AVATAR {
+            continue;
+        }
+        if last.is_some_and(|t| t.elapsed() < AVATAR_EVERY) {
+            debug!(%visit, "an avatar sooner than the last allows: ignored");
+            continue;
+        }
+        last = Some(Instant::now());
+        let gz = match tokio::time::timeout(Duration::from_secs(60), frames::read_blob(&mut stream, frames::MAX_AVATAR)).await {
+            Ok(Ok(Some(gz))) => gz,
+            Ok(Ok(None)) | Err(_) => continue,
+            Ok(Err(e)) => { warn!(%visit, "an avatar that is not what it should be: {e:#}"); continue }
+        };
+        match tokio::task::spawn_blocking(move || frames::unpack_json(&gz, frames::MAX_AVATAR_JSON)).await {
+            Ok(Ok(json)) => match String::from_utf8(json) {
+                Ok(json) => { let _ = core.send(Ev::LinkAvatar { visit: visit.clone(), json }); }
+                Err(_) => warn!(%visit, "an avatar that is not UTF-8"),
+            },
+            Ok(Err(e)) => warn!(%visit, "an avatar that is not what it should be: {e:#}"),
+            Err(e) => warn!(%visit, "{e}"),
+        }
     }
 }
 

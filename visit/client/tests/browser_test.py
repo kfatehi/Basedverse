@@ -500,6 +500,28 @@ async def main():
         await b.js("v.removeGuest(v.guests[0].key)")
         await b.until("v.guests.length === 0")
 
+        print("\navatars: a visitor as itself, when the room it visits says so")
+        await b.js("v.knock(v.offices.find(o => o.name === 'A').id, 'as myself?')")
+        await a.until("!!document.querySelector('.visit-panel .knock button[data-v=in]')")
+        await a.js("document.querySelector('.visit-panel .knock button[data-v=in]').click()")
+        check("B visits A: A shows B as one of its own models (A's default)", await a.until(
+            "v.visitors.length === 1 && v.visitors[0].avatar === null && !!room.scene.getObjectByName('body:B')"), True)
+        await a.js("document.querySelector('.visit-panel button[data-v=look]').click()")
+        check("A's panel: B's own look, apart from the default: A asks, B's avatar comes, A draws B as it", await a.until(
+            "v.avatarUse(v.visitors[0].visitor.key) === 'theirs' && !!v.visitors[0].avatar && !!room.scene.getObjectByName('avatar:B') && !room.scene.getObjectByName('body:B')"), True)
+        check("read with A's three.js (r128, from B's r160): B's torso and head, its walk and idle", await a.js(
+            "(h => [h.avatar.object.getObjectByName('torso').geometry.type, !!h.avatar.object.getObjectByName('head'), !!h.avatar.walk, !!h.avatar.idle])([...v._hosted.values()].find(h => h.avatar))"),
+            ["CylinderGeometry", True, True, True])
+        check("and B, in A's room, does not see itself", await b.until("(s => !!s && s.own.some(o => o.name === 'avatar:B'))(v._viewer && v._viewer.scene)"), True)
+        await a.shot("a_avatar.png")
+        await a.js("(s => { s.value = 'theirs'; s.dispatchEvent(new Event('change', { bubbles: true })); })(document.querySelector('.visit-panel select[data-v=looks]'))")
+        check("A: everyone's own look by default; B no longer set apart", await a.until("v.avatars.default === 'theirs' && v.avatars.by.length === 0 && !!v.visitors[0].avatar"), True)
+        await a.js("(s => { s.value = 'mine'; s.dispatchEvent(new Event('change', { bubbles: true })); })(document.querySelector('.visit-panel select[data-v=looks]'))")
+        check("and back to A's models: B a box again", await a.until(
+            "v.visitors[0].avatar === null && !!room.scene.getObjectByName('body:B') && !room.scene.getObjectByName('avatar:B')"), True)
+        await b.js("v.leave()")
+        await a.until("v.visitors.length === 0")
+
         print("\nwhat a host sends is only data")
         r = await b.js("""(() => { const c = Visit._test.cleanScene, budget = { vertices: 0, objects: 0 };
           const j = c({ materials: [{ uuid: "m", type: "RawShaderMaterial", vertexShader: "x" }],

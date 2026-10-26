@@ -20,6 +20,11 @@ pub const MAX_SCENE_JSON: usize = 64 << 20;
 /// scene edit, not a delta (../SPEC.md section 5.4).
 const KEY: u8 = 1;
 const EDIT: u8 = 2;
+/// A page's own avatar (8.6): gzipped JSON, kept by its visit-client for the hosts that ask.
+const AVATAR: u8 = 4;
+/// The most an avatar takes gzipped, and unpacked.
+pub const MAX_AVATAR: usize = 4 << 20;
+pub const MAX_AVATAR_JSON: usize = 16 << 20;
 
 /// One delta of a host's scene (../SPEC.md section 8.3): newest wins, as a group of pictures would.
 #[derive(Clone, Debug)]
@@ -90,6 +95,14 @@ pub fn scene_from_page(b: &[u8]) -> Option<(u16, Bytes)> {
     Some((u16::from_be_bytes([b[0], b[1]]), Bytes::copy_from_slice(&b[11..])))
 }
 
+/// The page's own avatar, gzipped (its channel is ignored), if the frame is one and not too big.
+pub fn avatar_from_page(b: &[u8]) -> Option<Bytes> {
+    if b.len() < 11 || b[2] != AVATAR || b.len() - 11 > MAX_AVATAR {
+        return None;
+    }
+    Some(Bytes::copy_from_slice(&b[11..]))
+}
+
 /// A scene edit on a link's scene stream: its length (u32), then the gzipped JSON.
 pub async fn write_scene_msg(w: &mut SendStream, gz: &[u8]) -> Result<()> {
     let mut out = BytesMut::with_capacity(4 + gz.len());
@@ -102,6 +115,11 @@ pub async fn write_scene_msg(w: &mut SendStream, gz: &[u8]) -> Result<()> {
 /// The next scene edit (still gzipped); None when the stream ends. One longer than MAX_SCENE is an error:
 /// the stream cannot be read past it.
 pub async fn read_scene_msg(r: &mut RecvStream) -> Result<Option<Bytes>> {
+    read_blob(r, MAX_SCENE).await
+}
+
+/// The next length-prefixed blob (as a scene edit is), at most `max` bytes; None when the stream ends.
+pub async fn read_blob(r: &mut RecvStream, max: usize) -> Result<Option<Bytes>> {
     let mut len = [0u8; 4];
     match r.read_exact(&mut len).await {
         Ok(()) => {}
@@ -109,7 +127,7 @@ pub async fn read_scene_msg(r: &mut RecvStream) -> Result<Option<Bytes>> {
         Err(e) => bail!("reading a scene edit: {e}"),
     }
     let len = u32::from_be_bytes(len) as usize;
-    if len > MAX_SCENE {
+    if len > max {
         bail!("a scene edit of {len} bytes");
     }
     let mut buf = vec![0u8; len];
@@ -124,10 +142,15 @@ const MAX_DEPTH: usize = 256;
 /// there), of one well-formed JSON object nested at most MAX_DEPTH deep. What the page then reads, it reads as
 /// data (../SPEC.md section 8.3).
 pub fn unpack_scene(gz: &[u8]) -> Result<Vec<u8>> {
+    unpack_json(gz, MAX_SCENE_JSON)
+}
+
+/// As unpack_scene, unpacking to at most `max` bytes.
+pub fn unpack_json(gz: &[u8], max: usize) -> Result<Vec<u8>> {
     let mut json = Vec::new();
-    flate2::read::GzDecoder::new(gz).take(MAX_SCENE_JSON as u64 + 1).read_to_end(&mut json).map_err(|e| anyhow!("not gzip: {e}"))?;
-    if json.len() > MAX_SCENE_JSON {
-        bail!("unpacks to more than {MAX_SCENE_JSON} bytes");
+    flate2::read::GzDecoder::new(gz).take(max as u64 + 1).read_to_end(&mut json).map_err(|e| anyhow!("not gzip: {e}"))?;
+    if json.len() > max {
+        bail!("unpacks to more than {max} bytes");
     }
     if json.iter().find(|b| !b.is_ascii_whitespace()) != Some(&b'{') {
         bail!("not a JSON object");

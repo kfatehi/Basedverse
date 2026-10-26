@@ -1,7 +1,8 @@
 //! What a visit-client keeps across its runs, in its state file (`--state-file`, ../SPEC.md section 4.1):
 //! whether its office is out of the lobby, its link key (the office's lasting identity, and its secret half:
 //! the file is readable by its owner only), its door and its guests, and its world (../WORLD.md): where it
-//! has put its friends' plots, and the edges it has agreed with them. Written whole each time, by a rename.
+//! has put its friends' plots, and the edges it has agreed with them; and whose look its visitors have in its
+//! room (their own avatars, or its models). Written whole each time, by a rename.
 use std::{io::Write, path::Path};
 
 use iroh::{EndpointId, SecretKey};
@@ -48,6 +49,10 @@ pub struct Saved {
     pub guests: Vec<Guest>,
     pub layout: Vec<Place>,
     pub edges: Vec<Edge>,
+    /// Whether visitors have their own avatars in this room by default (else its models; ../SPEC.md 8.6), and the
+    /// keys for which it is the other way: (key, their own).
+    pub avatars_theirs: bool,
+    pub avatars_by: Vec<(String, bool)>,
 }
 
 impl Saved {
@@ -68,6 +73,11 @@ impl Saved {
         let list = |k: &str| v.get(k).and_then(Value::as_array).cloned().unwrap_or_default();
         let layout = list("layout").iter().filter_map(place_from).take(MAX_PLACES).collect();
         let edges = list("edges").iter().filter_map(edge_from).take(MAX_PLACES).collect();
+        let av = v.get("avatars").cloned().unwrap_or(Value::Null);
+        let avatars_by = av.get("by").and_then(Value::as_array).into_iter().flatten()
+            .filter_map(|x| Some((x.get("key").and_then(Value::as_str).filter(|k| key_ok(k))?.to_string(), use_from(x.get("use"))?)))
+            .take(MAX_GUESTS)
+            .collect();
         let saved = Saved {
             away: v.get("away").and_then(Value::as_bool).unwrap_or(false),
             key: key.unwrap_or_else(SecretKey::generate),
@@ -75,6 +85,8 @@ impl Saved {
             guests,
             layout,
             edges,
+            avatars_theirs: use_from(av.get("default")).unwrap_or(false),
+            avatars_by,
         };
         (saved, fresh)
     }
@@ -83,8 +95,13 @@ impl Saved {
         json!({
             "away": self.away, "key": hex(&self.key.to_bytes()), "door": if self.door_open { "open" } else { "closed" },
             "guests": self.guests.iter().map(|g| json!({ "key": g.key, "name": g.name })).collect::<Vec<_>>(),
-            "layout": self.layout_json(), "edges": self.edges_json(),
+            "layout": self.layout_json(), "edges": self.edges_json(), "avatars": self.avatars_json(),
         })
+    }
+
+    pub fn avatars_json(&self) -> Value {
+        let word = |theirs: bool| if theirs { "theirs" } else { "mine" };
+        json!({ "default": word(self.avatars_theirs), "by": self.avatars_by.iter().map(|(k, t)| json!({ "key": k, "use": word(*t) })).collect::<Vec<_>>() })
     }
 
     pub fn layout_json(&self) -> Value {
@@ -117,6 +134,15 @@ pub fn place_from(v: &Value) -> Option<Place> {
     let turn = v.get("turn").and_then(Value::as_u64).unwrap_or(0);
     (turn < 4).then_some(())?;
     Some(Place { key: key.to_string(), x: num("x")?, z: num("z")?, turn: turn as u8 })
+}
+
+/// Whose look: "theirs" (true: a visitor's own avatar) or "mine" (false: this room's models).
+pub fn use_from(v: Option<&Value>) -> Option<bool> {
+    match v.and_then(Value::as_str) {
+        Some("theirs") => Some(true),
+        Some("mine") => Some(false),
+        _ => None,
+    }
 }
 
 /// A side's name, if it is one.

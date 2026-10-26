@@ -38,7 +38,9 @@
   // draws it with the very three.js release the host runs, fetched from a CDN and checked against the hashes
   // below (Subresource Integrity): nothing else ever runs from it, and what the host sends is only ever read as
   // data (cleanScene). The visitor walks at once, predicted here, and the host's answer corrects it.
-  const KEY = 1, EDIT = 2;   // frames' flags: bit 0 a key delta; bit 1 a scene edit (page to visit-client) (SPEC 5.4)
+  const KEY = 1, EDIT = 2, AVATAR = 4;   // frames' flags: bit 0 a key delta; bit 1 a scene edit, bit 2 this office's avatar (page to visit-client) (SPEC 5.4)
+  // An avatar (SPEC 8.6): at most this much, gzipped; and once read by a host, at most so many vertices and objects.
+  const MAX_AVATAR = 4 << 20, AVATAR_VERTICES = 300000, AVATAR_OBJECTS = 2000;
   // How often a host sends its scene's changes, and the places of everything that has moved, regardless; how far
   // behind the host's clock a visitor shows moving things (two updates: always one to move toward); the most
   // pixels a visitor's view draws (it is stretched past that).
@@ -486,6 +488,7 @@
       this.edgeProposals = []; // edges friends propose, waiting for you: [{ key, name, mine, theirs, along, size }]
       this.watchers = [];      // who sees your room from outside it (your guests' worlds, links): [{ id, visitor, inside, link }]
       this.links = [];         // your links (8.5): [{ id, host, where ("corner", "aside" or "world"), inside }]
+      this.avatars = { default: "mine", by: [] };   // whose look your visitors have in your room (8.6): "theirs" or "mine"
       this.visiting = null;    // the room in the stage: { id, host, paused, link, inside } (a link's: inside once you go there)
       this.visitors = [];      // { id, visitor, pose }
       this._on = {};
@@ -572,7 +575,9 @@
       this.edges = Array.isArray(m.edges) ? m.edges : [];
       this.edgeProposals = [];
       this.knocks = []; this.knocking = [];
+      this._avatarsFrom(m.avatars);
       for (const v of m.visits || []) this._started(v);
+      if (this._avatarOwn) this._avatarSend();   // a visit-client that came back has no avatar of this office's
       if (this._hooks) this._sendHost();   // a visit-client that came back: this page hosts, again
       if (this._world) this._send({ type: "world", on: true });
       this._changed();
@@ -607,6 +612,8 @@
           break;
         }
         case "guests": this._guests(m); break;
+        case "avatars": this._avatarsFrom(m); this._avatarWants(); this._visitorsList(); break;
+        case "avatar": this._avatarIn(m); break;
         case "layout": this.layout = Array.isArray(m.layout) ? m.layout : []; break;
         case "edges": this.edges = Array.isArray(m.edges) ? m.edges : []; this.edgeProposals = this.edgeProposals.filter(p => !this.edges.some(e => e.key === p.key)); break;
         case "edge_proposed": {
@@ -710,6 +717,87 @@
       this._interactions = map;
     }
     _interList() { return [...this._interactions].map(([type, t]) => ({ type, label: t.label, cosmetic: t.cosmetic })); }
+    // Avatars (8.6). Your own: a three.js object, its origin at its feet, facing -z, in your scene's units (`unit`
+    // metres each, host()'s by default), with clips named "idle" and "walk" in its `animations` if it has them; a
+    // room that would show you as yourself asks for it (null: none). And whose look your visitors have in your room:
+    // their own avatars ("theirs"), or your models ("mine"), by default and for a friend (null: the default).
+    avatar(object, { unit } = {}) {
+      if (object == null) { this._avatarOwn = null; this._send({ type: "avatar_clear" }); return; }
+      if (!object.isObject3D) throw new Error("visit.avatar: a three.js object (or null)");
+      const u = Number(unit) > 0 ? Number(unit) : this._unit();
+      this._avatarOwn = { object, unit: u };
+      this._avatarSend();
+    }
+    async _avatarSend() {
+      const a = this._avatarOwn;
+      if (!a) return;
+      const text = JSON.stringify({ unit: a.unit, json: sharedJSON(a.object) });
+      const gz = new Uint8Array(await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer());
+      if (gz.byteLength > MAX_AVATAR) return this._emit("error", { code: "avatar", message: `your avatar is too big to send (${gz.byteLength} bytes gzipped, at most ${MAX_AVATAR})` });
+      if (this._avatarOwn !== a || !this._ws || this._ws.readyState !== 1) return;
+      const buf = new Uint8Array(11 + gz.byteLength), dv = new DataView(buf.buffer);
+      dv.setUint16(0, 0); dv.setUint8(2, AVATAR); dv.setBigUint64(3, BigInt(Math.round(performance.now() * 1000)));
+      buf.set(gz, 11);
+      this._ws.send(buf);
+    }
+    useAvatars(use) { this._send({ type: "avatars", default: use === "theirs" ? "theirs" : "mine" }); }
+    useAvatar(key, use) { this._send({ type: "avatar_use", key, use: use === "theirs" || use === "mine" ? use : null }); }
+    avatarUse(key) { const b = this.avatars.by.find(x => x.key === key); return b ? b.use : this.avatars.default; }
+    _avatarsFrom(m) {
+      if (!isObj(m)) return;
+      this.avatars = { default: m.default === "theirs" ? "theirs" : "mine",
+        by: (Array.isArray(m.by) ? m.by : []).filter(isObj).map(b => ({ key: String(b.key), use: b.use === "theirs" ? "theirs" : "mine" })) };
+    }
+    // Host side: ask each visitor whose own look this room shows for its avatar, once a visit.
+    _avatarWants() {
+      for (const h of this._hosted.values()) {
+        if (h.avatarAsked || !h.visitor.key || this.avatarUse(h.visitor.key) !== "theirs") continue;
+        h.avatarAsked = true;
+        this._send({ type: "avatar_want", channel: h.channel });
+      }
+    }
+    // A visitor's avatar: read with this room's three.js (as data: cleanScene, and a size of its own), scaled to this
+    // room's units, marked as its body (userData.visitor), its idle and walk clips ready to play.
+    _avatarIn(m) {
+      const h = this._hosted.get(m.channel), hk = this._hooks;
+      if (!h || !hk || !isObj(m.avatar) || !isObj(m.avatar.json)) return;
+      try {
+        const T = hk.scene.three, budget = { vertices: 0, objects: 0 }, json = cleanScene(m.avatar.json, budget);
+        if (budget.vertices > AVATAR_VERTICES || budget.objects > AVATAR_OBJECTS) throw new Error(`more than ${AVATAR_VERTICES} vertices or ${AVATAR_OBJECTS} objects`);
+        const o = new T.ObjectLoader().parse(json), k = Math.min(1000, Math.max(0.001, (Number(m.avatar.unit) || 1) / this._unit()));
+        o.scale.multiplyScalar(k);
+        const body = new T.Group();
+        body.add(o); body.name = "avatar:" + (h.visitor.name || ""); body.userData.visitor = h.id;
+        const clip = re => (o.animations || []).find(c => re.test(c.name));
+        const mixer = new T.AnimationMixer(o), idle = clip(/idle/i), walk = clip(/walk/i);
+        this._avatarDrop(h);
+        h.avatar = { object: body, mixer, idle: idle && mixer.clipAction(idle), walk: walk && mixer.clipAction(walk), playing: null, at: null };
+        this._visitorsList();
+        this._changed();
+      } catch (e) { console.warn(`visit: ${h.visitor.name}'s avatar cannot be read`, e); }
+    }
+    _avatarDrop(h) {
+      const a = h && h.avatar;
+      if (!a) return;
+      h.avatar = null;
+      a.mixer.stopAllAction();
+      if (a.object.parent) a.object.parent.remove(a.object);
+      a.object.traverse(c => { if (c.geometry) c.geometry.dispose(); for (const mt of list(c.material)) { for (const k of MAPS) if (mt[k] && mt[k].isTexture) mt[k].dispose(); mt.dispose(); } });
+    }
+    // Its clips as it moves: walk while it goes (faster than a slow amble), else idle; eased between.
+    _avatarStep(h, dt) {
+      const a = h.avatar, p = h.pose;
+      if (!a || !p) return;
+      const moved = a.at ? Math.hypot(p.x - a.at.x, p.z - a.at.z) / Math.max(dt, 1e-3) : 0;
+      a.at = { x: p.x, z: p.z };
+      const want = moved > 0.3 / this._unit() ? a.walk || a.idle : a.idle || null;
+      if (want !== a.playing) {
+        if (a.playing) a.playing.fadeOut(0.2);
+        if (want) want.reset().fadeIn(0.2).play();
+        a.playing = want;
+      }
+      a.mixer.update(dt);
+    }
     // Whether this office sees that one's room from outside it: a plot in its world (a guest's, or a link put there).
     watching(officeId) { return [...this._watches.values()].some(w => w.host.id === officeId); }
     _link(id) { return id == null ? (this._viewer && this._viewer.link ? this._viewer : null) : [...this._links.values()].find(w => w.id === id) || null; }
@@ -763,6 +851,7 @@
         if (m.state && m.state.pose && h.inside) { h.pose = m.state.pose; h.yaw0 = m.state.yaw0 || 0; }   // back after this page reloaded
         this._hosted.set(m.channel, h);
         if (h.inside) this._spawn(h);
+        this._avatarWants();
       } else if (m.watch) {
         // A plot watched (the world's), or a link (8.5): the corner's if it is free, else aside, waiting for it.
         const w = { id: m.id, channel: m.channel, host: m.peer || {}, watch: true, link: m.link === true, plot: m.link !== true, where: m.link ? "aside" : null,
@@ -783,7 +872,7 @@
 
     _ended(m) {
       const h = this._hosted.get(m.channel);
-      if (h && h.id === m.id) this._hosted.delete(m.channel);
+      if (h && h.id === m.id) { this._avatarDrop(h); this._hosted.delete(m.channel); }
       const w = this._watches.get(m.channel);
       if (w && w.id === m.id) { this._sceneDrop(w); this._watches.delete(m.channel); }
       const l = this._links.get(m.channel);
@@ -806,7 +895,8 @@
 
     _visitorsList() {
       const hs = [...this._hosted.values()];
-      this.visitors = hs.filter(h => h.inside).map(h => ({ id: h.id, visitor: h.visitor, guest: h.guest, pose: h.pose, link: h.link }));
+      this.visitors = hs.filter(h => h.inside).map(h => ({ id: h.id, visitor: h.visitor, guest: h.guest, pose: h.pose, link: h.link,
+        avatar: h.avatar && h.visitor.key && this.avatarUse(h.visitor.key) === "theirs" ? h.avatar.object : null }));
       this.watchers = hs.filter(h => h.watch).map(h => ({ id: h.id, visitor: h.visitor, inside: h.inside, link: h.link }));
       this.links = [...this._links.values()].map(w => ({ id: w.id, host: w.host, where: w.where, inside: w.inside }));
     }
@@ -1432,6 +1522,11 @@
       for (const w of this._watches.values()) if (!w.scene && !w.loading && !w.failed && now - (w.askedAt || w.since) > 3000) { w.askedAt = now; this._sceneResync(w); }
       if (!this._hooks || !this._hosted.size) return;
       for (const h of [...this._hosted.values()]) if (h.inside) this._step(h, now);
+      if (now - (this._avatarAt || 0) >= 33) {   // visitors' own avatars, walking or idle, 30 times a second
+        const dt = Math.min(0.25, (now - (this._avatarAt || now)) / 1000);
+        this._avatarAt = now;
+        for (const h of this._hosted.values()) if (h.inside && h.avatar && this.avatarUse(h.visitor.key) === "theirs") this._avatarStep(h, dt);
+      }
       if (now - (this._sceneAt || 0) >= SCENE_MS - 2) { this._sceneAt = now; this._sceneTick(now); }
       this._visitorsList();
     }
@@ -2029,6 +2124,8 @@
         rows.push(`<div class="row"><span class="grow">your door</span><select data-v="door" title="open: your guests (★) link and walk in without asking">
           <option value="open"${v.door === "open" ? " selected" : ""}>open to guests</option><option value="closed"${v.door === "closed" ? " selected" : ""}>closed: everyone asks</option></select>
           <span class="muted">${v.guests.length} ★</span></div>`);
+        rows.push(`<div class="row"><span class="grow">visitors look like</span><select data-v="looks" title="in your room: the look each one brings (their avatar), or your own models; a friend can be set apart">
+          <option value="mine"${v.avatars.default === "mine" ? " selected" : ""}>your models</option><option value="theirs"${v.avatars.default === "theirs" ? " selected" : ""}>their own avatars</option></select></div>`);
       }
       // A star: whether this key is a guest (click to change); nothing for an office with no key yet.
       const star = (key, name) => !key ? "" : `<button class="star${v.isGuest(key) ? " on" : ""}" data-v="guest" data-key="${esc(key)}" data-name="${esc(name)}"
@@ -2056,11 +2153,14 @@
           : l.where === "corner" && l.inside ? `<button data-v="step_out" data-x="${id}" title="your own room; theirs back in the corner">Back to my room</button>`
           : l.where === "corner" ? `<button class="go" data-v="step_in" data-x="${id}" title="walk into their room">Go there</button>${v._world ? `<button data-v="to_world" data-x="${id}" title="their room as a plot beside yours, walked onto">Put in my world</button>` : ""}` : ""}${un}</div></div>`);
       }
-      for (const x of v.visitors) rows.push(`<div class="row">${star(x.visitor.key, x.visitor.name)}<span class="grow"><b>${esc(x.visitor.name)}</b> ${x.guest && !x.link ? "walked in" : "is visiting"}</span><button data-v="kick" data-x="${esc(x.id)}">Kick</button></div>`);
+      // Whose look a visitor has in your room: click to set them apart from your default (8.6).
+      const look = (key, name) => !key ? "" : (u => `<button data-v="look" data-key="${esc(key)}" data-use="${u === "theirs" ? "mine" : "theirs"}"
+        title="${u === "theirs" ? `${esc(name)} looks like their own avatar here (click: your model)` : `${esc(name)} looks like your model here (click: their own avatar)`}">${u === "theirs" ? "their look" : "your model"}</button>`)(v.avatarUse(key));
+      for (const x of v.visitors) rows.push(`<div class="row">${star(x.visitor.key, x.visitor.name)}<span class="grow"><b>${esc(x.visitor.name)}</b> ${x.guest && !x.link ? "walked in" : "is visiting"}</span>${look(x.visitor.key, x.visitor.name)}<button data-v="kick" data-x="${esc(x.id)}">Kick</button></div>`);
       // Who sees your room from outside it: links (unlink them here) and your guests' worlds (un-star them to stop it).
       for (const x of v.watchers) {
         if (x.inside) continue;
-        rows.push(`<div class="row">${star(x.visitor.key, x.visitor.name)}<span class="grow"><b>${esc(x.visitor.name)}</b> ${x.link ? "is linked: sees your room" : "sees your plot from their world"}</span>${
+        rows.push(`<div class="row">${star(x.visitor.key, x.visitor.name)}<span class="grow"><b>${esc(x.visitor.name)}</b> ${x.link ? "is linked: sees your room" : "sees your plot from their world"}</span>${look(x.visitor.key, x.visitor.name)}${
           x.link ? `<button data-v="kick" data-x="${esc(x.id)}">Unlink</button>` : ""}</div>`);
       }
       for (const o of v.offices) {
@@ -2094,6 +2194,7 @@
       }
       else if (act === "leave") v.leave();
       else if (act === "map") (v._mapView || (v._mapView = map(v))).open();
+      else if (act === "look") v.useAvatar(b.dataset.key, b.dataset.use === v.avatars.default ? null : b.dataset.use);
       else if (act === "unlink") v.unlink(b.dataset.x);
       else if (act === "step_in") v.stepIn(b.dataset.x);
       else if (act === "step_out") v.stepOut(b.dataset.x);
@@ -2111,6 +2212,7 @@
       if (e.target.dataset.v === "status") v.setStatus(e.target.value);
       if (e.target.dataset.v === "max") v.setMaxVisitors(Number(e.target.value));
       if (e.target.dataset.v === "door") v.setDoor(e.target.value === "open");
+      if (e.target.dataset.v === "looks") v.useAvatars(e.target.value);
     });
     root.addEventListener("submit", e => {
       e.preventDefault();
