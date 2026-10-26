@@ -9,7 +9,7 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
-## v0.9.0 — unreleased (the `v0.9` branch)
+## v0.9.0 — 2026-10-26
 
 **A map of your world, avatars, interactions by type, voice by who is near, and phones.**
 
