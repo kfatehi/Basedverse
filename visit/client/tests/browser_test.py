@@ -318,16 +318,25 @@ async def main():
         check("and A's page goes on drawing", await a.js("window.renders") > frames0 + 10, True)
         await a.shot("a_world.png")
 
-        async def walk(tab, x, z, yaw, secs):
+        async def walk(tab, x, z, yaw, secs, until=None):
+            """From there, facing there, W held for `secs`, or (`until`, a JS test) until it holds, at most 3 times
+            as long: a page drawing slowly (as these do, on the processor, under load) walks slowly."""
             await tab.js("Object.assign(room.me, { x: %f, z: %f, yaw: %f })" % (x, z, yaw))
             await asyncio.sleep(0.1)
             await tab.key("KeyW", "w", 87, True)
-            await asyncio.sleep(secs)
+            if until:
+                for _ in range(int(secs * 30)):
+                    if await tab.js(until):
+                        break
+                    await asyncio.sleep(0.1)
+                await asyncio.sleep(0.3)   # on past the edge a little
+            else:
+                await asyncio.sleep(secs)
             await tab.key("KeyW", "w", 87, False)
             await asyncio.sleep(0.4)
 
         midz = (r[1] + r[3]) / 2
-        await walk(a, r[0] - 1.0, midz, -3.14159 / 2, 1.5)   # west of B's plot, facing east, through its west doorway
+        await walk(a, r[0] - 1.0, midz, -3.14159 / 2, 1.5, "!!room.where")   # west of B's plot, facing east, through its west doorway
         check("A walks onto B's plot: in B's room", await a.until("room.where && room.where.name"), "B")
         check("B has A as its visitor, where A stepped in and on", await b.until("v.visitors.length === 1 && v.visitors[0].pose.x > 0.5 && v.visitors[0].visitor.name"), "A")
         check("B draws A's body; A's copy of B's room hides it (A's page draws A as itself)", await a.until(
@@ -335,7 +344,7 @@ async def main():
         await a.shot("a_in_b.png")
         await b.shot("b_has_a.png")
         bx = await b.js("v.visitors[0].pose.x")
-        await walk(a, await a.js("room.me.x"), await a.js("room.me.z"), 3.14159 / 2, 2.0)   # turned round: back out west
+        await walk(a, await a.js("room.me.x"), await a.js("room.me.z"), 3.14159 / 2, 2.0, "room.where === null")   # turned round: back out west
         check("A walks back off B's plot: home again, and B's visitor gone", (await a.until("room.where === null && room.world.in === null"), await b.until("v.visitors.length === 0")), (True, True))
         check("A ends up west of B's plot, walking on in its own world", await a.js("room.me.x") < r[0], True)
 
@@ -349,11 +358,11 @@ async def main():
         eb = await b.until("room.world.plots[0] && room.world.plots[0].edge && room.world.plots[0].rect")
         check("agreed: in A's world, B's plot against A's east side", [round(x, 3) for x in ea], [10, 0, 20, 8])
         check("and in B's, A's against B's west side: the same for both", [round(x, 3) for x in eb], [-10, 0, 0, 8])
-        await walk(a, 8.5, 4, -3.14159 / 2, 1.8)   # in A's room, facing its east doorway: straight through into B's
+        await walk(a, 8.5, 4, -3.14159 / 2, 1.8, "!!room.where")   # in A's room, facing its east doorway: straight through into B's
         check("A walks out of its own room's east door and straight into B's, by its west door", await a.until("room.where && room.where.name"), "B")
         check("B has A", await b.until("v.visitors.length === 1 && v.visitors[0].visitor.name"), "A")
         await a.shot("a_across_edge.png")
-        await walk(a, await a.js("room.me.x"), await a.js("room.me.z"), 3.14159 / 2, 1.8)
+        await walk(a, await a.js("room.me.x"), await a.js("room.me.z"), 3.14159 / 2, 1.8, "room.where === null")
         check("and back: home in A's own room", (await a.until("room.where === null"), 0 < await a.js("room.me.x") < 10.01), (True, True))
 
         print("\nthe door shut: an outline")
