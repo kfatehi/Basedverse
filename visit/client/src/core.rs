@@ -103,6 +103,8 @@ struct Visit {
     /// A link (8.5): a watch begun by a knock its host let in, not by the world. The door and the guest list do
     /// not end it, nor does the world going off: it ends as a visit does.
     link: bool,
+    /// Where the page put a link (visitor side): in its world, kept for a page that reloads.
+    in_world: bool,
 }
 
 /// The most control messages a link's other side may send a second; more are dropped (a peer flooding
@@ -533,6 +535,19 @@ impl Core {
                 self.saved.edges.retain(|e| e.key != key);
                 self.save_state();
                 self.tell_edges();
+            }
+            // Where the page put a link: its world, or the corner (kept for a page that reloads: visit_started says).
+            "link_where" => {
+                let ch = m.get("channel").and_then(Value::as_u64).unwrap_or(0) as u16;
+                let world = match m.get("where").and_then(Value::as_str) {
+                    Some("world") => true,
+                    Some("corner") => false,
+                    _ => return self.page_error("bad_message", "where is \"world\" or \"corner\"", Some("link_where")),
+                };
+                match self.visits.values_mut().find(|v| v.channel == ch && v.role == Role::Visitor && v.link) {
+                    Some(v) => v.in_world = world,
+                    None => self.page_error("no_such_visit", "no link of yours on that channel", Some("link_where")),
+                }
             }
             "exit" => {
                 let ch = m.get("channel").and_then(Value::as_u64).unwrap_or(0) as u16;
@@ -970,7 +985,7 @@ impl Core {
                 self.visits.insert(id.to_string(), Visit {
                     id: id.to_string(), channel, role, peer, up: false, cmd,
                     last_seq: 0, inputs: (Instant::now(), 0), want_key: false, host_state: None, ctl: (Instant::now(), 0), key_asked: None, resync_asked: None, resync_due: false,
-                    points: (Instant::now(), 0), guest, watch, inside: !watch, shared_adds: false, link,
+                    points: (Instant::now(), 0), guest, watch, inside: !watch, shared_adds: false, link, in_world: false,
                 });
             }
             Err(e) => {
@@ -1270,6 +1285,9 @@ fn started(v: &Visit) -> Value {
     }
     if v.link {
         m["link"] = json!(true);
+        if v.in_world {
+            m["where"] = json!("world");
+        }
     }
     if v.watch {
         m["watch"] = json!(true);

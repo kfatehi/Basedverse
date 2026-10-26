@@ -56,8 +56,11 @@ async function build(v) {
   sun.position.set(8, 10, 6); sun.target.position.set(5, 0, 4); scene.add(sun.target); sun.castShadow = true; scene.add(sun);
   const spinner = box(0.4, 0.4, 0.4, lambert(0x3fb950), 5, 1.2, 3.6);
   spinner.name = "spinner";
-  // Something a visitor may point at (userData.visitPoint); and what a room keeps for itself, which never leaves it.
-  spinner.userData = { visitPoint: true, secret: "A's own" };
+  // Something a visitor may click (userData.visitPoint: an interaction this room takes, "spin"); and what a room
+  // keeps for itself, which never leaves it. And a box marked with a type the room does not take: nothing.
+  spinner.userData = { visitPoint: "spin", secret: "A's own" };
+  const vault = box(0.4, 0.4, 0.4, lambert(0x8957e5), 9, 1.2, 1.2);
+  vault.name = "vault"; vault.userData = { visitPoint: "open-vault" };
   const movers = [...Array(MOVERS)].map((_, i) => box(0.15, 0.15, 0.15, lambert(0xe3b341), 5, 0.5 + (i % 10) * 0.15, 4));
   const signCanvas = document.createElement("canvas"); signCanvas.width = 256; signCanvas.height = 64;
   const signTex = new THREE.CanvasTexture(signCanvas);
@@ -77,7 +80,7 @@ async function build(v) {
   const me = { x: ROOM.w / 2, y: 0, z: ROOM.d - 1.5, yaw: 0, pitch: 0 }, keys = new Set(), meBody = WORLD ? box(0.5, 1.7, 0.5, lambert(0xf0883e), 0, 0.85, 0) : null;
   // Our own keys, but not while a room we went to has them (v.viewFocused).
   if (WORLD) { meBody.name = "me"; addEventListener("keydown", e => { if (!(window.v && v.viewFocused)) keys.add(e.code); }); addEventListener("keyup", e => keys.delete(e.code)); }
-  window.room = { THREE, scene, spinner, sign, write, bodies, frozen: false, me, keys, world: null, where: null,
+  window.room = { THREE, scene, spinner, vault, sign, write, bodies, frozen: false, me, keys, world: null, where: null,
     add(name) { const o = box(0.3, 0.3, 0.3, lambert(0xe3b341), 2, 0.15, 2); o.name = name; return o.uuid; },
     remove(name) { const o = scene.getObjectByName(name); if (o) scene.remove(o); },
     shader() { const o = new THREE.Mesh(new THREE.BoxGeometry(0.3, 0.3, 0.3), new THREE.ShaderMaterial({ vertexShader: "void main(){gl_Position=vec4(0.);}", fragmentShader: "void main(){gl_FragColor=vec4(1.);}" })); o.name = "shader"; scene.add(o); return o.uuid; } };
@@ -144,6 +147,11 @@ async function build(v) {
   // A visitor pointing (SPEC 8.3): kept, with what it hit first, for the test to read.
   const ray = new t.THREE.Raycaster();
   window.points = [];
+  // Interactions (SPEC 8.3): spinning the cube is cosmetic; nothing else is taken (the vault's type is not here).
+  window.spins = [];
+  window.visitErrors = [];   // what Visit refused, for the test to read
+  v.on("error", e => window.visitErrors.push(e));
+  v.interactions({ spin: { cosmetic: true, label: "spin it", run: e => { e.object.rotation.y += 1; window.spins.push({ who: e.visitor.name, type: e.type }); } } });
   v.on("point", e => {
     ray.set(new t.THREE.Vector3(...e.from), new t.THREE.Vector3(...e.dir));
     const hit = ray.intersectObjects(t.scene.children, true).find(h => !h.object.userData.visitor);

@@ -279,7 +279,7 @@
       const t = cfg.three;
       // `shared`: every visitor this round's edit goes to reads an added object that names what it has by uuid.
       Object.assign(this, { cfg, objs: new Map(), next: 1, mats: new Map(), geos: new Map(), texs: new Map(), dynamic: new Set(), sent: new Set(), shared: false,
-        keyAt: 0, sceneSig: null, tmp: { p: new t.Vector3(), q: new t.Quaternion(), s: new t.Vector3() } });
+        keyAt: 0, sceneSig: null, inter: [], interSig: null, tmp: { p: new t.Vector3(), q: new t.Quaternion(), s: new t.Vector3() } });
       this.scan(0);   // where everything is now: what the first whole scene shows
     }
 
@@ -360,6 +360,9 @@
         }
         this.sceneSig = sig;
       }
+      // The interactions on (8.3): which types a visitor's crosshair shows hot, and with what label.
+      const isig = JSON.stringify(this.inter), inter = this.interSig !== null && isig !== this.interSig;
+      this.interSig = isig;
       if (first) return { edit: null, moved: [] };
       const edit = { type: "edit" };
       if (res.size) edit.res = this._resources([...res.values()]);
@@ -369,6 +372,7 @@
       if (assigns.length) edit.assign = assigns.map(r => [r.idx, Array.isArray(r.o.material) ? r.o.material.map(m => m.uuid) : r.o.material ? r.o.material.uuid : null, r.o.geometry ? r.o.geometry.uuid : null]);
       if (props.length) edit.props = props;
       if (scene) edit.scene = scene;
+      if (inter) edit.interactions = this.inter;
       return { edit: Object.keys(edit).length > 1 ? edit : null, moved };
     }
 
@@ -454,7 +458,8 @@
       root.updateMatrixWorld();
       const json = sharedJSON(root);
       this.sent = new Set(["geometries", "materials", "textures", "images"].flatMap(k => (json[k] || []).map(x => x.uuid)));
-      return { type: "scene", three: String(three.REVISION), json, ids: [...this.objs.values()].map(r => [r.o.uuid, r.idx]), targets: this.targets(root),
+      this.interSig = JSON.stringify(this.inter);
+      return { type: "scene", three: String(three.REVISION), json, ids: [...this.objs.values()].map(r => [r.o.uuid, r.idx]), targets: this.targets(root), interactions: this.inter,
         renderer: rendererProps(renderer, three), fov: Number(hooks.fov) || 70, near: Number(this.cfg.near) || 0.1, far: Number(this.cfg.far) || 1000,
         walk: w && Number(w.speed) > 0 ? { speed: Number(w.speed) } : null, yaw0: h.yaw0, pose: h.pose,
         plot: hooks.plot ? { center: hooks.plot.center.map(Number), size: hooks.plot.size.map(Number) } : null, unit: Number(hooks.unit) > 0 ? Number(hooks.unit) : 1,
@@ -489,6 +494,7 @@
       this._links = new Map();    // channel -> a link of this office's, wherever it is (in _watches too, in the world)
       this._world = null;         // v.world(): friends' plots drawn around this room
       this._hooks = null;         // until visit.host(): this office is not in the lobby to be visited, nor knocks
+      this._interactions = new Map();   // type -> what a visitor's click on something so marked does (8.3)
       // A visitor's numbers, about once a second (the "stats" event): input to screen (drawn here) and the
       // link's round trip in ms, the link's path ("direct" or "relay"), frames drawn a second. null while not
       // visiting.
@@ -673,8 +679,9 @@
       if (!w || !this._world || w.where === "world") return false;
       if (w.inside) this.stepOut(w.id);
       if (this._viewer === w) this._leaveCorner(); else this._sceneDrop(w);
-      Object.assign(w, { where: "world", plot: true, failed: false, since: performance.now(), askedAt: 0 });
+      Object.assign(w, { where: "world", plot: true, failed: false, since: performance.now(), askedAt: 0, wantWorld: false });
       this._watches.set(w.channel, w);
+      this._send({ type: "link_where", channel: w.channel, where: "world" });   // kept, for this page reloaded
       this._sceneResync(w);   // whole again, to be read with this page's three.js
       this._cornerNext();
       this._visitorsList();
@@ -682,6 +689,27 @@
       return true;
     }
     unlink(id) { const w = this._link(id); if (w) this._send({ type: "end", visit: w.id }); }
+    // What visitors may click in your room (8.3), by type: something marked userData.visitPoint = "<type>" does what
+    // its entry's run says when a visitor clicks it; a type not named here does nothing, and is not shown to them.
+    // An entry is cosmetic (it changes only how the room looks or sounds: something moves, lights up, plays) or it
+    // is not: it reaches further (your agents, tools, files, accounts, messages, anything beyond the room's looks),
+    // and is taken only with agreed: true, which means your user agreed to that one, by name. Each:
+    // { cosmetic, agreed, label (what a visitor sees), who ("everyone" | "guests"), reach (scene units), run }, run
+    // getting { id, visitor, type, object, point, distance }. Called again, it replaces them all.
+    interactions(types) {
+      const map = new Map();
+      for (const [type, t] of Object.entries(types || {})) {
+        if (!/^[\w.-]{1,40}$/.test(type)) throw new Error(`visit.interactions: "${type}" is not a type (letters, digits, _ . -, at most 40)`);
+        if (!isObj(t) || typeof t.run !== "function") throw new Error(`visit.interactions: "${type}" needs run({ visitor, object, point })`);
+        if (t.cosmetic !== true && t.agreed !== true) {
+          throw new Error(`visit.interactions: "${type}" is not cosmetic: register it only once your user has agreed to it, by name (agreed: true)`);
+        }
+        map.set(type, { cosmetic: t.cosmetic === true, label: String(t.label || type).slice(0, 60), who: t.who === "guests" ? "guests" : "everyone",
+          reach: Number(t.reach) > 0 ? Number(t.reach) : Infinity, run: t.run });
+      }
+      this._interactions = map;
+    }
+    _interList() { return [...this._interactions].map(([type, t]) => ({ type, label: t.label, cosmetic: t.cosmetic })); }
     // Whether this office sees that one's room from outside it: a plot in its world (a guest's, or a link put there).
     watching(officeId) { return [...this._watches.values()].some(w => w.host.id === officeId); }
     _link(id) { return id == null ? (this._viewer && this._viewer.link ? this._viewer : null) : [...this._links.values()].find(w => w.id === id) || null; }
@@ -741,7 +769,8 @@
           inside: false, paused: false, count: 0, scene: null, sceneQ: null, since: performance.now(), loading: false, failed: false };
         if (w.link) this._links.set(m.channel, w); else this._watches.set(m.channel, w);
         if (m.inside) this._send({ type: "exit", channel: m.channel });   // this page lost where it was: it starts at home
-        if (w.link && !this._viewer) this._toCorner(w);
+        if (w.link && m.where === "world") { w.wantWorld = true; if (this._world) this.toWorld(w.id); }   // where it was put, before a reload
+        else if (w.link && !this._viewer) this._toCorner(w);
       } else {
         if (this._viewer && this._viewer.link) this._aside(this._viewer);   // a visit: the corner's link waits aside
         this.visiting = { id: m.id, host: m.peer || {}, paused: false, link: false, inside: true };
@@ -787,7 +816,7 @@
     // step in. A link back from aside or the world has no scene here: it asks for the whole one again.
     _toCorner(w) {
       if (this._viewer && this._viewer !== w) { if (this._viewer.link) this._aside(this._viewer); else return; }   // a visit keeps the stage
-      if (w.where === "world") { this._watches.delete(w.channel); this._sceneDrop(w); w.stale = true; }
+      if (w.where === "world") { this._watches.delete(w.channel); this._sceneDrop(w); w.stale = true; this._send({ type: "link_where", channel: w.channel, where: "corner" }); }
       const stale = w.stale;
       Object.assign(w, { where: "corner", plot: false, stale: false, failed: false, since: performance.now(), askedAt: 0 });
       this._viewer = w;
@@ -804,10 +833,10 @@
       this._visitorsList();
     }
     _leaveCorner() { this._dropViewer(); this.visiting = null; }
-    // The corner free: the newest link waiting takes it.
+    // The corner free: the newest link waiting takes it (not one on its way back into the world).
     _cornerNext() {
       if (this._viewer) return;
-      const next = [...this._links.values()].filter(w => w.where === "aside").pop();
+      const next = [...this._links.values()].filter(w => w.where === "aside" && !w.wantWorld).pop();
       if (next) this._toCorner(next);
     }
 
@@ -885,8 +914,29 @@
       const p = h.pose;
       if (!p || !Number.isFinite(m.yaw) || !Number.isFinite(m.pitch)) return;
       const yaw = h.yaw0 + m.yaw, pitch = Math.max(-1.4, Math.min(1.4, m.pitch)), c = Math.cos(pitch);
-      this._emit("point", { id: h.id, visitor: h.visitor, from: [Number(p.x) || 0, Number(p.y) || 0, Number(p.z) || 0],
-        dir: [-Math.sin(yaw) * c, Math.sin(pitch), -Math.cos(yaw) * c], yaw, pitch });
+      const from = [Number(p.x) || 0, Number(p.y) || 0, Number(p.z) || 0], dir = [-Math.sin(yaw) * c, Math.sin(pitch), -Math.cos(yaw) * c];
+      this._emit("point", { id: h.id, visitor: h.visitor, from, dir, yaw, pitch });
+      if (this._interactions.size) this._interact(h, from, dir);
+    }
+
+    // A point at something marked with a type of interaction this room takes (8.3): the first thing on the ray that
+    // is not a visitor's body or hidden, then the type on it or on what it is part of. Its entry runs if the type is
+    // on, this visitor may (a guest, for who: "guests"), and it is within reach.
+    _interact(h, from, dir) {
+      const hk = this._hooks;
+      if (!hk) return;
+      const T = hk.scene.three, ray = this._ray || (this._ray = new T.Raycaster());
+      ray.set(new T.Vector3(...from), new T.Vector3(...dir));
+      const body = o => { for (; o; o = o.parent) if (!o.visible || (o.userData && o.userData.visitor)) return true; return false; };
+      const hit = ray.intersectObject(hk.scene.root, true).find(x => !body(x.object));
+      if (!hit) return;
+      let object = hit.object, type = null;
+      for (; object; object = object.parent) if (object.userData && typeof object.userData.visitPoint === "string") { type = object.userData.visitPoint; break; }
+      const t = type && this._interactions.get(type);
+      if (!t || hit.distance > t.reach || (t.who === "guests" && !this.isGuest(h.visitor.key))) return;
+      const e = { id: h.id, visitor: h.visitor, type, object, point: hit.point.toArray(), distance: hit.distance };
+      try { t.run(e); } catch (x) { console.error(`visit: interaction "${type}" threw`, x); }
+      this._emit("interaction", { id: h.id, visitor: h.visitor, type, cosmetic: t.cosmetic, object });
     }
 
     // Every SCENE_MS, for this room's visitors: what changed in its scene (one edit for them all), where its
@@ -900,6 +950,7 @@
           for (const h of hs) h.sceneSent = false;
         }
         const sync = this._sync, ready = hs.filter(h => h.sceneSent);
+        sync.inter = this._interList();
         sync.shared = ready.every(h => h.sharedAdds);   // one visitor on an older Visit: every add whole, as it reads them
         const { edit, moved } = sync.scan(now);
         if (edit && ready.length) this._sendScene(ready, edit);
@@ -993,7 +1044,8 @@
       const s = { T, loader, budget, root, ownId, byIdx: new Map(), idxOf: new Map(), geos: new Map(), mats: new Map(), texs: new Map(), samples: new Map(),
         offs: [], offset: null, pose: { x: num(pose.x, 0), y: num(pose.y, 1.6), z: num(pose.z, 0) }, yaw0: num(e.yaw0, 0),
         walk: isObj(e.walk) && num(e.walk.speed, 0) > 0 ? { speed: Math.min(50, num(e.walk.speed, 2.5)) } : null,
-        hist: [], vis: { x: 0, y: 0, z: 0 }, waitKey: true, own: [], last: 0, gcAt: performance.now(), q: new T.Quaternion(), v: new T.Vector3(), relight: null };
+        hist: [], vis: { x: 0, y: 0, z: 0 }, waitKey: true, own: [], last: 0, gcAt: performance.now(), q: new T.Quaternion(), v: new T.Vector3(), relight: null,
+        interactions: interMap(e.interactions) };
       this._sceneAdopt(s, root);
       const byUuid = new Map();
       root.traverse(o => byUuid.set(o.uuid, o));
@@ -1110,6 +1162,7 @@
       const s = w.scene;
       if (!s) return this._sceneResync(w);   // an edit with no scene to apply it to: start again
       if (isObj(e.res)) this._sceneResources(s, e.res);
+      if (Array.isArray(e.interactions)) s.interactions = interMap(e.interactions);
       for (const idx of Array.isArray(e.remove) ? e.remove : []) {
         const o = idx ? s.byIdx.get(idx) : null;
         if (!o) continue;
@@ -1430,6 +1483,11 @@
       cross.style.cssText = "position:absolute;left:50%;top:50%;width:8px;height:8px;margin:-6px 0 0 -6px;border:2px solid rgba(255,255,255,.9);" +
         "border-radius:50%;box-shadow:0 0 0 1px rgba(0,0,0,.55);pointer-events:none;display:none;transition:transform .08s,background .08s";
       element.appendChild(cross);
+      const hint = view.hint = document.createElement("div");   // what a hot thing does: its interaction's label
+      hint.className = "visit-hint";
+      hint.style.cssText = "position:absolute;left:50%;top:50%;margin:12px 0 0 0;transform:translateX(-50%);padding:2px 8px;border-radius:6px;" +
+        "font:12px/1.4 system-ui,sans-serif;color:#fff;background:rgba(13,17,23,.7);pointer-events:none;display:none;white-space:nowrap";
+      element.appendChild(hint);
       const locked = () => !!document.pointerLockElement && (document.pointerLockElement === canvas || document.pointerLockElement === view.gl);
       const ignore = e => e.ctrlKey || e.metaKey || e.altKey || (e.target && (e.target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)));
       const KEYS = ["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "ShiftLeft", "ShiftRight"];
@@ -1443,7 +1501,7 @@
       const blur = () => { if (view.keys.size) { view.keys.clear(); changed(); } };
       const click = e => { if (view.active && this._inRoom() && e.currentTarget.requestPointerLock) e.currentTarget.requestPointerLock(); };
       const press = e => { if (e.button === 0 && locked() && view.active && this._inRoom()) this._pointNow(); };
-      const lock = () => { cross.style.display = locked() && view.active ? "block" : "none"; };
+      const lock = () => { cross.style.display = locked() && view.active ? "block" : "none"; if (cross.style.display === "none") hint.style.display = "none"; };
       const look = e => {
         if (!locked()) return;
         view.yaw -= e.movementX * LOOK;
@@ -1475,7 +1533,7 @@
         removeEventListener("keydown", down); removeEventListener("keyup", up); removeEventListener("blur", blur);
         canvas.removeEventListener("click", click); document.removeEventListener("mousemove", look);
         canvas.removeEventListener("mousedown", press); document.removeEventListener("pointerlockchange", lock);
-        cross.remove();
+        cross.remove(); hint.remove();
         resize.disconnect();
         if (locked()) document.exitPointerLock();
         view.detach();
@@ -1526,8 +1584,9 @@
       if (v.cross) { v.cross.style.transform = "scale(1.6)"; setTimeout(() => { v.cross.style.transform = ""; }, 120); }
     }
 
-    // What the crosshair is on, in the room visited: hot when the first thing there, or what it is part of, has
-    // userData.visitPoint (the visitor's own body never counts).
+    // What the crosshair is on, in the room visited: hot when the first thing there, or what it is part of, is
+    // marked userData.visitPoint with a type the host takes (with its label beside it), or true (an older host's
+    // mark). The visitor's own body never counts.
     _aim(s, now) {
       const v = this._view;
       if (!v || !v.cross || v.cross.style.display === "none" || now - (s.aimAt || 0) < AIM_MS) return;
@@ -1536,13 +1595,18 @@
       s.ray.setFromCamera(s.mid, s.camera);
       s.ray.camera = s.camera;
       const shown = o => { for (; o; o = o.parent) if (!o.visible || s.own.includes(o)) return false; return true; };
-      let hot = false;
+      let hot = false, label = "";
       for (const h of s.ray.intersectObject(s.root, true)) {
         if (!shown(h.object)) continue;
-        for (let o = h.object; o; o = o.parent) if (o.userData && o.userData.visitPoint) { hot = true; break; }
+        for (let o = h.object; o; o = o.parent) {
+          const p = o.userData && o.userData.visitPoint;
+          if (p === true) { hot = true; break; }
+          if (typeof p === "string") { const i = s.interactions.get(p); if (i) { hot = true; label = i.label; } break; }
+        }
         break;
       }
       v.cross.style.background = hot ? "rgba(255,255,255,.95)" : "";
+      if (v.hint && v.hint.textContent !== label) { v.hint.textContent = label; v.hint.style.display = label ? "block" : "none"; }
     }
 
     // The visitor's input: the state of its keys and look, whole each time (the newest wins; none is ever
@@ -1653,6 +1717,10 @@
     });
   }
 
+  // The interactions a host takes, as its scene says them: type -> { label, cosmetic }.
+  const interMap = list => new Map((Array.isArray(list) ? list : []).filter(i => isObj(i) && typeof i.type === "string")
+    .map(i => [i.type, { label: String(i.label || i.type).slice(0, 60), cosmetic: i.cosmetic === true }]));
+
   const hashKey = k => { let h = 2166136261; for (let i = 0; i < k.length; i++) h = Math.imul(h ^ k.charCodeAt(i), 16777619); return h >>> 0; };
   // A rectangle on the floor, [x0, z0, x1, z1]; plots are only ever turned by quarter turns, so it is one.
   const overlap = (a, b) => a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
@@ -1688,6 +1756,7 @@
       this.outlines = new T.Group(); this.commons.add(this.outlines); this.outlineSig = "";
       v._world = this;
       v._send({ type: "world", on: true });
+      for (const w of [...v._links.values()]) if (w.wantWorld) v.toWorld(w.id);   // links that were in it before this page reloaded
     }
 
     get inside() { return this.in != null; }
@@ -1975,6 +2044,7 @@
         rows.push(`<div class="row knock"><b>${esc(p.name)}</b> proposes their plot's ${esc(p.theirs)} side against your ${esc(p.mine)} side
           <div class="btns"><button class="go" data-v="edge_yes" data-key="${esc(p.key)}">Agree</button><button data-v="edge_no" data-key="${esc(p.key)}">No</button></div></div>`);
       }
+      if (v._world && v.state === "online") rows.push(`<div class="row"><span class="grow">your world: ${v._world.plots.length} ${v._world.plots.length === 1 ? "room" : "rooms"} round yours</span><button data-v="map" title="where your friends' rooms sit round yours, from above">Map</button></div>`);
       if (v.visiting && !v.visiting.link) rows.push(`<div class="row"><span class="grow">in <b>${esc(v.visiting.host.name)}</b>'s room${v.visiting.paused ? " (reloading)" : ""}</span><button data-v="leave">Leave</button></div>`);
       // Your links: in the corner (go there, or into your world), in their room, waiting for the corner, in your world.
       for (const l of v.links) {
@@ -2023,6 +2093,7 @@
         v.answer(b.dataset.k, act === "in");
       }
       else if (act === "leave") v.leave();
+      else if (act === "map") (v._mapView || (v._mapView = map(v))).open();
       else if (act === "unlink") v.unlink(b.dataset.x);
       else if (act === "step_in") v.stepIn(b.dataset.x);
       else if (act === "step_out") v.stepOut(b.dataset.x);
@@ -2054,6 +2125,242 @@
     timer = setInterval(() => { if (v.knocks.length) draw(); }, 1000);   // the knocks' countdown
     draw();
     return { element: root, release() { clearInterval(timer); v.off("change", draw); root.remove(); } };
+  }
+
+  // ---------- your world's map: where friends' rooms sit round yours, seen from above ----------
+  const MAP_CSS = `
+.visit-map { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center; background: rgba(1,4,9,.55); font: 12px/1.4 ui-monospace, Consolas, monospace; color: #e6edf3; }
+.visit-map[hidden] { display: none; }
+.visit-map .box { width: min(1000px, 94vw); height: min(680px, 88vh); display: flex; flex-direction: column; background: #0d1117; border: 1px solid #2d333b; border-radius: 10px; overflow: hidden; box-shadow: 0 10px 40px rgba(0,0,0,.5); }
+.visit-map .hd { display: flex; align-items: center; gap: 8px; padding: 8px 12px; border-bottom: 1px solid #2d333b; }
+.visit-map .ft { padding: 6px 12px; border-top: 1px solid #2d333b; color: #8b949e; }
+.visit-map .grow { flex: 1; min-width: 0; } .visit-map .muted { color: #8b949e; }
+.visit-map .main { flex: 1; display: flex; min-height: 0; }
+.visit-map canvas { flex: 1; min-width: 0; display: block; cursor: grab; background: #161b22; touch-action: none; outline: none; }
+.visit-map .side { width: 250px; flex: none; border-left: 1px solid #2d333b; padding: 10px 12px; overflow: auto; display: flex; flex-direction: column; gap: 8px; }
+.visit-map button, .visit-map input { font: inherit; color: inherit; background: #161b22; border: 1px solid #2d333b; border-radius: 6px; padding: 3px 8px; }
+.visit-map button { cursor: pointer; } .visit-map button.go { background: #2f9e4f; border-color: #2f9e4f; color: #fff; }
+.visit-map button.pick { text-align: left; } .visit-map input { width: 76px; }
+.visit-map .row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }`;
+
+  // Your world from above (v.world first): your room's plot, and each friend's where your layout puts it. Drag one
+  // to put it there (it snaps to half units, and flush against what is near), turn it, or type where its middle
+  // goes; flush against a side of yours, propose an edge (both must agree: then it is there for both). What you
+  // place is kept by visit-client (with VISIT_STATE_FILE, across reloads and restarts); a room with an agreed edge
+  // is where the edge puts it. { element, open(), close(), release() }
+  function map(v, { parent = document.body } = {}) {
+    if (!document.getElementById("visit-map-css")) {
+      const st = document.createElement("style"); st.id = "visit-map-css"; st.textContent = MAP_CSS; document.head.appendChild(st);
+    }
+    const root = document.createElement("div");
+    root.className = "visit-map"; root.hidden = true;
+    root.innerHTML = `<div class="box"><div class="hd"><b>Your world</b><span class="grow muted">where your friends' rooms sit round yours: your layout (theirs is theirs)</span>`
+      + `<button type="button" data-m="fit">Fit</button><button type="button" data-m="close">Close</button></div>`
+      + `<div class="main"><canvas tabindex="0"></canvas><div class="side"></div></div>`
+      + `<div class="ft">drag a room to move it · R turns it right (Shift+R left) · Delete: back to the ring · drag the ground to look about, the wheel to zoom</div></div>`;
+    parent.appendChild(root);
+    const canvas = root.querySelector("canvas"), side = root.querySelector(".side"), ctx = canvas.getContext("2d");
+    const pending = new Map();   // key -> where you just put it, until the layout says so
+    const proposed = new Set();  // keys you proposed an edge to, waiting
+    let view = null, sel = null, drag = null, pan = null, timer = 0, sideSig = "";
+
+    // Your plot, and each friend's as the world lays it out now (what you just moved where you put it).
+    function plots() {
+      const w = v._world;
+      if (!w) return null;
+      w.listAt = -1;   // laid out anew, not the frame's: a placement kept a moment ago is in it
+      w._layout();
+      for (const [key, p] of pending) {
+        const l = v.layout.find(q => q.key === key);
+        if (l && Math.abs(l.x - p.x) < 1e-6 && Math.abs(l.z - p.z) < 1e-6 && (l.turn | 0) === p.turn) pending.delete(key);
+      }
+      const mp = v._plot(), mine = [mp.center[0] - mp.size[0] / 2, mp.center[1] - mp.size[1] / 2, mp.center[0] + mp.size[0] / 2, mp.center[1] + mp.size[1] / 2];
+      const list = w.list.map(x => {
+        const at = drag && drag.key === x.key ? drag.at : !x.edge && pending.get(x.key) || x.at;
+        return { key: x.key, name: x.name, at, rect: w._rect({ at, plot: x.plot, k: x.k }), seen: !!x.w, edge: x.edge, plot: x.plot, k: x.k,
+          placed: !x.edge && (pending.has(x.key) || v.layout.some(p => p.key === x.key)) };
+      });
+      for (const k of proposed) if (v.edges.some(e => e.key === k) || !list.some(p => p.key === k)) proposed.delete(k);
+      return { mp, mine, list };
+    }
+
+    const dpr = () => window.devicePixelRatio || 1;
+    const toPx = (x, z) => [canvas.clientWidth / 2 + (x - view.ox) * view.s, canvas.clientHeight / 2 + (z - view.oz) * view.s];
+    const toWorld = (px, py) => [view.ox + (px - canvas.clientWidth / 2) / view.s, view.oz + (py - canvas.clientHeight / 2) / view.s];
+    function fit() {
+      const d = plots();
+      if (!d || !canvas.clientWidth) return;
+      let [x0, z0, x1, z1] = d.mine;
+      for (const p of d.list) { x0 = Math.min(x0, p.rect[0]); z0 = Math.min(z0, p.rect[1]); x1 = Math.max(x1, p.rect[2]); z1 = Math.max(z1, p.rect[3]); }
+      const pad = Math.max(x1 - x0, z1 - z0) * 0.12 + 2;
+      view = { s: Math.min(canvas.clientWidth / (x1 - x0 + 2 * pad), canvas.clientHeight / (z1 - z0 + 2 * pad)), ox: (x0 + x1) / 2, oz: (z0 + z1) / 2 };
+    }
+
+    // Which side of yours a room is flush against (and over), if any: where an edge can be proposed.
+    function flush(r, m) {
+      const e = 1e-3, oz = r[1] < m[3] - e && r[3] > m[1] + e, ox = r[0] < m[2] - e && r[2] > m[0] + e;
+      return oz && Math.abs(r[0] - m[2]) < e ? "east" : oz && Math.abs(r[2] - m[0]) < e ? "west" : ox && Math.abs(r[1] - m[3]) < e ? "south" : ox && Math.abs(r[3] - m[1]) < e ? "north" : null;
+    }
+    // That edge in its own terms (World._fromEdge, the other way): their side against yours, their middle `along`
+    // metres from yours, along your side turning left.
+    function edgeTerms(p, mine, mp) {
+      const n = SIDE_NORMAL[mine], t = turnXZ(n[0], n[1], Math.PI / 2);
+      const theirs = Object.keys(SIDE_NORMAL).find(s => { const [a, b] = turnXZ(SIDE_NORMAL[s][0], SIDE_NORMAL[s][1], p.at.turn * Math.PI / 2); return Math.abs(a + n[0]) < 1e-6 && Math.abs(b + n[1]) < 1e-6; });
+      const mid = [mp.center[0] + n[0] * mp.size[0] / 2, mp.center[1] + n[1] * mp.size[1] / 2];
+      return { mine, theirs, along: Math.round(((p.at.x - mid[0]) * t[0] + (p.at.z - mid[1]) * t[1]) * v._unit() * 1000) / 1000 };
+    }
+
+    // Where a room being dragged goes: on half units, then flush against a side near it (within 8 pixels).
+    function snapAt(p, at, d) {
+      const x0 = Math.round(at.x * 2) / 2, z0 = Math.round(at.z * 2) / 2, r = v._world._rect({ at: { x: x0, z: z0, turn: at.turn }, plot: p.plot, k: p.k });
+      const hw = (r[2] - r[0]) / 2, hd = (r[3] - r[1]) / 2, tol = 8 / view.s, others = [d.mine, ...d.list.filter(q => q.key !== p.key).map(q => q.rect)];
+      let bx = null, bz = null;
+      for (const o of others) {
+        for (const [a, b] of [[x0 - hw, o[2]], [x0 + hw, o[0]], [x0 - hw, o[0]], [x0 + hw, o[2]]]) if (Math.abs(b - a) < tol && (bx === null || Math.abs(b - a) < Math.abs(bx))) bx = b - a;
+        for (const [a, b] of [[z0 - hd, o[3]], [z0 + hd, o[1]], [z0 - hd, o[1]], [z0 + hd, o[3]]]) if (Math.abs(b - a) < tol && (bz === null || Math.abs(b - a) < Math.abs(bz))) bz = b - a;
+      }
+      return { x: x0 + (bx || 0), z: z0 + (bz || 0), turn: at.turn };
+    }
+    const put = (p, at) => { pending.set(p.key, at); v.place(p.key, at); };
+
+    function draw() {
+      if (root.hidden) return;
+      const d = plots(), W = canvas.clientWidth, H = canvas.clientHeight, k = dpr();
+      if (canvas.width !== Math.round(W * k) || canvas.height !== Math.round(H * k)) { canvas.width = Math.round(W * k); canvas.height = Math.round(H * k); }
+      ctx.setTransform(k, 0, 0, k, 0, 0);
+      ctx.fillStyle = "#161b22"; ctx.fillRect(0, 0, W, H);
+      if (!d) { ctx.fillStyle = "#8b949e"; ctx.font = "13px system-ui, sans-serif"; ctx.textAlign = "center"; ctx.fillText("this room has no world (v.world)", W / 2, H / 2); return side.innerHTML = ""; }
+      if (!view) fit();
+      if (!view) return;
+      // A grid of whole units (or tens), north (-z) up.
+      const step = [0.5, 1, 2, 5, 10, 20, 50, 100, 200].find(s => s * view.s >= 24) || 500, [wx0, wz0] = toWorld(0, 0), [wx1, wz1] = toWorld(W, H);
+      ctx.strokeStyle = "#21262d"; ctx.lineWidth = 1; ctx.beginPath();
+      for (let x = Math.ceil(wx0 / step) * step; x <= wx1; x += step) { const [px] = toPx(x, 0); ctx.moveTo(Math.round(px) + 0.5, 0); ctx.lineTo(Math.round(px) + 0.5, H); }
+      for (let z = Math.ceil(wz0 / step) * step; z <= wz1; z += step) { const [, py] = toPx(0, z); ctx.moveTo(0, Math.round(py) + 0.5); ctx.lineTo(W, Math.round(py) + 0.5); }
+      ctx.stroke();
+      ctx.fillStyle = "#8b949e"; ctx.font = "11px ui-monospace, monospace"; ctx.textAlign = "left"; ctx.fillText(`N ↑   grid ${step} ${step === 1 ? "unit" : "units"}`, 8, 16);
+      const rect = (r, fill, stroke, dash, lw) => {
+        const [a, b] = toPx(r[0], r[1]), [c, e] = toPx(r[2], r[3]);
+        if (fill) { ctx.fillStyle = fill; ctx.fillRect(a, b, c - a, e - b); }
+        ctx.setLineDash(dash || []); ctx.strokeStyle = stroke; ctx.lineWidth = lw || 1.5; ctx.strokeRect(a, b, c - a, e - b); ctx.setLineDash([]);
+      };
+      const label = (r, text, sub) => {
+        const [cx, cz] = toPx((r[0] + r[2]) / 2, (r[1] + r[3]) / 2);
+        ctx.textAlign = "center"; ctx.fillStyle = "#e6edf3"; ctx.font = "bold 12px system-ui, sans-serif"; ctx.fillText(text, cx, cz);
+        if (sub) { ctx.fillStyle = "#8b949e"; ctx.font = "11px system-ui, sans-serif"; ctx.fillText(sub, cx, cz + 14); }
+      };
+      rect(d.mine, "rgba(63,185,80,.18)", "#3fb950");
+      label(d.mine, "your room", v.office ? v.office.name : "");
+      for (const p of d.list) {
+        const on = sel === p.key, f = flush(p.rect, d.mine);
+        rect(p.rect, p.seen ? (on ? "rgba(88,166,255,.32)" : "rgba(88,166,255,.16)") : null, p.edge ? "#e3b341" : on ? "#e6edf3" : p.seen ? "#58a6ff" : "#8b949e", p.seen ? null : [5, 4], on ? 2.5 : 1.5);
+        // its own north: an arrow near that side, pointing out of it (how it is turned)
+        const [nx, nz] = turnXZ(0, -1, p.at.turn * Math.PI / 2), hw = (p.rect[2] - p.rect[0]) / 2, hd = (p.rect[3] - p.rect[1]) / 2;
+        const [ax, az] = toPx(p.at.x + nx * hw * 0.75, p.at.z + nz * hd * 0.75);
+        ctx.fillStyle = "#8b949e"; ctx.beginPath(); ctx.moveTo(ax + nx * 6, az + nz * 6); ctx.lineTo(ax - nx * 3 - nz * 5, az - nz * 3 + nx * 5);
+        ctx.lineTo(ax - nx * 3 + nz * 5, az - nz * 3 - nx * 5); ctx.closePath(); ctx.fill();
+        label(p.rect, p.name || "?", p.edge ? "edge agreed" : !p.seen ? "not seen now" : f ? `flush: your ${f}` : p.placed ? "placed" : "in the ring");
+      }
+      drawSide(d);
+    }
+
+    function drawSide(d) {
+      const p = d.list.find(q => q.key === sel);
+      const sig = p ? [p.key, p.at.x, p.at.z, p.at.turn, p.edge, p.seen, p.placed, flush(p.rect, d.mine), proposed.has(p.key)].join() : "list:" + d.list.map(q => q.key + q.name).join();
+      if (sig === sideSig || (side.contains(document.activeElement) && document.activeElement.tagName === "INPUT")) return;
+      sideSig = sig;
+      if (!p) {
+        side.innerHTML = `<div class="muted">your room: ${d.mp.size.map(x => Math.round(x * 100) / 100).join(" × ")} units</div>`
+          + (d.list.length ? d.list.map(q => `<button type="button" class="pick" data-m="pick" data-k="${esc(q.key)}">${esc(q.name || "?")}${q.edge ? " · edge" : ""}</button>`).join("")
+            : `<div class="muted">no friends' rooms in your world yet: star a friend (a guest, with their door open to you), or put a link here</div>`);
+        return;
+      }
+      const f = !p.edge && p.seen ? flush(p.rect, d.mine) : null, terms = f && edgeTerms(p, f, d.mp), e = v.edges.find(x => x.key === p.key);
+      const r2 = x => Math.round(x * 100) / 100;
+      side.innerHTML = `<div><b>${esc(p.name || "?")}</b> <span class="muted">${p.seen ? "" : "(not seen now)"}</span></div>`
+        + (p.edge ? `<div>edge agreed: your ${esc(e ? e.mine : "?")}, their ${esc(e ? e.theirs : "?")}</div><button type="button" data-m="unedge">Take the edge back</button>`
+          : `<div class="row">x <input data-f="x" value="${r2(p.at.x)}"> z <input data-f="z" value="${r2(p.at.z)}"></div>`
+          + `<div class="row">${["not turned", "turned a quarter left", "turned half round", "turned a quarter right"][p.at.turn]} <button type="button" data-m="ccw" title="a quarter turn left">⟲</button><button type="button" data-m="cw" title="a quarter turn right">⟳</button></div>`
+          + `<div class="row"><button type="button" data-m="auto" title="where the world puts it by itself">Back to the ring</button></div>`
+          + (proposed.has(p.key) ? `<div class="muted">edge proposed: waiting for them</div>`
+            : terms && terms.theirs ? `<button type="button" class="go" data-m="edge">Propose an edge: your ${terms.mine} to their ${terms.theirs}</button>`
+            : `<div class="muted">${p.seen ? "flush against a side of yours, you can propose an edge" : "seen again, you can propose an edge"}</div>`))
+        + `<button type="button" data-m="unsel">All rooms</button>`;
+    }
+
+    function hit(px, py) {
+      const d = plots();
+      if (!d || !view) return null;
+      const [x, z] = toWorld(px, py);
+      return [...d.list].reverse().find(p => x >= p.rect[0] && x <= p.rect[2] && z >= p.rect[1] && z <= p.rect[3]) || null;
+    }
+    const pos = e => { const b = canvas.getBoundingClientRect(); return [e.clientX - b.left, e.clientY - b.top]; };
+    canvas.addEventListener("pointerdown", e => {
+      canvas.focus();
+      const [px, py] = pos(e), p = hit(px, py);
+      canvas.setPointerCapture(e.pointerId);
+      if (p) {
+        sel = p.key;
+        if (!p.edge) { const [x, z] = toWorld(px, py); drag = { key: p.key, dx: x - p.at.x, dz: z - p.at.z, at: { ...p.at }, moved: false }; }
+      } else pan = { px, py, ox: view.ox, oz: view.oz };
+      draw();
+    });
+    canvas.addEventListener("pointermove", e => {
+      const [px, py] = pos(e);
+      if (drag) {
+        const d = plots(), p = d && d.list.find(q => q.key === drag.key);
+        if (!p) return;
+        const [x, z] = toWorld(px, py);
+        drag.at = snapAt(p, { x: x - drag.dx, z: z - drag.dz, turn: drag.at.turn }, d); drag.moved = true;
+        draw();
+      } else if (pan) { view.ox = pan.ox - (px - pan.px) / view.s; view.oz = pan.oz - (py - pan.py) / view.s; draw(); }
+      else canvas.style.cursor = hit(px, py) ? "move" : "grab";
+    });
+    const up = () => {
+      if (drag && drag.moved) { const d = plots(), p = d && d.list.find(q => q.key === drag.key); if (p) put(p, drag.at); }
+      drag = null; pan = null; draw();
+    };
+    canvas.addEventListener("pointerup", up); canvas.addEventListener("pointercancel", up);
+    canvas.addEventListener("wheel", e => {
+      e.preventDefault();
+      const [px, py] = pos(e), [x, z] = toWorld(px, py), f = Math.exp(-e.deltaY * 0.0015);
+      view.s = Math.max(0.2, Math.min(400, view.s * f));
+      const [x2, z2] = toWorld(px, py); view.ox += x - x2; view.oz += z - z2;
+      draw();
+    }, { passive: false });
+    const turnSel = by => { const d = plots(), p = d && d.list.find(q => q.key === sel); if (p && !p.edge) put(p, { x: p.at.x, z: p.at.z, turn: (p.at.turn + by + 4) % 4 }); draw(); };
+    canvas.addEventListener("keydown", e => {
+      if (e.key === "r" || e.key === "R") { e.preventDefault(); turnSel(e.shiftKey ? 1 : -1); }   // R right, Shift+R left
+      else if ((e.key === "Delete" || e.key === "Backspace") && sel) { e.preventDefault(); pending.delete(sel); v.unplace(sel); }
+      else if (e.key === "Escape") close();
+    });
+    root.addEventListener("click", e => {
+      if (e.target === root) return close();   // outside the box
+      const b = e.target.closest("button[data-m]");
+      if (!b) return;
+      const m = b.dataset.m, d = plots(), p = d && d.list.find(q => q.key === sel);
+      if (m === "close") close();
+      else if (m === "fit") { fit(); draw(); }
+      else if (m === "pick") { sel = b.dataset.k; draw(); }
+      else if (m === "unsel") { sel = null; draw(); }
+      else if (m === "cw" || m === "ccw") turnSel(m === "cw" ? -1 : 1);   // a turn is a quarter turn left
+      else if (m === "auto" && p) { pending.delete(p.key); v.unplace(p.key); }
+      else if (m === "edge" && p) { const f = flush(p.rect, d.mine), t = f && edgeTerms(p, f, d.mp); if (t && t.theirs) { v.proposeEdge(p.key, t); proposed.add(p.key); draw(); } }
+      else if (m === "unedge" && p) v.removeEdge(p.key);
+    });
+    side.addEventListener("change", e => {
+      const f = e.target.dataset.f, d = plots(), p = d && d.list.find(q => q.key === sel), n = Number(e.target.value);
+      if (!p || !f || !Number.isFinite(n) || Math.abs(n) > 1e5) return draw();
+      put(p, { x: f === "x" ? n : p.at.x, z: f === "z" ? n : p.at.z, turn: p.at.turn });
+      e.target.blur(); sideSig = ""; draw();
+    });
+    function open() { root.hidden = false; view = null; sideSig = ""; draw(); canvas.focus(); clearInterval(timer); timer = setInterval(draw, 200); }
+    function close() { root.hidden = true; clearInterval(timer); drag = pan = null; }
+    v.on("change", draw);
+    return { element: root, open, close, get shown() { return !root.hidden; },
+      // for tests: where a room's middle is on screen (clientX, clientY)
+      _px(key) { const d = plots(), p = d && view && d.list.find(q => q.key === key); if (!p) return null; const b = canvas.getBoundingClientRect(), [x, y] = toPx(p.at.x, p.at.z); return [b.left + x, b.top + y]; },
+      release() { close(); v.off("change", draw); root.remove(); } };
   }
 
   // ---------- the ready-made stage: the room you are visiting, full-window or in a corner ----------
@@ -2146,6 +2453,7 @@
     walk,
     panel,
     stage,
+    map,
     _test: { cleanScene, imageDims },   // for visit-client's own tests
   };
 })();
