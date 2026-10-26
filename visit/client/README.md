@@ -14,7 +14,7 @@ output in Docker volumes.
 ./cargo test                   # unit tests
 tests/run-e2e.sh               # end to end: the real lobby, two visit-clients, two stand-in pages, in a container
                                # (tests/e2e.py BIN OTHER_BIN runs B on another build: two versions together)
-tests/run-browser.sh           # visit.js in two headless Chromes: knock, walk with WASD, reload, leave
+tests/run-browser.sh           # visit.js in two headless Chromes: knock, walk with WASD, reload, leave; video and a three.js scene
 tests/perf/run-perf.sh         # performance under simulated networks (netem), in containers: a table against targets
 ```
 
@@ -31,4 +31,4 @@ Releases are built for every platform by `../../.github/workflows/release.yml`, 
 | `src/lobby.rs` | the lobby session (`basedverse-lobby/2`): reconnecting and resuming |
 | `src/link.rs` | the links: dialling, admitting, video, inputs, bitrate, the grace period |
 | `src/frames.rs` | framing for control messages and video |
-| `web/visit.js` | the library: the lobby's state and actions, the host hooks, WebCodecs, input, `Visit.walk`, `Visit.panel` |
+| `web/visit.js` | the library: the lobby's state and actions, the host hooks, WebCodecs, scenes (a three.js host's, read and drawn), input, `Visit.walk`, `Visit.panel`, `Visit.stage` |

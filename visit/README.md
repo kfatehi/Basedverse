@@ -1,10 +1,11 @@
 # Visit — walk around each other's workrooms
 
-**Status: built and tested on one machine (visit-client, visit.js, the lobby's version 2), and the live lobby speaks version 2. Not yet between two machines over the internet.**
+**Status: built and tested (visit-client, visit.js, the lobby's version 2), the live lobby speaks version 2, and workrooms have visited each other between two machines over the internet.**
 
 Everyone builds their own workroom, in their own engine, and Visit lets you walk around each other's
 with WASD and the mouse. Your inputs go to the host's sim; the host's sim renders its room from where you
-stand and streams it back as video. Nothing about a room is shared but that, so the only thing everyone
+stand and streams it back as video, or, if its room is made with three.js, sends you its scene (then only
+what changes) and your browser draws it. Nothing about a room is shared but that, so the only thing everyone
 agrees on is a thin interface: three hooks a host implements (`spawn`, `move`, `render`), and two shared
 pieces everyone drops in unchanged.
 
@@ -28,8 +29,8 @@ visit/
     build            a static binary into client/bin/ (Linux, in Docker)
     cargo            cargo in Docker, for working on visit-client
     web/visit.js     the library
-    tests/           the end-to-end and browser tests (with ../lobby/'s server), and room.html, a small
-                     workroom to try it with
+    tests/           the end-to-end and browser tests (with ../lobby/'s server), perf/ (visits through
+                     simulated networks), and room.html, a small workroom to try it with
 ```
 
 ## The pieces
@@ -40,7 +41,8 @@ visit/
   they cannot), and the visits. It survives page reloads, listens on 127.0.0.1 only, and takes a token.
 - **visit.js**: the library in the workroom's page, served by its own visit-client (so the two always
   match). It talks only to that visit-client: it calls the host hooks, encodes and decodes the video
-  (WebCodecs), and captures the visitor's input. Optionally, a ready-made lobby panel.
+  (WebCodecs), draws a three.js host's scene, and captures the visitor's input. Optionally, a ready-made
+  lobby panel (`Visit.panel`) and a stage for the room you are visiting (`Visit.stage`).
 - **The lobby** ([../lobby/](../lobby/)): presence, knocks, and introducing visit-clients to each other.
   It speaks version 1 (browser sims streaming their own view to a group, as today) and version 2
   (visit-clients) side by side.
@@ -56,5 +58,5 @@ visit/
 - [x] A first workroom running it.
 - [ ] A relay of our own beside the lobby. Until there is one, links that cannot go direct use iroh's public
       relays (still encrypted end to end).
-- [ ] A visit between two machines over the internet.
-- [ ] A second workroom.
+- [x] A visit between two machines over the internet.
+- [x] A second workroom.

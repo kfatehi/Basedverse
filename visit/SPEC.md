@@ -1,13 +1,14 @@
 # Visit — the specification
 
 **Status: built** (visit-client and visit.js in `client/`, the lobby's version 2 in `../lobby/server/`) and
-tested on one machine; not yet between two machines over the internet. This is the contract they are built
+tested, on one machine and between two machines over the internet. This is the contract they are built
 to. Where it says MUST, SHOULD or MAY, those words mean what RFC 2119 says they mean.
 
 Visit lets the people running agent-office sims ("workrooms") walk around each other's rooms. A visitor
 moves with WASD and the mouse; the host's sim renders what the visitor sees, from where the visitor
-stands, and streams it back as video. Nothing about a room travels but video one way and inputs the
-other, so every sim draws its room its own way, in its own engine.
+stands, and streams it back as video, or, if its room is made with three.js, sends its scene and then what
+changes, and the visitor's page draws it (8.3). Nothing about a room travels but that one way and inputs
+the other, so every sim draws its room its own way, in its own engine.
 
 If you are integrating Visit into a sim, read [INTEGRATING.md](INTEGRATING.md) instead: it is the
 how-to. This file is the contract behind it, for whoever builds or changes the shared pieces.
@@ -31,10 +32,10 @@ how-to. This file is the contract behind it, for whoever builds or changes the s
 | piece | what it is | who provides it |
 |---|---|---|
 | **visit-client** | the local client: a Rust binary, one per sim per machine. Owns **all** networking: the lobby session, the links to other visit-clients, visit state. Listens on 127.0.0.1 only. | shared, identical for everyone |
-| **visit.js** | the library, in the sim's page. Talks only to its own visit-client. Calls the sim's host hooks, encodes and decodes video (WebCodecs), captures input. Served by the visit-client itself, so the two always match. | shared, identical for everyone |
+| **visit.js** | the library, in the sim's page. Talks only to its own visit-client. Calls the sim's host hooks, encodes and decodes video (WebCodecs), reads a three.js host's scene and draws it for its visitors (8.3), captures input. Served by the visit-client itself, so the two always match. | shared, identical for everyone |
 | **lobby server** | presence, knocks, and introducing visit-clients to each other (`basedverse-lobby/2`, section 6). | shared, one server |
-| **relay** | an [iroh](https://iroh.computer) relay, for links between machines that cannot reach each other directly. Encrypted end to end; it cannot read what it carries. | shared, beside the lobby |
-| **the sim** | its own room and engine; a launcher step; three host hooks (`spawn`, `move`, `render`); its UI (or the library's default panel). | each sim |
+| **relay** | an [iroh](https://iroh.computer) relay, for links between machines that cannot reach each other directly. Encrypted end to end; it cannot read what it carries. | shared: the ones the lobby names (`relays` in its welcome); until one runs beside the lobby, iroh's public relays |
+| **the sim** | its own room and engine; a launcher step; three host hooks (`spawn`, `move`, `render`), and its scene if it is made with three.js; its UI (or the library's default panel and stage). | each sim |
 
 The rule that holds it together: **a page only ever talks to its own visit-client**, and **only
 visit-clients talk to each other**. A page reload breaks nothing but the localhost hop.
@@ -115,7 +116,7 @@ A flag wins over its environment variable, and a variable set but blank counts a
 On start it prints **one JSON line** to stdout once it listens, then logs to stderr:
 
 ```json
-{"ready": true, "port": 7401, "version": "0.3.0", "proto": "basedverse-visit-local/1"}
+{"ready": true, "port": 7401, "version": "0.4.0", "proto": "basedverse-visit-local/1"}
 ```
 
 Exit codes: 0 asked to stop (SIGINT/SIGTERM, or idle-exit); 2 bad flags; 3 the port is taken; 4 the
@@ -148,7 +149,7 @@ lobby refused it for good (`proto_unsupported`, `name_invalid`).
 | request | auth | answer |
 |---|---|---|
 | `GET /visit.js` | none | the library (JavaScript), the version built into this binary. `Access-Control-Allow-Origin: *` |
-| `GET /health` | none | `{"ok": true, "version": "0.3.0"}` |
+| `GET /health` | none | `{"ok": true, "version": "0.4.0"}` |
 | `GET /ws` (WebSocket upgrade) | `hello.token` (5.1) | the page connection |
 | anything else | — | 404 |
 
@@ -661,6 +662,7 @@ match never opens: the visit ends `"link_failed"`.
 - **Audio.** None in version 1.
 - **The version-1 group view.** Version-1 sims stream their own view to a group; whether version 2 keeps a
   "just watch" mode (a visit that never moves from its spawn) or retires it.
-- **The relay's deployment.** It runs beside the lobby on the same server; the details (ports, TLS through
-  Caddy) belong to the build.
+- **The relay's deployment.** It is to run beside the lobby on the same server; the details (ports, TLS
+  through Caddy) belong to the build. Until it does, the lobby names no relays and links use iroh's public
+  ones.
 - **Touch and gamepads.** Input is keyboard and mouse only for now.
