@@ -319,6 +319,10 @@
       for (const g of usedGeos) again(this.geos, g, Object.values(g.attributes || {}).map(a => a.version).join() + "|" + (g.index ? g.index.version : ""), 250, "geometry");
       if (root.background && root.background.isTexture) usedTexs.add(root.background);
       for (const t of usedTexs) again(this.texs, t, t.version, 500, "texture");
+      // What the scene no longer uses, a visitor's page lets go of (_sceneGc): it counts as unsent again, and
+      // goes with whatever uses it next.
+      const used = new Set([...usedMats, ...usedGeos, ...usedTexs].map(x => x.uuid));
+      for (const uuid of this.sent) if (!used.has(uuid)) this.sent.delete(uuid);
       for (const r of assigns) {
         for (const m of list(r.o.material)) if (!this.sent.has(m.uuid)) res.set(m.uuid, ["material", m]);
         if (r.o.geometry && !this.sent.has(r.o.geometry.uuid)) res.set(r.o.geometry.uuid, ["geometry", r.o.geometry]);
@@ -348,9 +352,14 @@
       return { edit: Object.keys(edit).length > 1 ? edit : null, moved };
     }
 
-    // An added object, whole: its JSON (with everything it is made of), each object's number, its lights' targets.
+    // An added object: its JSON (with what it is made of that its visitors do not have yet: the rest they know by
+    // uuid), each object's number, its lights' targets.
     _added(r) {
       const json = r.o.toJSON(), ids = [];
+      for (const k of ["geometries", "materials", "textures"]) if (json[k]) json[k] = json[k].filter(x => !this.sent.has(x.uuid));
+      const images = new Set((json.textures || []).map(t => t.image)), shapes = new Set((json.geometries || []).flatMap(g => list(g.shapes)));
+      if (json.images) json.images = json.images.filter(x => images.has(x.uuid));
+      if (json.shapes) json.shapes = json.shapes.filter(x => shapes.has(x.uuid));
       r.o.traverse(o => { const x = this.objs.get(o.uuid); if (x) ids.push([o.uuid, x.idx]); });
       for (const k of ["geometries", "materials", "textures", "images"]) for (const x of json[k] || []) this.sent.add(x.uuid);
       const parent = this.objs.get(r.parent);
@@ -831,7 +840,7 @@
       for (const a of Array.isArray(e.add) ? e.add : []) {
         if (!isObj(a)) continue;
         try {
-          const o = L.parse(cleanScene(a.json, s.budget));
+          const o = this._sceneParse(s, cleanScene(a.json, s.budget));
           this._sceneAdopt(s, o);
           const byUuid = new Map();
           o.traverse(c => byUuid.set(c.uuid, c));
@@ -863,6 +872,14 @@
         else if (isObj(fog) && Number.isFinite(fog.color)) s.root.fog = fog.type === "FogExp2" ? new T.FogExp2(fog.color, Number(fog.density) || 0.00025) : new T.Fog(fog.color, Number(fog.near) || 1, Number(fog.far) || 1000);
       }
       this._sceneOwn(s);
+    }
+
+    // An added object, read with the geometries, materials and textures this scene already has: the host sends
+    // each once, and an added object names the ones sent before only by uuid.
+    _sceneParse(s, json) {
+      const L = s.loader, P = Object.getPrototypeOf(L), had = { parseGeometries: s.geos, parseTextures: s.texs, parseMaterials: s.mats };
+      for (const [k, map] of Object.entries(had)) L[k] = (...a) => Object.assign(Object.fromEntries(map), P[k].apply(L, a));
+      try { return L.parse(json); } finally { for (const k of Object.keys(had)) delete L[k]; }
     }
 
     // Geometries, materials and textures sent again (changed in place) or new: one the scene has takes the new
