@@ -434,7 +434,8 @@
       this.sent = new Set(["geometries", "materials", "textures", "images"].flatMap(k => (json[k] || []).map(x => x.uuid)));
       return { type: "scene", three: String(three.REVISION), json, ids: [...this.objs.values()].map(r => [r.o.uuid, r.idx]), targets: this.targets(root),
         renderer: rendererProps(renderer, three), fov: Number(hooks.fov) || 70, near: Number(this.cfg.near) || 0.1, far: Number(this.cfg.far) || 1000,
-        walk: w && Number(w.speed) > 0 ? { speed: Number(w.speed) } : null, yaw0: h.yaw0, pose: h.pose };
+        walk: w && Number(w.speed) > 0 ? { speed: Number(w.speed) } : null, yaw0: h.yaw0, pose: h.pose,
+        plot: hooks.plot ? { center: hooks.plot.center.map(Number), size: hooks.plot.size.map(Number) } : null, unit: Number(hooks.unit) > 0 ? Number(hooks.unit) : 1 };
     }
   }
 
@@ -452,10 +453,16 @@
       this.guests = [];        // [{ key, name }]: who walks in through the open door
       this.knocks = [];        // on your door: { id, from, message, until }
       this.knocking = [];      // yours, waiting: { id, to }
+      this.layout = [];        // where you have put friends' plots in your world: [{ key, x, z, turn }]
+      this.edges = [];         // sides of your plot agreed with friends': [{ key, name, mine, theirs, along, size }]
+      this.edgeProposals = []; // edges friends propose, waiting for you: [{ key, name, mine, theirs, along, size }]
+      this.watchers = [];      // who watches your plot (your guests, with your door open): [{ id, visitor, inside }]
       this.visiting = null;    // { id, host, paused }
       this.visitors = [];      // { id, visitor, pose }
       this._on = {};
-      this._hosted = new Map();   // channel -> a visit to this office
+      this._hosted = new Map();   // channel -> a visit to this office (or a watch of its plot)
+      this._watches = new Map();  // channel -> a plot this office watches: { id, channel, host, inside, scene, ... }
+      this._world = null;         // v.world(): friends' plots drawn around this room
       this._hooks = null;         // until visit.host(): this office is not in the lobby to be visited, nor knocks
       // A visitor's numbers, about once a second (the "stats" event): input to screen (drawn here) and the
       // link's round trip in ms, the link's path ("direct" or "relay"), frames drawn a second. null while not
@@ -530,9 +537,13 @@
       this.status = m.status; this.maxVisitors = m.max_visitors;
       this.key = typeof m.key === "string" ? m.key : null;
       this._guests(m);
+      this.layout = Array.isArray(m.layout) ? m.layout : [];
+      this.edges = Array.isArray(m.edges) ? m.edges : [];
+      this.edgeProposals = [];
       this.knocks = []; this.knocking = [];
       for (const v of m.visits || []) this._started(v);
       if (this._hooks) this._sendHost();   // a visit-client that came back: this page hosts, again
+      if (this._world) this._send({ type: "world", on: true });
       this._changed();
     }
 
@@ -565,17 +576,30 @@
           break;
         }
         case "guests": this._guests(m); break;
+        case "layout": this.layout = Array.isArray(m.layout) ? m.layout : []; break;
+        case "edges": this.edges = Array.isArray(m.edges) ? m.edges : []; this.edgeProposals = this.edgeProposals.filter(p => !this.edges.some(e => e.key === p.key)); break;
+        case "edge_proposed": {
+          const p = { key: String(m.key), name: String(m.name || ""), mine: m.mine, theirs: m.theirs, along: Number(m.along) || 0, size: m.size };
+          this.edgeProposals = this.edgeProposals.filter(x => x.key !== p.key).concat([p]);
+          this._emit("edge_proposed", p);
+          break;
+        }
+        case "edge_declined": this._emit("edge_declined", { key: m.key }); break;
+        case "enter": this._hostEnter(m); break;
+        case "exit": this._hostExit(m); break;
+        case "enter_refused": this._enterRefused(m); break;
         case "visit_started": this._started(m); break;
         case "visit_ended": this._ended(m); break;
         case "host_paused": case "host_resumed":
           if (this.visiting && this._viewer && this._viewer.channel === m.channel) this.visiting.paused = m.type === "host_paused";
+          if (this._watches.has(m.channel)) this._watches.get(m.channel).paused = m.type === "host_paused";
           break;
         case "link_stats":
           if (this._viewer && this._viewer.channel === m.channel) { this.stats.rtt = Number(m.rtt_ms); this.stats.path = String(m.path); }
           break;
         case "keyframe": case "input": case "scene_resync": case "point": this._hostMessage(m); break;
         case "scene": this._sceneEdit(m); break;
-        case "scene_lost": if (this._viewer && this._viewer.channel === m.channel) this._sceneResync(this._viewer); break;
+        case "scene_lost": { const w = this._viewing(m.channel); if (w) this._sceneResync(w); break; }
         case "error": this._emit("error", { code: m.code, message: m.message, ref: m.ref }); break;
       }
     }
@@ -599,6 +623,27 @@
     addGuest(key, name = "") { this._send({ type: "guest_add", key, name }); }
     removeGuest(key) { this._send({ type: "guest_remove", key }); }
     isGuest(key) { return !!key && this.guests.some(g => g.key === key); }
+    // Your world's layout (kept by visit-client): where a friend's plot sits, its centre in your room's units and
+    // 0-3 quarter turns; unplaced, it goes in a ring round yours by itself. And edges agreed with friends (both
+    // must): your side ("north" -z, "east" +x, "south" +z, "west" -x) to theirs, their middle `along` metres from
+    // yours (along your side, turning left); while agreed, their plot sits there, for both of you.
+    place(key, { x, z, turn = 0 }) { this._send({ type: "place", key, x, z, turn }); }
+    unplace(key) { this._send({ type: "unplace", key }); }
+    proposeEdge(key, { mine, theirs, along = 0 }) { this._send({ type: "edge_propose", key, mine, theirs, along, size: this._plotMetres() }); }
+    acceptEdge(key) { this._send({ type: "edge_accept", key, size: this._plotMetres() }); this.edgeProposals = this.edgeProposals.filter(p => p.key !== key); this._changed(); }
+    declineEdge(key) { this._send({ type: "edge_decline", key }); this.edgeProposals = this.edgeProposals.filter(p => p.key !== key); this._changed(); }
+    removeEdge(key) { this._send({ type: "edge_remove", key }); }
+    // This room's plot ({ center, size } in its units: as host() said, or what its scene covers), and in metres.
+    _plot() {
+      const hk = this._hooks;
+      if (!hk) return null;
+      if (this._plotFrom !== hk) { this._plotFrom = hk; this._plotIs = plotOf(hk.plot, hk.scene.root, hk.scene.three); }
+      return this._plotIs;
+    }
+    _unit() { return this._hooks && Number(this._hooks.unit) > 0 ? Number(this._hooks.unit) : 1; }
+    _plotMetres() { const p = this._plot(); return p ? p.size.map(x => x * this._unit()) : [10, 10]; }
+    // Your friends' plots around your room, and walking onto them (../../WORLD.md): see World.
+    world(opts = {}) { if (this._world) this._world.release(); return new World(this, opts); }
     _guests(m) {
       this.door = m.door === "closed" ? "closed" : "open";
       this.guests = (Array.isArray(m.guests) ? m.guests : []).map(g => ({ key: String(g.key), name: String(g.name || "") }));
@@ -607,14 +652,21 @@
     // ---------- visits ----------
     _started(m) {
       if (m.role === "host") {
-        const h = { id: m.id, channel: m.channel, visitor: m.peer || {}, guest: m.guest === true, pose: null, yaw0: 0, input: null, inputAt: 0,
-          keyNext: true, fails: 0, sceneSent: false, posed: null };
-        if (m.state && m.state.pose) { h.pose = m.state.pose; h.yaw0 = m.state.yaw0 || 0; }   // back after this page reloaded
+        // A watcher (../../WORLD.md) sees this room's plot from outside it: sent the scene, never spawned, until it
+        // steps in (`enter`).
+        const h = { id: m.id, channel: m.channel, visitor: m.peer || {}, guest: m.guest === true, watch: m.watch === true, inside: m.watch !== true || m.inside === true,
+          pose: null, yaw0: 0, input: null, inputAt: 0, keyNext: true, fails: 0, sceneSent: false, posed: null };
+        if (m.state && m.state.pose && h.inside) { h.pose = m.state.pose; h.yaw0 = m.state.yaw0 || 0; }   // back after this page reloaded
         this._hosted.set(m.channel, h);
-        this._spawn(h);
+        if (h.inside) this._spawn(h);
+      } else if (m.watch) {
+        const w = { id: m.id, channel: m.channel, host: m.peer || {}, watch: true, inside: false, paused: false, count: 0, scene: null, sceneQ: null,
+          since: performance.now(), loading: false, failed: false };
+        this._watches.set(m.channel, w);
+        if (m.inside) this._send({ type: "exit", channel: m.channel });   // this page lost where it was: it starts at home
       } else {
         this.visiting = { id: m.id, host: m.peer || {}, paused: false };
-        this._viewer = { channel: m.channel, count: 0, scene: null, sceneQ: null, since: performance.now(), loading: false, failed: false };
+        this._viewer = { id: m.id, channel: m.channel, count: 0, scene: null, sceneQ: null, since: performance.now(), loading: false, failed: false };
         this._placeholder();
       }
       this._visitorsList();
@@ -624,6 +676,8 @@
     _ended(m) {
       const h = this._hosted.get(m.channel);
       if (h && h.id === m.id) this._hosted.delete(m.channel);
+      const w = this._watches.get(m.channel);
+      if (w && w.id === m.id) { this._sceneDrop(w); this._watches.delete(m.channel); }
       if (this.visiting && this.visiting.id === m.id) { this._dropViewer(); this.visiting = null; }
       this._visitorsList();
       this._emit("visit_ended", { id: m.id, reason: m.reason });
@@ -631,12 +685,18 @@
 
     _dropAll() {
       this._hosted.clear();
+      for (const w of this._watches.values()) this._sceneDrop(w);
+      this._watches.clear();
       this._dropViewer();
       this.visiting = null;
       this._visitorsList();
     }
 
-    _visitorsList() { this.visitors = [...this._hosted.values()].map(h => ({ id: h.id, visitor: h.visitor, guest: h.guest, pose: h.pose })); }
+    _visitorsList() {
+      const hs = [...this._hosted.values()];
+      this.visitors = hs.filter(h => h.inside).map(h => ({ id: h.id, visitor: h.visitor, guest: h.guest, pose: h.pose }));
+      this.watchers = hs.filter(h => h.watch).map(h => ({ id: h.id, visitor: h.visitor, inside: h.inside }));
+    }
 
     // ---------- hosting ----------
     // `scene`: { root, three, renderer, near, far }, the room's three.js scene (or the part of it to share), the
@@ -652,6 +712,12 @@
       }
       const revs = Object.keys(THREE_FILES);
       if (!THREE_FILES[String(sc.three.REVISION)]) throw new Error(`visit.host: three.js r${sc.three.REVISION} is not one this visit.js knows (r${revs[0]} to r${revs[revs.length - 1]})`);
+      // `plot` (optional): { center: [x, z], size: [w, d] }, the rectangle of this room's floor that is its land in a
+      // world (../../WORLD.md), in its scene's units; `unit`: how many metres one of them is (1).
+      const pl = hooks.plot;
+      if (pl != null && !(isObj(pl) && Array.isArray(pl.center) && Array.isArray(pl.size) && pl.center.length === 2 && pl.size.length === 2
+        && [...pl.center, ...pl.size].every(Number.isFinite) && pl.size[0] > 0 && pl.size[1] > 0)) throw new Error("visit.host: plot is { center: [x, z], size: [w, d] }");
+      if (hooks.unit != null && !(Number(hooks.unit) > 0)) throw new Error("visit.host: unit is how many metres one of the scene's units is (a number above 0)");
       this._hooks = hooks;
       this._sync = null;
       for (const h of this._hosted.values()) { this._spawn(h); h.sceneSent = false; }
@@ -659,10 +725,28 @@
     }
     _sendHost() { this._send({ type: "host", three: String(this._hooks.scene.three.REVISION) }); }
 
-    _spawn(h) {
+    // A watcher stepping in is spawned where it stepped (`at`, in this room's terms; spawn may put it elsewhere), and
+    // its input's yaw is its look in this room's terms (yaw0 0): it walks in from a world, not from its arrival.
+    _spawn(h, at) {
       if (!this._hooks || h.pose) return;
-      try { h.pose = Object.assign({}, this._hooks.spawn(h.visitor)); h.yaw0 = h.pose.yaw || 0; }
+      try { h.pose = Object.assign({}, this._hooks.spawn(h.visitor, at ? { at } : {})); h.yaw0 = h.watch ? 0 : h.pose.yaw || 0; }
       catch (e) { console.error("visit: spawn threw", e); }
+    }
+
+    _hostEnter(m) {
+      const h = this._hosted.get(m.channel);
+      if (!h || !h.watch) return;
+      Object.assign(h, { inside: true, pose: null, input: null, keyNext: true, fails: 0 });
+      const at = isObj(m.pose) ? { x: Number(m.pose.x) || 0, y: Number(m.pose.y) || 0, z: Number(m.pose.z) || 0, yaw: Number(m.pose.yaw) || 0 } : null;
+      this._spawn(h, at);
+      this._visitorsList();
+    }
+
+    _hostExit(m) {
+      const h = this._hosted.get(m.channel);
+      if (!h || !h.watch) return;
+      Object.assign(h, { inside: false, pose: null, input: null });
+      this._visitorsList();
     }
 
     _hostMessage(m) {
@@ -688,7 +772,7 @@
     // Every SCENE_MS, for this room's visitors: what changed in its scene (one edit for them all), where its
     // moving things and each visitor are (a delta each), and the whole scene to any visitor starting.
     _sceneTick(now) {
-      const hs = [...this._hosted.values()].filter(h => h.pose);
+      const hs = [...this._hosted.values()].filter(h => h.pose || (h.watch && !h.inside));
       if (!hs.length || !this._hooks) { this._sync = null; return; }
       try {
         if (!this._sync || this._sync.cfg !== this._hooks.scene) {   // a new scene, or numbered anew: everyone gets it whole
@@ -701,7 +785,7 @@
         if (key) sync.keyAt = now;
         const body = sync.entries(moved), all = key || ready.some(h => h.keyNext) ? sync.entries(sync.dynamicRecs()) : null;
         for (const h of ready) {
-          const k = key || h.keyNext, p = h.pose, posed = [p.x, p.y, p.z, p.yaw, p.pitch, h.input && h.input.t].join();
+          const k = key || h.keyNext, p = h.pose, posed = p ? [p.x, p.y, p.z, p.yaw, p.pitch, h.input && h.input.t].join() : "-";
           if (k || body.n || posed !== h.posed) { this._sendDelta(h, k ? all : body, k, now); h.posed = posed; h.keyNext = false; }
         }
         for (const h of hs) if (!h.sceneSent) { this._sendScene([h], sync.snapshot(h, this._hooks)); h.sceneSent = true; h.keyNext = true; }
@@ -728,12 +812,12 @@
     }
 
     // A delta (SPEC 8.3): where the host has this visitor (and the input it got that far with), then objects'
-    // places; a key delta has everything that ever moved.
+    // places; a key delta has everything that ever moved. To a watcher not in the room, version 2: no pose of its.
     _sendDelta(h, body, key, now) {
       if (!this._ws || this._ws.readyState !== 1) return;
-      const buf = new Uint8Array(11 + 37 + body.bytes.byteLength), dv = new DataView(buf.buffer), p = h.pose;
+      const buf = new Uint8Array(11 + 37 + body.bytes.byteLength), dv = new DataView(buf.buffer), p = h.pose || { x: 0, y: 0, z: 0, yaw: 0, pitch: 0 };
       dv.setUint16(0, h.channel); dv.setUint8(2, key ? KEY : 0); dv.setBigUint64(3, BigInt(Math.round(now * 1000)));
-      dv.setUint8(11, 1);
+      dv.setUint8(11, h.pose ? 1 : 2);
       dv.setFloat64(12, h.input ? Number(h.input.t) || 0 : 0);
       dv.setFloat32(20, h.input ? now - h.inputAt : 0);
       [p.x, p.y, p.z, p.yaw, p.pitch].forEach((x, i) => dv.setFloat32(24 + 4 * i, Number(x) || 0));
@@ -742,21 +826,25 @@
       this._ws.send(buf);
     }
 
+    // The room visited, or a plot watched, on this channel.
+    _viewing(ch) { return this._viewer && this._viewer.channel === ch ? this._viewer : this._watches.get(ch) || null; }
+    _live(w) { return this._viewer === w || this._watches.get(w.channel) === w; }
+
     // Edits apply one after another, in order (the first, the whole scene, waits for three.js to load).
     _sceneEdit(m) {
-      const w = this._viewer;
-      if (!w || w.channel !== m.channel || !isObj(m.edit)) return;
+      const w = this._viewing(m.channel);
+      if (!w || !isObj(m.edit)) return;
       const whole = m.edit.type === "scene";
       if (whole) w.loading = true;
-      w.sceneQ = (w.sceneQ || Promise.resolve()).then(() => this._viewer !== w ? null : whole ? this._sceneStart(w, m.edit) : this._sceneApply(w, m.edit))
+      w.sceneQ = (w.sceneQ || Promise.resolve()).then(() => !this._live(w) ? null : whole ? (w.watch ? this._watchStart(w, m.edit) : this._sceneStart(w, m.edit)) : this._sceneApply(w, m.edit))
         .finally(() => { if (whole) w.loading = false; })
         .catch(e => {
-          if (this._viewer !== w) return;
+          if (!this._live(w)) return;
           if (whole) {   // this page cannot draw it (three.js would not load, say): it says so where the room would be
             console.warn("visit: cannot draw this room's scene", e);
             w.failed = true;
             this._sceneDrop(w);
-            this._placeholder(`cannot draw ${(this.visiting && this.visiting.host.name) || "this"}'s room: ${e.message || e}`);
+            if (!w.watch) this._placeholder(`cannot draw ${(this.visiting && this.visiting.host.name) || "this"}'s room: ${e.message || e}`);
             this._emit("error", { code: "scene", message: String(e.message || e) });
           } else { console.warn("visit: a scene edit that did not apply; asking for the whole scene again", e); this._sceneResync(w); }
         });
@@ -766,31 +854,56 @@
     _sceneResync(w) {
       const wait = 2000 - (performance.now() - (w.resyncAt || -1e9));
       if (wait > 0) {
-        if (!w.resyncTimer) w.resyncTimer = setTimeout(() => { w.resyncTimer = 0; if (this._viewer === w) this._sceneResync(w); }, wait);
+        if (!w.resyncTimer) w.resyncTimer = setTimeout(() => { w.resyncTimer = 0; if (this._live(w)) this._sceneResync(w); }, wait);
         return;
       }
       w.resyncAt = performance.now();
       this._send({ type: "scene_resync", channel: w.channel });
     }
 
-    async _sceneStart(w, e) {
-      const T = await loadThree(e.three, this._threeBase);
-      if (this._viewer !== w) return;
-      this._sceneDrop(w);
+    // A host's whole scene, read (as data: cleanScene) with three.js release T: the host's own for a visit, this
+    // page's for a plot it watches. `ownId`: the visit, whose body the host draws for others, not for these eyes.
+    _sceneRead(T, e, ownId) {
       const budget = { vertices: 0, objects: 0 }, loader = new T.ObjectLoader();
       let root = loader.parse(cleanScene(e.json, budget));
       if (!root.isScene) { const sc = new T.Scene(); sc.add(root); root = sc; }
       const pose = isObj(e.pose) ? e.pose : {}, num = (x, d) => Number.isFinite(Number(x)) ? Number(x) : d;
-      const s = { T, loader, budget, root, byIdx: new Map(), idxOf: new Map(), geos: new Map(), mats: new Map(), texs: new Map(), samples: new Map(),
+      const s = { T, loader, budget, root, ownId, byIdx: new Map(), idxOf: new Map(), geos: new Map(), mats: new Map(), texs: new Map(), samples: new Map(),
         offs: [], offset: null, pose: { x: num(pose.x, 0), y: num(pose.y, 1.6), z: num(pose.z, 0) }, yaw0: num(e.yaw0, 0),
         walk: isObj(e.walk) && num(e.walk.speed, 0) > 0 ? { speed: Math.min(50, num(e.walk.speed, 2.5)) } : null,
-        hist: [], vis: { x: 0, y: 0, z: 0 }, waitKey: true, own: [], last: 0, gcAt: performance.now(), q: new T.Quaternion(), v: new T.Vector3() };
+        hist: [], vis: { x: 0, y: 0, z: 0 }, waitKey: true, own: [], last: 0, gcAt: performance.now(), q: new T.Quaternion(), v: new T.Vector3(), relight: null };
       this._sceneAdopt(s, root);
       const byUuid = new Map();
       root.traverse(o => byUuid.set(o.uuid, o));
       for (const [uuid, idx] of Array.isArray(e.ids) ? e.ids : []) { const o = byUuid.get(uuid); if (o) { s.byIdx.set(idx, o); s.idxOf.set(o, idx); } }
       s.byIdx.set(0, root);
       this._sceneTargets(s, e.targets);
+      return s;
+    }
+
+    // A plot watched (../../WORLD.md), read with this page's own three.js, to be drawn in its world (World.render)
+    // where its layout puts it: its plot (or what its scene covers) and its units, lit as this page lights.
+    async _watchStart(w, e) {
+      const hk = this._hooks;
+      if (!hk) throw new Error("a plot is drawn with this page's own three.js: v.host first");
+      this._sceneDrop(w);
+      const T = hk.scene.three, s = this._sceneRead(T, e, w.id);
+      s.plot = plotOf(e.plot, s.root, T);
+      s.unit = Number(e.unit) > 0 ? Math.min(1000, Number(e.unit)) : 1;
+      s.pose = { x: 0, y: 0, z: 0 }; s.yaw0 = 0; s.hostPose = null;
+      s.relight = [legacyLights(Number(e.three), isObj(e.renderer) ? e.renderer : null), legacyLights(Number(T.REVISION), hk.scene.renderer)];
+      relight(s.root, ...s.relight);
+      this._sceneOwn(s);
+      w.scene = s;
+      this._send({ type: "keyframe", channel: w.channel });   // where its moving things are now
+      this._changed();
+    }
+
+    async _sceneStart(w, e) {
+      const T = await loadThree(e.three, this._threeBase);
+      if (this._viewer !== w) return;
+      this._sceneDrop(w);
+      const s = this._sceneRead(T, e, w.id), num = (x, d) => Number.isFinite(Number(x)) ? Number(x) : d;
       // Drawn as the host draws it: its renderer's settings, its camera's field of view and range.
       s.canvas = document.createElement("canvas");
       s.renderer = new T.WebGLRenderer({ canvas: s.canvas, antialias: true });
@@ -854,9 +967,9 @@
     }
 
     // The visitor's own body, which the host draws in its room for everyone else: not drawn in its own eyes
-    // (the host marks it with userData.visitor = the visit's id).
+    // (the host marks it with userData.visitor = the visit's id). In a world, this page draws its own instead.
     _sceneOwn(s) {
-      const id = this.visiting && this.visiting.id;
+      const id = s.ownId;
       s.own = [];
       s.root.traverse(o => { if (id && o.userData && o.userData.visitor === id) s.own.push(o); });
     }
@@ -881,6 +994,7 @@
         if (!isObj(a)) continue;
         try {
           const o = L.parse(cleanScene(a.json, s.budget));
+          if (s.relight) relight(o, ...s.relight);
           this._sceneAdopt(s, o);
           const byUuid = new Map();
           o.traverse(c => byUuid.set(c.uuid, c));
@@ -941,8 +1055,8 @@
     // A delta: where the host has this visitor, and its moving things' places, each kept with the host's time
     // to be shown INTERP_MS later, between two of them.
     _sceneDelta(w, dv, key) {
-      const s = w.scene;
-      if (!s || dv.byteLength < 48 || dv.getUint8(11) !== 1) return;
+      const s = w.scene, ver = dv.byteLength >= 48 ? dv.getUint8(11) : 0;
+      if (!s || (ver !== 1 && ver !== 2)) return;   // 2: a watcher's, not in the room: no pose of its
       if (s.waitKey && !key) return;
       if (key) s.waitKey = false;
       const ts = Number(dv.getBigUint64(3)) / 1000, now = performance.now();
@@ -951,7 +1065,10 @@
       s.offs.push([now, now - ts]);
       while (s.offs.length > 1 && now - s.offs[0][0] > 2000) s.offs.shift();
       s.offset = s.offs.reduce((a, x) => Math.min(a, x[1]), Infinity);
-      this._sceneReconcile(s, dv.getFloat64(12), dv.getFloat32(20), dv.getFloat32(24), dv.getFloat32(28), dv.getFloat32(32), now);
+      if (ver === 1 && (!w.watch || w.inside)) {
+        this._sceneReconcile(s, dv.getFloat64(12), dv.getFloat32(20), dv.getFloat32(24), dv.getFloat32(28), dv.getFloat32(32), now);
+        if (w.watch) s.hostPose = { x: dv.getFloat32(24), y: dv.getFloat32(28), z: dv.getFloat32(32) };
+      }
       const n = dv.getUint32(44);
       let at = 48;
       for (let i = 0; i < n && at + 33 <= dv.byteLength; i++) {
@@ -1078,7 +1195,9 @@
       if (!s) return;
       w.scene = null;
       cancelAnimationFrame(s.raf);
+      if (this._world) this._world._forget(w);
       for (const map of [s.geos, s.mats, s.texs]) for (const x of map.values()) { try { x.dispose(); } catch (e) { /* gone */ } }
+      if (!s.renderer) return;   // a plot watched: drawn by the world, with this page's renderer
       try { s.renderer.dispose(); s.renderer.forceContextLoss(); } catch (e) { /* gone */ }
       if (this._view && this._view.gl === s.canvas) this._view.detach(); else s.canvas.remove();
     }
@@ -1096,8 +1215,9 @@
         this.stats.fps = this._viewer.count; this._viewer.count = 0;
         this._emit("stats", this.stats);
       }
+      for (const w of this._watches.values()) if (!w.scene && !w.loading && !w.failed && now - (w.askedAt || w.since) > 3000) { w.askedAt = now; this._sceneResync(w); }
       if (!this._hooks || !this._hosted.size) return;
-      for (const h of [...this._hosted.values()]) this._step(h, now);
+      for (const h of [...this._hosted.values()]) if (h.inside) this._step(h, now);
       if (now - (this._sceneAt || 0) >= SCENE_MS - 2) { this._sceneAt = now; this._sceneTick(now); }
       this._visitorsList();
     }
@@ -1281,12 +1401,20 @@
         run: k("ShiftLeft") || k("ShiftRight"), yaw: v.yaw, pitch: v.pitch, t: now });
     }
 
-    // A delta of the scene of the room visited (SPEC 5.4).
+    // A delta of the scene of the room visited, or of a plot watched (SPEC 5.4).
     _frame(buf) {
-      const w = this._viewer;
-      if (!w || buf.byteLength < 11) return;
-      const dv = new DataView(buf);
-      if (dv.getUint16(0) === w.channel) this._sceneDelta(w, dv, (dv.getUint8(2) & KEY) !== 0);
+      if (buf.byteLength < 11) return;
+      const dv = new DataView(buf), w = this._viewing(dv.getUint16(0));
+      if (w) this._sceneDelta(w, dv, (dv.getUint8(2) & KEY) !== 0);
+    }
+
+    // Stepping onto a plot refused by its host (full), or ended by a visit elsewhere: back where this was before.
+    _enterRefused(m) {
+      const w = this._watches.get(m.channel);
+      if (!w) return;
+      w.inside = false;
+      if (this._world) this._world._refused(w, m.reason);
+      this._emit("error", { code: "enter_refused", message: `${w.host.name || "that"} plot: ${m.reason || "refused"}` });
     }
 
     _dropViewer() {
@@ -1317,6 +1445,301 @@
     if (ok(pose.x + dx, pose.z)) return Object.assign({}, pose, { x: pose.x + dx });
     if (ok(pose.x, pose.z + dz)) return Object.assign({}, pose, { z: pose.z + dz });
     return pose;
+  }
+
+  // ---------- the world (../../WORLD.md): friends' plots around your room, and walking onto them ----------
+  // A side of a plot, by where it faces in the plot's own terms; turning left a (radians) on the floor.
+  const SIDE_NORMAL = { north: [0, -1], east: [1, 0], south: [0, 1], west: [-1, 0] };
+  const turnXZ = (x, z, a) => [x * Math.cos(a) + z * Math.sin(a), -x * Math.sin(a) + z * Math.cos(a)];
+  const MAX_PLOT = 200, WORLD_GAP = 4, ENTER_WAIT = 3000;
+
+  // A plot as a host says it ({ center: [x, z], size: [w, d] }, in its scene's units), or, not said, what its
+  // scene covers (at most MAX_PLOT a side).
+  function plotOf(plot, root, T) {
+    if (isObj(plot) && Array.isArray(plot.center) && Array.isArray(plot.size)) {
+      const [cx, cz] = plot.center.map(Number), [w, d] = plot.size.map(Number);
+      if ([cx, cz, w, d].every(Number.isFinite) && w > 0 && d > 0) return { center: [cx, cz], size: [Math.min(w, 1e4), Math.min(d, 1e4)] };
+    }
+    if (!root || !T) return { center: [0, 0], size: [10, 10] };
+    const b = new T.Box3().setFromObject(root);
+    if (b.isEmpty()) return { center: [0, 0], size: [10, 10] };
+    return { center: [(b.min.x + b.max.x) / 2, (b.min.z + b.max.z) / 2], size: [Math.min(MAX_PLOT, b.max.x - b.min.x || 1), Math.min(MAX_PLOT, b.max.z - b.min.z || 1)] };
+  }
+
+  // Lights the old way (before r155, three.js multiplied lights by pi; r155 to r164 could still): from a renderer,
+  // or the settings a host sent of its own.
+  function legacyLights(rev, r) {
+    if (rev >= 165) return false;
+    if (r && typeof r.useLegacyLights === "boolean") return r.useLegacyLights;
+    if (r && typeof r.physicallyCorrectLights === "boolean") return !r.physicallyCorrectLights;
+    return rev < 155;
+  }
+  // A plot lit one way drawn in a page lit the other keeps roughly its look: its lights' strength times pi (or
+  // over it), and its bulbs no longer dimming with distance as the old way's did not. Approximate, on purpose.
+  function relight(root, theirsLegacy, mineLegacy) {
+    if (theirsLegacy === mineLegacy) return;
+    root.traverse(o => {
+      if (!o.isLight) return;
+      if (theirsLegacy) { o.intensity *= Math.PI; if (o.isPointLight || o.isSpotLight) o.decay = 0; } else o.intensity /= Math.PI;
+    });
+  }
+
+  const hashKey = k => { let h = 2166136261; for (let i = 0; i < k.length; i++) h = Math.imul(h ^ k.charCodeAt(i), 16777619); return h >>> 0; };
+  // A rectangle on the floor, [x0, z0, x1, z1]; plots are only ever turned by quarter turns, so it is one.
+  const overlap = (a, b) => a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+  const within = (r, x, z) => x > r[0] && x < r[2] && z > r[1] && z < r[3];
+
+  // Your world: your own room, at home in its own coordinates, and each plot you watch (a guest's, whose door is
+  // open to you) where your layout puts it: an edge you agreed, else where you placed it, else a ring round yours.
+  // You walk in your own room with your own walking; step onto a plot and you are in its owner's room (it moves
+  // you, by its walls), drawn there by your page as yourself; walk off it and you are home again.
+  //
+  //   const world = v.world({ scene, renderer });   // your whole scene, and its renderer (default: host()'s)
+  //   every frame:  const me = world.frame(dt, { x, y, z, yaw, pitch }, { forward, strafe, run });
+  //                 (where your page has its user, in its room's terms, and what they press; `me` is where they
+  //                 are now: at home as you said, or in a plot as its host has them, `me.in` = { key, name })
+  //                 world.render(camera);   (instead of renderer.render(scene, camera))
+  class World {
+    constructor(v, { scene, renderer, ground = 0x30363d, gap = WORLD_GAP, clipOwn = true } = {}) {
+      const hk = v._hooks;
+      if (!hk) throw new Error("visit.world: v.host first (the world is drawn with your three.js, round your plot)");
+      this.v = v; this.T = hk.scene.three;
+      this.scene = scene || (hk.scene.root.isScene ? hk.scene.root : null);
+      this.renderer = renderer || hk.scene.renderer;
+      if (!this.scene || !this.renderer) throw new Error("visit.world needs { scene, renderer }: your whole scene, and the renderer that draws it");
+      Object.assign(this, { gap: Number(gap) >= 0 ? Number(gap) : WORLD_GAP, clipOwn: clipOwn !== false, in: null, home: null, bounce: null,
+        refused: new Map(), holders: new Map(), sent: { at: 0, sig: "" }, look: { yaw: 0, pitch: 0 }, list: [], listAt: -1, plots: [] });
+      const T = this.T;
+      this.commons = new T.Scene();   // the ground between plots, and the outlines of agreed neighbours not seen
+      if (ground !== null) {
+        const g = new T.Mesh(new T.PlaneGeometry(4000, 4000), new T.MeshBasicMaterial({ color: ground }));
+        g.rotation.x = -Math.PI / 2; g.position.y = -0.02; g.name = "visit:commons";
+        this.commons.add(g);
+      }
+      this.outlines = new T.Group(); this.commons.add(this.outlines); this.outlineSig = "";
+      v._world = this;
+      v._send({ type: "world", on: true });
+    }
+
+    get inside() { return this.in != null; }
+
+    // Every plot, placed: watched ones (with their scenes), and agreed neighbours not watched (an outline).
+    _layout() {
+      const now = performance.now();
+      if (now - this.listAt < 4) return this.list;   // once a frame
+      const v = this.v, mine = v._plot(), unit = v._unit(), taken = [], out = [], wait = [];
+      taken.push([mine.center[0] - mine.size[0] / 2, mine.center[1] - mine.size[1] / 2, mine.center[0] + mine.size[0] / 2, mine.center[1] + mine.size[1] / 2]);
+      const xs = [];
+      for (const w of v._watches.values()) if (w.scene && w.host.key) xs.push({ key: w.host.key, name: w.host.name || "", w, plot: w.scene.plot, k: w.scene.unit / unit });
+      for (const e of v.edges) if (!xs.some(x => x.key === e.key)) xs.push({ key: e.key, name: e.name, w: null, plot: { center: [0, 0], size: e.size }, k: 1 / unit });
+      for (const x of xs) {
+        const edge = v.edges.find(e => e.key === x.key), placed = v.layout.find(p => p.key === x.key);
+        x.edge = !!edge;
+        x.at = edge ? this._fromEdge(edge, x, mine, unit) : placed ? { x: placed.x, z: placed.z, turn: placed.turn | 0 } : null;
+        if (x.at) { x.rect = this._rect(x); taken.push(x.rect); out.push(x); } else wait.push(x);
+      }
+      // The rest by themselves: round yours, each in the first of eight places (from one its key picks) it fits.
+      wait.sort((a, b) => a.key < b.key ? -1 : 1);
+      const R = Math.hypot(...mine.size) / 2;
+      for (const x of wait) {
+        const r = Math.hypot(...x.plot.size) * x.k / 2, first = hashKey(x.key) % 8;
+        for (let i = 0; i < 64; i++) {
+          const a = ((first + i) % 8) * Math.PI / 4, ring = Math.floor(i / 8), d = R + r + this.gap + ring * (2 * r + this.gap);
+          x.at = { x: mine.center[0] + Math.cos(a) * d, z: mine.center[1] - Math.sin(a) * d, turn: 0 };
+          x.rect = this._rect(x);
+          if (!taken.some(t => overlap(t, x.rect))) break;
+        }
+        taken.push(x.rect); out.push(x);
+      }
+      this.list = out; this.listAt = now;
+      this.plots = out.map(x => ({ key: x.key, name: x.name, at: x.at, rect: x.rect, seen: !!x.w, edge: x.edge, inside: !!(x.w && x.w.inside) }));
+      return out;
+    }
+
+    // Where an agreed edge puts a friend's plot: their side against yours, facing it, their middle `along` metres
+    // from yours (along your side, turning left).
+    _fromEdge(e, x, mine, unit) {
+      const n = SIDE_NORMAL[e.mine], nt = SIDE_NORMAL[e.theirs];
+      if (!n || !nt) return null;
+      let turn = 0;
+      for (; turn < 4; turn++) { const [a, b] = turnXZ(nt[0], nt[1], turn * Math.PI / 2); if (Math.abs(a + n[0]) < 1e-6 && Math.abs(b + n[1]) < 1e-6) break; }
+      const mid = [mine.center[0] + n[0] * mine.size[0] / 2, mine.center[1] + n[1] * mine.size[1] / 2];
+      const ext = (e.theirs === "east" || e.theirs === "west" ? x.plot.size[0] : x.plot.size[1]) * x.k / 2, t = turnXZ(n[0], n[1], Math.PI / 2), along = (Number(e.along) || 0) / unit;
+      return { x: mid[0] + n[0] * ext + t[0] * along, z: mid[1] + n[1] * ext + t[1] * along, turn: turn % 4 };
+    }
+
+    _rect(x) {
+      const odd = x.at.turn % 2 === 1, hw = (odd ? x.plot.size[1] : x.plot.size[0]) * x.k / 2, hd = (odd ? x.plot.size[0] : x.plot.size[1]) * x.k / 2;
+      return [x.at.x - hw, x.at.z - hd, x.at.x + hw, x.at.z + hd];
+    }
+
+    // A plot's scene in this world: turned and scaled into place (its middle where the layout says), its fog too.
+    _holder(x) {
+      const T = this.T, w = x.w, s = w.scene;
+      let h = this.holders.get(w.channel);
+      if (!h || h.s !== s) {
+        if (h && h.s.root.parent === h.place) h.place.remove(h.s.root);
+        const holder = new T.Scene(), place = new T.Group();
+        place.matrixAutoUpdate = false; holder.add(place); place.add(s.root);
+        h = { holder, place, s, sig: "", fog: undefined, inverse: new T.Matrix4(), planes: [] };
+        this.holders.set(w.channel, h);
+      }
+      const sig = [x.at.x, x.at.z, x.at.turn, x.k].join();
+      if (sig !== h.sig) {
+        h.sig = sig;
+        const m = new T.Matrix4().makeTranslation(x.at.x, 0, x.at.z).multiply(new T.Matrix4().makeRotationY(x.at.turn * Math.PI / 2))
+          .multiply(new T.Matrix4().makeScale(x.k, x.k, x.k)).multiply(new T.Matrix4().makeTranslation(-x.plot.center[0], 0, -x.plot.center[1]));
+        h.place.matrix.copy(m); h.place.matrixWorldNeedsUpdate = true;
+        h.inverse.copy(m).invert();
+        const [x0, z0, x1, z1] = x.rect;
+        h.planes = [new T.Plane(new T.Vector3(1, 0, 0), -x0), new T.Plane(new T.Vector3(-1, 0, 0), x1), new T.Plane(new T.Vector3(0, 0, 1), -z0), new T.Plane(new T.Vector3(0, 0, -1), z1)];
+      }
+      const f = s.root.fog;
+      if (h.fog !== f || h.fogK !== x.k) {
+        h.fog = f; h.fogK = x.k;
+        h.holder.fog = !f ? null : f.isFogExp2 ? new T.FogExp2(f.color.getHex(), f.density / x.k) : new T.Fog(f.color.getHex(), f.near * x.k, f.far * x.k);
+      }
+      return h;
+    }
+
+    _forget(w) {
+      const h = this.holders.get(w.channel);
+      if (h && h.s.root.parent === h.place) h.place.remove(h.s.root);
+      this.holders.delete(w.channel);
+      if (this.in === w.channel) this.in = null;
+      this.listAt = -1;
+    }
+
+    // Agreed neighbours whose plots are not seen (their door shut to you, or away): where they are, and who.
+    _outlines(list) {
+      const T = this.T, unseen = list.filter(x => !x.w), sig = unseen.map(x => [x.key, x.name, ...x.rect].join()).join("|");
+      if (sig === this.outlineSig) return;
+      this.outlineSig = sig;
+      for (const o of [...this.outlines.children]) { this.outlines.remove(o); o.traverse(c => { if (c.geometry) c.geometry.dispose(); if (c.material) { if (c.material.map) c.material.map.dispose(); c.material.dispose(); } }); }
+      for (const x of unseen) {
+        const [x0, z0, x1, z1] = x.rect, y = 0.02;
+        const g = new T.BufferGeometry().setFromPoints([[x0, z0], [x1, z0], [x1, z1], [x0, z1]].map(([a, b]) => new T.Vector3(a, y, b)));
+        this.outlines.add(new T.LineLoop(g, new T.LineBasicMaterial({ color: 0x8b949e })));
+        const c = document.createElement("canvas"); c.width = 256; c.height = 64;
+        const cx = c.getContext("2d"); cx.font = "28px system-ui, sans-serif"; cx.fillStyle = "#e6edf3"; cx.textAlign = "center"; cx.fillText(x.name || "?", 128, 42);
+        const label = new T.Sprite(new T.SpriteMaterial({ map: new T.CanvasTexture(c), transparent: true, depthWrite: false }));
+        label.position.set((x0 + x1) / 2, 1.5, (z0 + z1) / 2); label.scale.set(4, 1, 1);
+        this.outlines.add(label);
+      }
+    }
+
+    // Where your user is now: at home, where your page says (stepping onto a plot takes them in); in a plot, where
+    // its host has them (walked at once as it walks, put right by its answers), until it has them off it.
+    frame(dt, me, input = {}) {
+      const v = this.v, T = this.T, now = performance.now();
+      dt = Math.min(0.1, Math.max(0, Number(dt) || 0));
+      me = { x: Number(me.x) || 0, y: Number(me.y) || 0, z: Number(me.z) || 0, yaw: Number(me.yaw) || 0, pitch: Number(me.pitch) || 0 };
+      this.look = { yaw: me.yaw, pitch: me.pitch };
+      if (this.bounce) { const b = this.bounce; this.bounce = null; this.home = b; return Object.assign({}, b, { yaw: me.yaw, pitch: me.pitch, in: null }); }
+      const list = this._layout();
+      let x = this.in != null ? list.find(y => y.w && y.w.channel === this.in) : null;
+      if (x && !(x.w.inside && x.w.scene)) x = null;
+      if (!x) {
+        this.in = null;
+        x = list.find(y => y.w && y.w.scene && !y.w.inside && (this.refused.get(y.w.channel) || 0) <= now && within(y.rect, me.x, me.z));
+        if (!x) { this.home = me; return Object.assign({}, me, { in: null }); }
+        this._enter(x, me, now);
+      }
+      const w = x.w, s = w.scene, h = this._holder(x), yaw = me.yaw - x.at.turn * Math.PI / 2;
+      const inp = { forward: Math.sign(Number(input.forward) || 0), strafe: Math.sign(Number(input.strafe) || 0), run: !!input.run };
+      if (s.walk && !w.paused) { const q = walk({ x: s.pose.x, z: s.pose.z, yaw }, inp, dt, s.walk); s.pose.x = q.x; s.pose.z = q.z; }
+      s.hist.push([now, s.pose.x, s.pose.z]);
+      while (s.hist.length > 2 && now - s.hist[0][0] > 2000) s.hist.shift();
+      const fade = Math.exp(-dt / 0.1); s.vis.x *= fade; s.vis.z *= fade;
+      this._input(w, inp, yaw, me.pitch, now);
+      const hp = s.hostPose, pl = s.plot, margin = 0.3 / x.k;
+      if (!hp && now - s.inAt > ENTER_WAIT) { this._refused(w, "no answer"); return this.frame(0, me, {}); }   // its host never had us: back out
+      if (hp && (Math.abs(hp.x - pl.center[0]) > pl.size[0] / 2 + margin || Math.abs(hp.z - pl.center[1]) > pl.size[1] / 2 + margin)) {
+        this._exit(w);   // its host has us off its plot: home again, walking on from there
+        const out = new T.Vector3(hp.x, 0, hp.z).applyMatrix4(h.place.matrix);
+        this.home = { x: out.x, y: me.y, z: out.z, yaw: me.yaw, pitch: me.pitch };
+        return Object.assign({}, this.home, { in: null });
+      }
+      const at = new T.Vector3(s.pose.x + s.vis.x, 0, s.pose.z + s.vis.z).applyMatrix4(h.place.matrix);
+      return { x: at.x, y: me.y, z: at.z, yaw: me.yaw, pitch: me.pitch, in: { key: x.key, name: x.name } };
+    }
+
+    _enter(x, me, now) {
+      const w = x.w, s = w.scene, h = this._holder(x), p = new this.T.Vector3(me.x, 0, me.z).applyMatrix4(h.inverse), yaw = me.yaw - x.at.turn * Math.PI / 2;
+      this.v._send({ type: "enter", channel: w.channel, pose: { x: p.x, y: me.y / x.k, z: p.z, yaw } });
+      w.inside = true; this.in = w.channel;
+      Object.assign(s, { pose: { x: p.x, y: 0, z: p.z }, yaw0: 0, hist: [], vis: { x: 0, y: 0, z: 0 }, hostPose: null, inAt: now });
+      this.v._changed();
+    }
+
+    _exit(w) {
+      this.v._send({ type: "exit", channel: w.channel });
+      w.inside = false; this.in = null;
+      if (w.scene) w.scene.hostPose = null;
+      this.v._changed();
+    }
+
+    _refused(w, why) {
+      if (w.inside) this._exit(w);
+      w.inside = false;
+      if (this.in === w.channel) this.in = null;
+      this.refused.set(w.channel, performance.now() + ENTER_WAIT);
+      this.bounce = this.home;   // back where it was before it stepped on
+    }
+
+    // The input while in a plot, in its terms (its look absolute: it came from a world): on every change (at most
+    // every 8 ms) and every 33 ms regardless.
+    _input(w, inp, yaw, pitch, now) {
+      const sig = [inp.forward, inp.strafe, inp.run, yaw.toFixed(3), pitch.toFixed(3)].join();
+      if (now - this.sent.at < (sig !== this.sent.sig ? INPUT_MIN_MS : INPUT_MS)) return;
+      this.sent = { at: now, sig };
+      this.v._send({ type: "input", forward: inp.forward, strafe: inp.strafe, run: inp.run, yaw, pitch: Math.max(-1.4, Math.min(1.4, pitch)), t: now });
+    }
+
+    // While in a plot: point where you look (SPEC 8.3). Home: out of the plot you are in.
+    point() {
+      const x = this.in != null && this.list.find(y => y.w && y.w.channel === this.in);
+      if (!x) return false;
+      this.v._send({ type: "point", yaw: this.look.yaw - x.at.turn * Math.PI / 2, pitch: this.look.pitch });
+      return true;
+    }
+    leave() { const w = this.in != null && this.v._watches.get(this.in); if (w) this._exit(w); }
+
+    // Your room (clipped to your plot), the ground between plots, then each plot (clipped to its own), into one
+    // depth buffer: what is nearer hides what is behind, across plots. Each plot lit by its own lights.
+    render(camera) {
+      const r = this.renderer, auto = r.autoClear, planes = r.clippingPlanes, now = performance.now(), v = this.v;
+      const list = this._layout(), mine = v._plot();
+      try {
+        r.clippingPlanes = !this.clipOwn ? [] : (() => {
+          const T = this.T, x0 = mine.center[0] - mine.size[0] / 2, x1 = mine.center[0] + mine.size[0] / 2, z0 = mine.center[1] - mine.size[1] / 2, z1 = mine.center[1] + mine.size[1] / 2;
+          const sig = [x0, z0, x1, z1].join();
+          if (this.mineSig !== sig) { this.mineSig = sig; this.minePlanes = [new T.Plane(new T.Vector3(1, 0, 0), -x0), new T.Plane(new T.Vector3(-1, 0, 0), x1), new T.Plane(new T.Vector3(0, 0, 1), -z0), new T.Plane(new T.Vector3(0, 0, -1), z1)]; }
+          return this.minePlanes;
+        })();
+        r.render(this.scene, camera);
+        r.autoClear = false;
+        r.clippingPlanes = [];
+        this._outlines(list);
+        this.commons.fog = this.scene.fog || null;
+        r.render(this.commons, camera);
+        for (const x of list) {
+          if (!x.w || !x.w.scene) continue;
+          const h = this._holder(x), s = x.w.scene;
+          if (s.offset !== null) v._sceneInterp(s, now - s.offset - INTERP_MS);
+          for (const o of s.own) o.visible = false;
+          r.clippingPlanes = h.planes;
+          r.render(h.holder, camera);
+        }
+      } finally { r.autoClear = auto; r.clippingPlanes = planes; }
+    }
+
+    release() {
+      this.leave();
+      for (const w of this.v._watches.values()) this._forget(w);
+      this.v._send({ type: "world", on: false });
+      if (this.v._world === this) this.v._world = null;
+    }
   }
 
   // ---------- the ready-made lobby panel ----------
@@ -1365,6 +1788,10 @@
           <div class="btns"><button class="go" data-v="in" data-k="${esc(k.id)}">Let in</button><button data-v="out" data-k="${esc(k.id)}">Not now</button>
           <span class="muted">${Math.max(0, Math.round((k.until - Date.now()) / 1000))}s</span></div></div>`);
       }
+      for (const p of v.edgeProposals) {
+        rows.push(`<div class="row knock"><b>${esc(p.name)}</b> proposes their plot's ${esc(p.theirs)} side against your ${esc(p.mine)} side
+          <div class="btns"><button class="go" data-v="edge_yes" data-key="${esc(p.key)}">Agree</button><button data-v="edge_no" data-key="${esc(p.key)}">No</button></div></div>`);
+      }
       if (v.visiting) rows.push(`<div class="row"><span class="grow">in <b>${esc(v.visiting.host.name)}</b>'s room${v.visiting.paused ? " (reloading)" : ""}</span><button data-v="leave">Leave</button></div>`);
       for (const x of v.visitors) rows.push(`<div class="row">${star(x.visitor.key, x.visitor.name)}<span class="grow"><b>${esc(x.visitor.name)}</b> ${x.guest ? "walked in" : "is visiting"}</span><button data-v="kick" data-x="${esc(x.id)}">Kick</button></div>`);
       for (const o of v.offices) {
@@ -1394,6 +1821,8 @@
       else if (act === "away") v.leaveLobby();
       else if (act === "back") v.joinLobby();
       else if (act === "guest") v.isGuest(b.dataset.key) ? v.removeGuest(b.dataset.key) : v.addGuest(b.dataset.key, b.dataset.name);
+      else if (act === "edge_yes") v.acceptEdge(b.dataset.key);
+      else if (act === "edge_no") v.declineEdge(b.dataset.key);
     });
     root.addEventListener("change", e => {
       if (e.target.dataset.v === "status") v.setStatus(e.target.value);

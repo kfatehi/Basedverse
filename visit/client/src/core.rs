@@ -16,7 +16,7 @@ use crate::{
     frames::{self, Frame},
     link::{LinkCmd, Links, Relays, Role},
     lobby::LobbyOut,
-    state::{self, Guest, Saved},
+    state::{self, Edge, Guest, Place, Saved},
     VERSION,
 };
 
@@ -115,7 +115,7 @@ const ADMITTED_FOR: Duration = Duration::from_secs(120);
 /// The world (../WORLD.md): a knock to watch a guest's plot not yet answered is not made again for this long;
 /// one declined (or refused by the lobby), for this long.
 const WATCH_PENDING: Duration = Duration::from_secs(15);
-const WATCH_DECLINED: Duration = Duration::from_secs(60);
+const WATCH_DECLINED: Duration = Duration::from_secs(20);
 /// The most plots an office watches at once (the lobby's own limit is the same).
 const MAX_WATCHING: usize = 8;
 /// With no page for this long, its world's watches end (they are only for a page to draw).
@@ -149,6 +149,11 @@ pub struct Core {
     watch_order: VecDeque<String>,
     watch_knocks: HashMap<String, String>,
     watch_declined: HashMap<String, Instant>,
+    /// Edges proposed (../WORLD.md step 5), by the other office's key: by this office, waiting for an answer
+    /// (mine, theirs, along); and to it, waiting for its page (their name, their side, my side, along in my
+    /// terms, their size).
+    edges_out: HashMap<String, (String, String, f64)>,
+    edges_in: HashMap<String, (String, String, String, f64, [f64; 2])>,
     office: Value,
     status: String,
     max_visitors: u8,
@@ -186,6 +191,8 @@ impl Core {
             watch_order: VecDeque::new(),
             watch_knocks: HashMap::new(),
             watch_declined: HashMap::new(),
+            edges_out: HashMap::new(),
+            edges_in: HashMap::new(),
             office: Value::Null,
             status: "available".into(),
             max_visitors,
@@ -328,6 +335,7 @@ impl Core {
         self.to_page(json!({
             "type": "ready", "version": VERSION, "office": self.office, "online": self.online, "away": self.saved.away, "status": self.status,
             "max_visitors": self.max_visitors, "visits": visits, "key": self.key, "door": self.door(), "guests": self.guests(),
+            "layout": self.saved.layout_json(), "edges": self.saved.edges_json(),
         }));
         if let Some(view) = self.lobby_view.clone() {
             self.to_page(view);
@@ -373,6 +381,9 @@ impl Core {
                     self.saved.door_open = open;
                     self.save_state();
                     self.tell_guests();
+                    if !open {
+                        self.end_watchers(|_| true);   // the door shut: nobody watches this plot any more
+                    }
                 }
                 None => self.page_error("bad_message", "open must be true or false", Some("door")),
             },
@@ -395,9 +406,11 @@ impl Core {
             },
             "guest_remove" => match m.get("key").and_then(Value::as_str) {
                 Some(k) => {
+                    let k = k.to_string();
                     self.saved.guests.retain(|g| g.key != k);
                     self.save_state();
                     self.tell_guests();
+                    self.end_watchers(|key| key == k);   // no longer a guest: no longer watching
                 }
                 None => self.page_error("bad_message", "key is the guest's key", Some("guest_remove")),
             },
@@ -448,6 +461,61 @@ impl Core {
                     v.inside = true;
                     let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "enter": pose })));
                 }
+            }
+            // Where this office has put a friend's plot in its world (kept in the state file).
+            "place" => match state::place_from(&m) {
+                Some(p) => {
+                    let full = self.saved.layout.len() >= state::MAX_PLACES;
+                    match self.saved.layout.iter_mut().find(|x| x.key == p.key) {
+                        Some(x) => *x = p,
+                        None if full => return self.page_error("too_many", &format!("at most {} places", state::MAX_PLACES), Some("place")),
+                        None => self.saved.layout.push(p),
+                    }
+                    self.save_state();
+                    self.tell_layout();
+                }
+                None => self.page_error("bad_message", "place needs a key, x and z (numbers) and turn (0-3)", Some("place")),
+            },
+            "unplace" => {
+                let k = m.get("key").and_then(Value::as_str).unwrap_or("");
+                self.saved.layout.retain(|p: &Place| p.key != k);
+                self.save_state();
+                self.tell_layout();
+            }
+            // Edges agreed with friends (../WORLD.md step 5): over a link to them (a watch or a visit, either way).
+            "edge_propose" => {
+                let (Some(key), Some(mine), Some(theirs), Some(along), Some(size)) = (
+                    m.get("key").and_then(Value::as_str).map(str::to_string), state::side(m.get("mine")), state::side(m.get("theirs")),
+                    state::along_from(m.get("along")).or(Some(0.0)), state::size_from(m.get("size")),
+                ) else {
+                    return self.page_error("bad_message", "edge_propose needs a key, mine and theirs (north, east, south or west), along (m), size ([w, d] m)", Some("edge_propose"));
+                };
+                if !self.to_peer(&key, json!({ "edge": { "from": mine, "to": theirs, "along": along, "size": size } })) {
+                    return self.page_error("no_link", "an edge is proposed to an office this one is linked to (watching, or visiting, either way)", Some("edge_propose"));
+                }
+                self.edges_out.insert(key, (mine, theirs, along));
+            }
+            "edge_accept" | "edge_decline" => {
+                let key = m.get("key").and_then(Value::as_str).unwrap_or("").to_string();
+                let Some((name, theirs, mine, along, their_size)) = self.edges_in.remove(&key) else {
+                    return self.page_error("not_found", "no edge proposed by that key, waiting", Some(&t));
+                };
+                if t == "edge_decline" {
+                    self.to_peer(&key, json!({ "edge_no": true }));
+                    return;
+                }
+                let Some(size) = state::size_from(m.get("size")) else {
+                    return self.page_error("bad_message", "edge_accept needs this plot's size ([w, d] m)", Some("edge_accept"));
+                };
+                self.to_peer(&key, json!({ "edge_ok": { "from": mine, "to": theirs, "along": -along, "size": size } }));
+                self.keep_edge(Edge { key, name, mine, theirs, along, size: their_size });
+            }
+            "edge_remove" => {
+                let key = m.get("key").and_then(Value::as_str).unwrap_or("").to_string();
+                self.to_peer(&key, json!({ "edge_off": true }));
+                self.saved.edges.retain(|e| e.key != key);
+                self.save_state();
+                self.tell_edges();
             }
             "exit" => {
                 let ch = m.get("channel").and_then(Value::as_u64).unwrap_or(0) as u16;
@@ -604,6 +672,66 @@ impl Core {
 
     fn guests(&self) -> Value {
         json!(self.saved.guests.iter().map(|g| json!({ "key": g.key, "name": g.name })).collect::<Vec<_>>())
+    }
+
+    fn tell_layout(&mut self) {
+        let layout = self.saved.layout_json();
+        self.to_page(json!({ "type": "layout", "layout": layout }));
+    }
+
+    fn tell_edges(&mut self) {
+        let edges = self.saved.edges_json();
+        self.to_page(json!({ "type": "edges", "edges": edges }));
+    }
+
+    fn keep_edge(&mut self, e: Edge) {
+        self.saved.edges.retain(|x| x.key != e.key);
+        if self.saved.edges.len() < state::MAX_PLACES {
+            self.saved.edges.push(e);
+        }
+        self.save_state();
+        self.tell_edges();
+    }
+
+    /// A control message to the office with this key, over any link up with it; false if there is none.
+    fn to_peer(&self, key: &str, ctl: Value) -> bool {
+        match self.visits.values().find(|v| v.up && v.peer.get("key").and_then(Value::as_str) == Some(key)) {
+            Some(v) => v.cmd.try_send(LinkCmd::Ctl(ctl)).is_ok(),
+            None => false,
+        }
+    }
+
+    /// An edge message from the other side of a link (../WORLD.md step 5), whichever way the link goes: true
+    /// if it was one. Sides and lengths are in the sender's terms: `from` its side, `to` this office's.
+    fn link_edge(&mut self, id: &str, m: &Value) -> bool {
+        let Some(v) = self.visits.get(id) else { return false };
+        let (key, name) = (v.peer.get("key").and_then(Value::as_str).unwrap_or("").to_string(), v.peer.get("name").and_then(Value::as_str).unwrap_or("").to_string());
+        if let Some(e) = m.get("edge") {
+            let (Some(from), Some(to), Some(along), Some(size)) = (state::side(e.get("from")), state::side(e.get("to")), state::along_from(e.get("along")), state::size_from(e.get("size"))) else {
+                return true;
+            };
+            // Facing each other, their sides turn the other way along the line they share: along, in my terms, is minus theirs.
+            self.edges_in.insert(key.clone(), (name.clone(), from.clone(), to.clone(), -along, size));
+            self.to_page(json!({ "type": "edge_proposed", "key": key, "name": name, "mine": to, "theirs": from, "along": -along, "size": size }));
+        } else if let Some(e) = m.get("edge_ok") {
+            let size = state::size_from(e.get("size"));
+            if let (Some((mine, theirs, along)), Some(size)) = (self.edges_out.remove(&key), size) {
+                self.keep_edge(Edge { key, name, mine, theirs, along, size });
+            }
+        } else if m.get("edge_no").is_some() {
+            if self.edges_out.remove(&key).is_some() {
+                self.to_page(json!({ "type": "edge_declined", "key": key }));
+            }
+        } else if m.get("edge_off").is_some() {
+            if self.saved.edges.iter().any(|e| e.key == key) {
+                self.saved.edges.retain(|e| e.key != key);
+                self.save_state();
+                self.tell_edges();
+            }
+        } else {
+            return false;
+        }
+        true
     }
 
     fn tell_guests(&mut self) {
@@ -911,6 +1039,16 @@ impl Core {
         }
     }
 
+    /// The watches of this office's plot whose watcher's key passes `which`: ended (`kicked`).
+    fn end_watchers(&mut self, which: impl Fn(&str) -> bool) {
+        let ends: Vec<String> = self.visits.values()
+            .filter(|v| v.role == Role::Host && v.watch && which(v.peer.get("key").and_then(Value::as_str).unwrap_or("")))
+            .map(|v| v.id.clone()).collect();
+        for id in ends {
+            self.to_lobby(json!({ "type": "end", "visit": id, "reason": "kicked" }));
+        }
+    }
+
     /// Out of a watched plot's room (visitor side): its host no longer has this office; the watch goes on.
     fn step_out(&mut self, id: &str) {
         if let Some(v) = self.visits.get_mut(id).filter(|v| v.inside) {
@@ -976,6 +1114,10 @@ impl Core {
             return;
         }
         let ch = v.channel;
+        if self.link_edge(id, &m) {
+            return;
+        }
+        let Some(v) = self.visits.get_mut(id) else { return };
         match v.role {
             // From a watcher: stepping into this room (where, in its terms), or out of it. In, it counts toward
             // max_visitors: one past it is refused, and stays outside.
