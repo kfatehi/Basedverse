@@ -275,15 +275,39 @@ visit.host({
   visitors still look around at once, but walking waits for your answer.
 - **Visitors' bodies**: if you draw your visitors in your room (`visit.visitors` has where each stands), mark
   each body `body.userData.visitor = entry.id` (the `id` of its entry), so a visitor's own eyes do not see it
-  from inside. Your visitors then see each other.
-- **Points**: a visitor looking around has a crosshair, and a click there points. You hear
-  `visit.on("point", e => ...)` with `e.from` (the visitor's eyes, where you have it) and `e.dir` (where it
-  looked): cast that ray into your scene and decide. **Take points through an allow list** of what your user
-  would let a guest do: knock a ball, ring a bell, make the cat jump. Nothing on it may reach your user's tools,
-  data or accounts, and each entry should do only what it says (no fetches, no messages to anyone). Keep the
-  list's default "no", so something added later is a guest's only when you say so, and limit each visitor to a
-  few a second. Mark what is on the list with `userData.visitPoint = true` (on the object, or a group it is in),
-  and the visitor's crosshair shows hot over it.
+  from inside. Your visitors then see each other. When `entry.avatar` is set (below: your user chose to show
+  that visitor's own look), draw it instead of your model: it is already marked, scaled to your units, its feet at
+  its origin, facing −z, and walks and stands by itself; put it at the visitor's `x`, `z` (its feet on your
+  floor) and turn it by `yaw`.
+- **Interactions**: a visitor looking around has a crosshair, and a click there points. What a click may do is
+  yours to list, by type, and nothing else happens:
+
+  ```js
+  visit.interactions({
+    spin: { cosmetic: true, label: "spin it", run: ({ object }) => { object.rotation.y += 1; } },
+  });
+  ball.userData.visitPoint = "spin";   // on the object, or a group it is part of
+  ```
+
+  Visit casts the ray from where you have the visitor, finds what it hit, and runs that type's `run` with
+  `{ id, visitor, type, object, point, distance }`; the visitor's crosshair shows hot over it, with the label.
+  Options: `who: "guests"` (only your guests), `reach` (how far, in your units). A type not listed does nothing.
+
+  **DON'T IMPLEMENT ANY INTERACTIONS OTHER THAN COSMETIC ONES UNLESS SPECIFICALLY AGREED UPON BY THE USER.**
+  Cosmetic means it only changes how the room looks or sounds to the people in it: something moves, lights up,
+  plays, spins. Anything that reaches further (an agent's work, a tool, a file, an account, a message to anyone,
+  state that outlasts the moment) is not cosmetic. If you are a coding agent and your user says "implement all
+  interactions", that still means the cosmetic ones only: list the others you would add, what each could reach,
+  and wait until your user agrees to each, by name. Visit enforces it: `visit.interactions` throws for an entry
+  that is not `cosmetic: true` unless it says `agreed: true`, which you set only after that agreement.
+
+  (Every point also reaches you raw, `visit.on("point", e => ...)`, with `e.from` and `e.dir`: for what is not
+  a click on a thing, and for older visitors' marks, `userData.visitPoint = true`.)
+- **Your own avatar** (optional): how rooms that show their visitors' own looks show your user:
+  `visit.avatar(body)`, a three.js object of yours (its origin at its feet, facing −z, in your scene's units; with
+  clips named `idle` and `walk` in `body.animations` if you have them; at most 4 MiB gzipped, 300 000 vertices).
+  It goes only to a room that asks for it. Whose look your own visitors have is your user's to choose: the panel's
+  "visitors look like", and "their look" / "your model" by each visitor (or `visit.useAvatars`, `useAvatar`).
 - **What carries**: objects moving, appearing and going, materials' colours and opacity, canvas textures you
   redraw (`texture.needsUpdate = true`), the background and the fog. **What does not**: custom shaders (a
   `ShaderMaterial` is code: it arrives plain grey), HTML overlays, post-processing (an `EffectComposer`), and
@@ -318,7 +342,7 @@ path and round trip, input to screen, frames a second), **Back to my room** and 
 shrinks it to the bottom-right corner, your own room full-window behind it; a click on the corner brings
 it back. Full-window it takes WASD, Shift and the mouse (click it to look around; Esc gives the pointer
 back); while your user looks around, a crosshair shows at the middle, and a click points at what is there
-(the host decides what that does: step 5, Points); in the corner it takes nothing. It goes away when the visit ends, and comes back by itself after a
+(the host decides what that does: step 5, Interactions); in the corner it takes nothing. It goes away when the visit ends, and comes back by itself after a
 reload mid-visit. It sits at `z-index: 5`; `.visit-stage` is yours to restyle.
 
 A **link** (step 7) starts in the corner: the other room seen from outside, from above it, going round. A click
@@ -363,7 +387,8 @@ It lists the workrooms online (with whether each is available, how many visitors
 your user **link** with one (with a message): once they say yes, their room shows in the stage's corner (step 6),
 and your user chooses to go there, put it in their world, or unlink. It shows links asked of you with **Link** /
 **Not now** and **★ always** (make them a guest as you say yes), your links, your visitors and who is linked to
-you (with **Kick** / **Unlink**), sets your status and max visitors, and has **Go offline** / **Go online**. A
+you (with **Kick** / **Unlink**, and **their look** / **your model**), whose look your visitors have by default,
+**Map** (your world, from above: step 9), sets your status and max visitors, and has **Go offline** / **Go online**. A
 star (☆) by each office makes it a **guest**: while your door is open (the panel's "your door"), a guest's link
 is let in at once, without asking your user. An office on an older Visit gets **Knock** instead: let in, your
 user walks straight into its room, as before.
@@ -453,8 +478,11 @@ walks onto your plot from their world may have no way back out.
 
    `world.render` draws your room clipped to your plot: anything of yours outside it (a sky dome, a huge ground)
    is cut there; use `scene.background` for a sky. A post-processing chain (`EffectComposer`) does not fit it.
-5. **Edges, if you like:** `visit.proposeEdge(friend.key, { mine: "east", theirs: "west" })`; the panel asks the
-   friend, or use `visit.edgeProposals` and `acceptEdge` / `declineEdge` in your own UI.
+5. **Where they sit, and edges.** The panel's **Map** (`Visit.map(visit).open()`) shows your world from above:
+   drag a friend's room where you want it, turn it, or type where its middle goes; kept by visit-client, across
+   reloads. Put flush against a side of yours, it offers to propose an edge: the friend's panel asks them, and once
+   they agree it is there for both. (In code: `visit.place`, `visit.proposeEdge(friend.key, { mine: "east", theirs:
+   "west" })`, `visit.edgeProposals`, `acceptEdge` / `declineEdge`.)
 
 **Check:** with step 8's two rooms, each starring the other in the panel, each sees the other's plot; walking
 onto it puts you in its room (its `visit.visitors` lists you), walking off brings you home; with an edge agreed,
@@ -476,8 +504,11 @@ walking out of your door goes straight into theirs.
 - [ ] `spawn` puts visitors somewhere sensible; `move` keeps them out of walls and furniture; `walk` is
       given if `move` is `Visit.walk`, at its speed.
 - [ ] Your visitors' bodies, if you draw them, are marked `userData.visitor`.
-- [ ] Points, if you take them: through an allow list whose default is no, a few a second per visitor, and
-      nothing on it reaches your user's tools, data or accounts; what is on it is marked `userData.visitPoint`.
+- [ ] Interactions: only through `visit.interactions`, each marked `userData.visitPoint = "<type>"`; **cosmetic ones
+      only, unless your user agreed to another, by name** (`agreed: true`); nothing reaches your user's tools,
+      data or accounts without that.
+- [ ] Visitors drawn as their own avatars (`entry.avatar`) when set, as your models otherwise; your own avatar given
+      (`visit.avatar`), if you like.
 - [ ] Visiting: the host's room fills the window (`Visit.stage`, or your own view); WASD, Shift and the
       mouse work; Esc frees the pointer; there is a way to leave, and back to your room; your own keys wait
       while `visit.viewFocused`.

@@ -146,7 +146,7 @@ visit-client --lobby wss://lobby.example/ --name "Magic Room" --sim my-sim/1.0 \
 | `--idle-exit` | `VISIT_IDLE_EXIT` | 0 | exit after this many seconds with no page connected (0: never) |
 | `--origins` | `VISIT_ORIGINS` | none | the page origins allowed to connect (`http://localhost:3000`, comma-separated); none: any page with the token (section 3, point 4) |
 | `--relays` | `VISIT_RELAYS` | the lobby's | the relays for links: `none`, `default` (iroh's own), or URLs, comma-separated |
-| `--state-file` | `VISIT_STATE_FILE` | none | a file where it keeps what outlasts a run: whether the office is away (`leave_lobby`, 5.2), so a restart stays away; its key (section 2), so it is the same office to its guests' hosts; its door and its guests. Readable by its owner only (section 3, point 10). None: every start joins the lobby, with a new key and no guests. A launcher SHOULD give one |
+| `--state-file` | `VISIT_STATE_FILE` | none | a file where it keeps what outlasts a run: whether the office is away (`leave_lobby`, 5.2), so a restart stays away; its key (section 2), so it is the same office to its guests' hosts; its door and its guests; its world's layout and edges (8.4); whose look its visitors have (8.6). Readable by its owner only (section 3, point 10). None: every start joins the lobby, with a new key and no guests. A launcher SHOULD give one |
 
 A flag wins over its environment variable, and a variable set but blank counts as unset (its default), as a
 `.env` file has it. [`../.env.example`](../.env.example) is the template of them all.
@@ -242,6 +242,11 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `edge_propose` | `key`, `mine`, `theirs` (`"north"`, `"east"`, `"south"`, `"west"`), `along` (m)?, `size` ([w, d] m: this plot's) | propose that this plot's side `mine` touch theirs (8.4), over a link to that office (`no_link` if there is none) |
 | `edge_accept` / `edge_decline` | `key`, `size` (this plot's, to accept) | answer an edge proposed to this office |
 | `edge_remove` | `key` | take an agreed edge back: for both |
+| `link_where` | `channel`, `where` (`"world"` \| `"corner"`) | where the page put a link (8.5): kept, and said again in `visit_started` to a page that reloads |
+| `avatar_clear` | — | this office has no avatar (8.6) from now on (its own goes as a binary frame, 5.4) |
+| `avatar_want` | `channel` | ask a visitor for its avatar (host side, 8.6): its visit-client sends it, now and whenever its page gives a new one |
+| `avatars` | `default` (`"mine"` \| `"theirs"`) | whose look visitors have in this room by default: this room's models, or their own avatars; kept in the state file |
+| `avatar_use` | `key`, `use` (`"mine"` \| `"theirs"` \| null: the default) | the same for one office, apart from the default; kept in the state file |
 | `knock` | `to` (office id), `message`? (≤ 280), `link`? (true: a link, 8.5) | ask to visit an office, or to link with it (refused `not_hosting` before `host`) |
 | `answer` | `knock`, `accept` (bool), `message`? | let a knocker in, or not |
 | `end` | `visit` | end a visit: yours as a visitor (leave), or a visitor's to you (kick) |
@@ -261,13 +266,15 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `layout` / `edges` | `layout`: [{`key`, `x`, `z`, `turn`}] / `edges`: [{`key`, `name`, `mine`, `theirs`, `along`, `size`}] | after a change (an edge also when the other office agrees, or takes it back) |
 | `edge_proposed` | `key`, `name`, `mine`, `theirs`, `along`, `size` (theirs), all in this office's terms | a friend proposes an edge: answer with `edge_accept` or `edge_decline` |
 | `edge_declined` | `key` | your proposal was declined |
+| `avatars` | `default`, `by`: [{`key`, `use`}] | whose look visitors have here (also in `ready`), after `avatars` or `avatar_use` |
+| `avatar` | `channel`, `avatar` {`unit`, `json`} | a visitor's avatar, which this page asked for (host side, 8.6): unpacked and checked as a scene edit is |
 | `enter` / `exit` | `channel`, `pose`? {`x`, `y`, `z`, `yaw`} (for `enter`) | a watcher stepped into this room, there (host side: spawn it, as a visitor), or out of it; no `pose`: a link going there, spawned where newcomers go |
 | `enter_refused` | `channel`, `reason` (`"full"`, or `"moved"`: a visit to a room began, and this office stepped out) | stepping into a watched room was refused, or undone: outside it |
 | `online` / `offline` | `office`, `knocking` / `away`? | the lobby session came up (after a drop: the same office if it resumed), with this office's own knocks still waiting ([{`id`, `to`, `link`?}]) / went down: `away: true` when the page took it out (`leave_lobby`), `false` when it is on its way back (`join_lobby`), absent when the lobby is out of reach |
 | `lobby` | `offices`: [{`id`, `name`, `status`, `sim`, `max_visitors`, `visitors`, `visiting`, `ready`, `key`, `watchers`, `world`, `links`}] | every change (6.3) |
 | `knock` | `id`, `from` {`id`, `name`, `sim`, `key`}, `message`, `expires_in`, `link`? | someone wants to visit you, or (`link`) to link with you (never a guest at your open door: let in without asking) |
 | `knock_sent` / `knock_cancelled` / `answered` | as in section 6 | your knock's fate; a knock on you withdrawn |
-| `visit_started` | `id`, `channel`, `role` (`"host"` \| `"visitor"`), `peer` {`id`, `name`, `sim`, `key`}, `guest`?, `watch`?, `inside`?, `link`?, `shared_adds`?, `state`? | a visit began (its link is up). `peer.key` is the other office's key, as the link proved it; `guest: true`, a guest let in through the open door, without asking the page; `watch: true` (and `inside`), a watch (8.4); `link: true` too, a link (8.5); in `ready`, a host's visit carries the last `state` its page sent |
+| `visit_started` | `id`, `channel`, `role` (`"host"` \| `"visitor"`), `peer` {`id`, `name`, `sim`, `key`}, `guest`?, `watch`?, `inside`?, `link`?, `where`?, `shared_adds`?, `state`? | a visit began (its link is up). `peer.key` is the other office's key, as the link proved it; `guest: true`, a guest let in through the open door, without asking the page; `watch: true` (and `inside`), a watch (8.4); `link: true` too, a link (8.5), with `where: "world"` if the page put it in its world; in `ready`, a host's visit carries the last `state` its page sent |
 | `visit_ended` | `id`, `channel`, `reason` (6.5) | a visit ended |
 | `host_paused` / `host_resumed` | `channel` | the host's page went away / came back (visitor side) |
 | `input` | `channel`, `seq`, `forward`, `strafe`, `run`, `yaw`, `pitch`, `t` | a visitor's latest input (host side) |
@@ -288,11 +295,11 @@ Both directions, one scene delta (or, from the host's page, one scene edit) per 
 | bytes | field |
 |---|---|
 | 0–1 | `channel`, u16 big-endian |
-| 2 | flags: bit 0 = a key delta (everything that has moved, 8.1); bit 1 = a scene edit (host page to visit-client only, alone) |
+| 2 | flags: bit 0 = a key delta (everything that has moved, 8.1); bit 1 = a scene edit (host page to visit-client only, alone); bit 2 = this office's avatar (8.6: page to visit-client only, alone, its channel 0) |
 | 3–10 | timestamp, u64 big-endian, microseconds: the host page's clock when it took the delta (unused for an edit) |
 | 11… | the delta (8.1), or the edit, gzipped JSON |
 
-A delta larger than 1 MiB, or an edit larger than 16 MiB, is dropped. A visit-client sends deltas on the
+A delta larger than 1 MiB, an edit larger than 16 MiB, or an avatar larger than 4 MiB, is dropped. A visit-client sends deltas on the
 link as they come (7.4) and edits on the visit's scene stream, and passes the visitor's page each delta as
 it is and each edit unpacked, as `scene` (5.3).
 
@@ -426,6 +433,7 @@ Messages are JSON, each prefixed by its length (u32 big-endian). In order, relia
 | visitor | `{"keyframe": true}` | send a key delta soon (passed to the host's page at most every 500 ms) |
 | visitor | `{"scene_resync": true}` | send the whole scene again (passed to the host's page at most every 2 s; one asked for sooner waits, and goes) |
 | visitor | `{"point": {"yaw", "pitch"}}` | a point (8.3): passed to the host's page with only those two, clamped, at most 5 a second |
+| host | `{"avatar_want": true}` | send this office's avatar (8.6): now, on a stream of its own (7.4), and again whenever its page gives a new one |
 | visitor | `{"shared_adds": true}` | its page reads an `add` that names what it already has by uuid only (8.3; Visit 0.7 on): sent each time the link is up, passed to the host's page once as `shared_adds` |
 | host | `{"paused": true}` / `{"paused": false}` | the host's page went away / came back |
 | watcher | `{"enter": {"x", "y", "z", "yaw"} \| null}` / `{"exit": true}` | stepping into the room watched, there (clamped, passed to the host's page as `enter`; null: a link going there, spawned where newcomers go), or out (8.4, 8.5); in, it counts toward `max_visitors` |
@@ -460,6 +468,12 @@ Host to visitor on **unidirectional streams**, each starting with one byte that 
   its length (u32 big-endian) then the gzipped JSON. Edits are **never dropped one by one**: the host's
   visit-client lets at most 32 MiB of them wait; past that, or if the stream fails, it drops what waits and
   tells its page `scene_resync`, which sends the whole scene again.
+
+And visitor to host, once its host asked (`avatar_want`):
+
+- **2, its avatar** (8.6): its length (u32 big-endian, at most 4 MiB) then the gzipped JSON, the stream then
+  finished. The host's visit-client takes at most one every 2 s, unpacks it to at most 16 MiB of one JSON object
+  nested at most 256 deep, and passes it to its page as `avatar`. A host on an older Visit never asks.
 
 ### 7.5 Blips
 
@@ -561,12 +575,23 @@ its eyes) toward where it looked, and the page decides what that does, if anythi
 from where it stands, in a direction it can look: never through the host's eyes, never at what the host has
 not put there.
 
-What a point may do is the host's to choose, and is a guest's reach into its room: a host takes points through
-an allow list of what its user would let a guest do (pushing a ball, ringing a bell), never anything that
-reaches its user's tools, data or accounts. A host marks what a visitor may point at with
-`userData.visitPoint = true` (on an object, or on a group it is part of): the visitor's crosshair shows hot
-over it (the first thing in its line of sight that is, or is part of, one so marked). The mark is a hint for
-the visitor's eyes; the host still decides each point by its own lights.
+**Interactions** (Visit 0.9) are what a point may do, by type, and only what the host takes. A host lists them
+(`v.interactions`): each type its own entry, `cosmetic` or not, with a `label`, who may (`"everyone"`, or its
+`"guests"`), how far (`reach`, in its units) and what it does (`run`). It marks what may be clicked with the
+type, `userData.visitPoint = "<type>"` (on an object, or a group it is part of). On a point the library casts the
+ray itself, from the visitor's eyes: the first thing it meets that is not a visitor's body (nor hidden), then the
+type on it or on what it is part of; if the host takes that type, this visitor may, and it is within reach, its
+`run` gets { visit id, visitor, type, object, point (where the ray met it), distance }. A type the host does not
+name does nothing. The whole scene (and an edit, when they change) says which types are taken, with their
+labels: the visitor's crosshair shows hot over something marked with one, its label beside it, and over nothing
+else. (`userData.visitPoint = true`, an older host's mark, shows hot without a label; the host's page hears the
+point, `point`, and decides by its own lights.)
+
+**Cosmetic** means the interaction changes only how the room looks or sounds to the people in it: something
+moves, lights up, plays, spins. Anything else (an agent's work, a tool, a file, an account, a message to anyone,
+saved state beyond the room's looks) is not cosmetic, and **the library refuses to register it unless the host
+says its user agreed to that one** (`agreed: true`). What a point may do is a guest's reach into the room: a host
+takes points only through this list, whose default is no.
 
 ### 8.4 Worlds
 
@@ -624,6 +649,26 @@ sees it in a corner first, and chooses.
   again with its own three.js, walked onto as any (8.4), for as long as the link lasts.
 - **One corner.** A newer link, or a visit, takes the corner; a link it moves waits (`where: "aside"`, its scene
   not kept), and takes the corner again when it is free.
+- **Kept.** A link put in the world (`link_where`) is put back there when the page reloads.
+
+### 8.6 Avatars
+
+A room draws its visitors itself (8.1): by default as its own models. With avatars (Visit 0.9) it may draw a
+visitor as the visitor's own body instead.
+
+- **Your own** (`v.avatar(object, { unit })`): a three.js object, its origin at its feet, facing −z, in its
+  scene's units (`unit` metres each), with clips named `idle` and `walk` in its `animations` if it has them. The
+  page gives it to its visit-client as a binary frame (5.4: its JSON, `{ unit, json }`, `json` its `toJSON()`
+  with only what Visit reads of `userData`, gzipped, at most 4 MiB), which keeps it in memory, for the hosts
+  that ask.
+- **Whose look** is the host's to choose, kept in its state file: its visitors' own avatars (`"theirs"`) or its
+  models (`"mine"`), by default (`avatars`) and for any office apart (`avatar_use`, by key).
+- **Asking.** A host's page asks a visitor for its avatar (`avatar_want`) when it would show it; the visitor's
+  visit-client sends it (7.4: stream 2), now and whenever its page gives a new one. A page reads it with its own
+  three.js, as data (`cleanScene`, at most 300 000 vertices and 2 000 objects), scales it to its units, marks it as
+  the visitor's body (`userData.visitor`), and plays its `walk` while the visitor moves and its `idle` while it
+  stands. `v.visitors[i].avatar` is it while the room shows that visitor's own look, null otherwise: the room
+  draws it (in its scene, it goes to every visitor; the visitor's own eyes do not see it).
 
 ## 9. The library: `visit.js`
 
@@ -658,8 +703,10 @@ v.knocks       // knocks on your door: [{ id, from: { id, name, sim, key }, mess
 v.knocking     // your knocks still waiting: [{ id, to, link }]
 v.visiting     // the room in your stage: { id, host: { id, name, sim }, paused, link, inside } or null (a link's: in
                //   the corner until you go there, inside: true)
-v.visitors     // your visitors as a host: [{ id, visitor: { id, name, sim, key }, guest, pose, link }]
+v.visitors     // your visitors as a host: [{ id, visitor: { id, name, sim, key }, guest, pose, link, avatar }]: avatar,
+               //   its own body (8.6) while your room shows its own look, else null
 v.links        // your links (8.5): [{ id, host, where ("corner" | "aside" | "world"), inside }]
+v.avatars      // whose look your visitors have in your room (8.6): { default: "mine" | "theirs", by: [{ key, use }] }
 
 v.on(event, fn); v.off(event, fn)   // "change" | "knock" | "answered" | "visit_started" | "visit_ended" | "stats" | "error" | "point"
                    //   (knock, answered and visit_started say link: true for a link's)
@@ -671,6 +718,9 @@ v.stepIn(id); v.stepOut(id) // a link (by visit id; the corner's by default): go
 v.toWorld(id)      // a link's room as a plot in your world (v.world first), while the link lasts
 v.unlink(id)       // end a link
 v.watching(officeId)        // whether a plot of theirs is in your world (a guest's, or a link put there)
+v.avatar(object, { unit })  // your own body, for rooms that show their visitors' own looks (8.6); null: none
+v.useAvatars(use); v.useAvatar(key, use); v.avatarUse(key)   // "theirs" | "mine": whose look visitors have in
+                   //   your room, by default and for one office (null: back to the default)
 v.leave()          // end your visit (the stage's link: unlink it)
 v.kick(visitId)    // end someone's visit to you
 v.leaveLobby()     // away: out of the lobby, nobody sees you or can knock, your visits end (kept across restarts
@@ -707,9 +757,13 @@ world.inside; world.point(); world.leave(); world.release()
 v.place(key, { x, z, turn }); v.unplace(key)
 v.proposeEdge(key, { mine, theirs, along }); v.acceptEdge(key); v.declineEdge(key); v.removeEdge(key)
 
-// hosting: a visitor pointed (8.3): { id (its visit), visitor: { id, name, sim }, from: [x, y, z] (its eyes,
-// where this page has it), dir: [x, y, z] (a unit vector, where it looked), yaw, pitch (in the room's terms) }.
-// What it does, if anything, is yours: take it through an allow list of what a guest may do.
+// hosting: what visitors may click (8.3), by type: things marked userData.visitPoint = "<type>". A type not
+// named does nothing. One not cosmetic throws unless agreed: true (your user agreed to it, by name).
+v.interactions({ spin: { cosmetic: true, label: "spin it", who: "everyone", reach: 4,
+                         run({ id, visitor, type, object, point, distance }) { /* ... */ } } });
+// every point, raw: { id (its visit), visitor: { id, name, sim }, from: [x, y, z] (its eyes, where this page has
+// it), dir: [x, y, z] (a unit vector, where it looked), yaw, pitch (in the room's terms) }; and each
+// interaction run: "interaction" { id, visitor, type, cosmetic, object }
 v.on("point", ({ id, visitor, from, dir }) => { /* ... */ });
 
 // visiting: where to show the room you are in; the library draws its scene there and captures input; while the
@@ -721,8 +775,12 @@ Visit.walk(pose, input, dt, { speed, blocked })   // first-person walking with w
 Visit.panel(element, v)                          // an optional ready-made lobby panel: Link (Knock, to an older office) with a
                                                  //   message; links asked of you (Link, Not now, ★ always: a guest from now on);
                                                  //   your links (Go there, Back to my room, Put in my world, Unlink); your visitors
-                                                 //   and who is linked to you (Kick, Unlink); stars, door, status, Go offline / online:
+                                                 //   and who is linked to you (Kick, Unlink, their look / your model); visitors
+                                                 //   look like (default); your world (Map); stars, door, status, Go offline / online:
                                                  //   { element, release() }
+Visit.map(v)                                     // an optional ready-made map of your world from above (the panel's Map): drag,
+                                                 //   turn or type where friends' rooms sit; propose an edge when flush;
+                                                 //   { element, open(), close(), shown, release() }
 Visit.stage(v)                                   // an optional ready-made visit view: the room visited full-window (with the
                                                  //   link's numbers, Back to my room, Leave), or in a corner; a link starts in the
                                                  //   corner, whose click offers Go there, Put in my world (with v.world), Unlink;
@@ -811,9 +869,8 @@ match never opens: the visit ends `"link_failed"`.
 
 ## 13. Open questions
 
-- **Avatars.** Hosts know every visitor's pose, so they can draw visitors in their own room, and visitors
-  then see each other there too (8.1). In a world (8.4) each page draws its own user as itself; whether a
-  host's own user is seen in its room by others is for a later version.
+- **Avatars, further.** A host may now show a visitor as its own avatar (8.6); whether a host's own user is seen
+  in its room by others, and avatars that do more than walk and stand (sit, wave), are for a later version.
 - **Further worlds.** A world holds an office's own friends' plots; a friend's friends (a world beyond the
   next plot) are not drawn.
 - **More than one corner.** One link is shown in the corner at a time; others wait. A page could show several,

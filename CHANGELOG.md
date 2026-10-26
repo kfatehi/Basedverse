@@ -9,6 +9,54 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.9.0 — unreleased (the `v0.9` branch)
+
+**A map of your world, avatars, and interactions by type.**
+
+- **The map** (the panel's **Map**, `Visit.map`): your world from above. Drag a friend's room where you want it,
+  turn it, or type where its middle goes; it snaps to half units and flush against what is near. Flush against a
+  side of yours, it offers to propose an edge. Kept by visit-client, across reloads and restarts. A link you put
+  in your world (0.8) now stays there across a reload too.
+- **Avatars** ([visit/SPEC.md](visit/SPEC.md) 8.6): your page can give Visit your own body (`v.avatar`), and a
+  room you visit can show you as it. Whose look visitors have in your room is your user's choice: their own
+  avatars, or your models, by default (the panel's "visitors look like") and per friend ("their look" / "your
+  model" by each visitor). A body goes only to a room that asks for it, is read as data (as a scene is), and walks
+  and stands with its own `walk` and `idle` clips.
+- **Interactions** (SPEC 8.3): what a visitor's click may do, by type (`v.interactions`), on things marked
+  `userData.visitPoint = "<type>"`; a type not listed does nothing, and is not shown hot. Each is cosmetic or
+  not, and one that is not is refused unless the room says its user agreed to it (`agreed: true`). The guide
+  says, for whoever integrates: **don't implement any interactions other than cosmetic ones unless specifically
+  agreed upon by the user.**
+
+Protocol names are unchanged: an older Visit never asks for an avatar nor sends one, and an older visitor sees
+`userData.visitPoint` types as plain marks (its host decides each point, as before).
+
+### What changed
+
+- visit-client: page messages `link_where`, `avatar_clear`, `avatar_want`, `avatars`, `avatar_use`; to the page
+  `avatars` (also in `ready`), `avatar`, and `where` in `visit_started`; a page frame flag for its own avatar
+  (5.4, bit 2); a link control message `avatar_want` and a stream of the visitor's avatar (7.4, kind 2). The
+  state file keeps whose look visitors have (`avatars`).
+- visit.js: `v.interactions`, the `interaction` event; `v.avatar`, `v.useAvatars`, `v.useAvatar`, `v.avatarUse`,
+  `v.avatars`, `avatar` on `v.visitors`; `Visit.map`. The panel: Map, visitors look like, their look / your
+  model. The visitor's crosshair shows an interaction's label.
+- The test room: an interaction (`spin`), a box marked with a type it does not take, its own avatar, visitors
+  drawn as theirs. The tests: the browser test's interactions, map, avatars and reloads; the end-to-end test's
+  avatars.
+- [visit/SPEC.md](visit/SPEC.md): sections 4.1, 5.2 to 5.4, 7.2, 7.4, 8.3, 8.5, 8.6 (new), 9, 13.
+  [visit/INTEGRATING.md](visit/INTEGRATING.md): step 5 (interactions, avatars), steps 6, 7 and 9 (the map),
+  the checklist.
+
+### What an integration does
+
+1. Get visit-client 0.9.0. The lobby is unchanged: nothing to deploy.
+2. If your room took points (`visit.on("point")` with an allow list): move them to `visit.interactions`, one
+   type each, and mark what may be clicked `userData.visitPoint = "<type>"` (INTEGRATING.md step 5). Cosmetic
+   ones only, unless your user agreed to another, by name. Points still reach you raw meanwhile.
+3. Draw a visitor's `avatar` when its entry has one, your model otherwise (step 5). Optional: give your own,
+   `visit.avatar(body)`.
+4. Run step 8 again, and step 9's check (the Map now).
+
 ## v0.8.0 — 2026-10-26
 
 **Links: a room you link with shows in a corner first** ([visit/SPEC.md](visit/SPEC.md) 8.5). The panel's
