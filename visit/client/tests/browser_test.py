@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """visit.js in real browsers: the real lobby (in-process), two visit-clients, the test room (room.html, three.js)
-open in two headless Chromes driven over the DevTools protocol. B knocks on A, draws A's scene, walks around
-it with real key presses, sees what A changes, and both pages reload mid-visit. Run by run-browser.sh, which
-starts the Chromes.
+open in two headless Chromes driven over the DevTools protocol, A's made with three.js r128 and B's with r160.
+B knocks on A, draws A's scene, walks around it with real key presses, sees what A changes, and both pages
+reload mid-visit. Then worlds: each draws the other's plot round its own, walks onto it and off, agrees an edge
+and walks across it, and sees an outline when the door shuts. Run by run-browser.sh, which starts the Chromes.
 
     python3 browser_test.py path/to/visit-client CDP_PORT_A CDP_PORT_B OUT_DIR
 """
@@ -113,9 +114,11 @@ async def main():
         a, b = Tab(CDP_A, "A"), Tab(CDP_B, "B")
         await a.start()
         await b.start()
-        room = "http://127.0.0.1:%d/room.html#port=%d&token=%s"
-        await a.goto(room % (WEB_PORT, PORT_A, ta))
-        await b.goto(room % (WEB_PORT, PORT_B, tb))
+        # A's room is made with three.js r128, B's with r160: each draws the other's with its own (a world), or with
+        # the other's very release (a visit).
+        room = "http://127.0.0.1:%d/room.html%s#port=%d&token=%s"
+        await a.goto(room % (WEB_PORT, "", PORT_A, ta))
+        await b.goto(room % (WEB_PORT, "?three=160", PORT_B, tb))
 
         print("\nconnecting")
         both = "window.v && v.state === 'online' && v.offices.filter(o => o.ready).length === 2"
@@ -268,6 +271,111 @@ async def main():
         await a.js("document.querySelector('.visit-panel button[data-v=back]').click()")
         check("A clicks Go online: online again", await a.until("v.state === 'online' && v.state"), "online")
         check("and B sees A again, ready to visit", await b.until("v.offices.some(o => o.name === 'A' && o.ready)"), True)
+
+        print("\nguests, from the panel")
+        star = "document.querySelector('.visit-panel button.star[data-name=B]')"
+        check("A's panel has a star by B, not lit", await a.until("%s && %s.textContent" % (star, star)), "☆")
+        await a.js("%s.click()" % star)
+        check("A clicks it: B is A's guest, by B's key", await a.until("v.guests.length === 1 && v.guests[0].key === v.offices.find(o => o.name === 'B').key && v.guests[0].name"), "B")
+        check("and the star is lit", await a.until("%s.textContent === '★'" % star), True)
+        await a.js("window.knocksSeen = 0; v.on('knock', () => window.knocksSeen++)")
+        await b.js("v.knock(v.offices.find(o => o.name === 'A').id)")
+        check("B knocks: in A's room at once, the door being open", await b.until("v.visiting && v.visiting.host.name"), "A")
+        check("A's panel never asked: B walked in", (await a.until("v.visitors.length === 1 && document.querySelector('.visit-panel').textContent.includes('walked in')"),
+                                                     await a.js("window.knocksSeen")), (True, 0))
+        await b.js("v.leave()")
+        await a.until("v.visitors.length === 0")
+        await a.js("(s => { s.value = 'closed'; s.dispatchEvent(new Event('change', { bubbles: true })); })(document.querySelector('.visit-panel select[data-v=door]'))")
+        check("A closes its door from the panel", await a.until("v.door === 'closed' && v.door"), "closed")
+        await b.js("v.knock(v.offices.find(o => o.name === 'A').id)")
+        check("then B knocks, and A's panel asks", await a.until("!!document.querySelector('.visit-panel .knock')"), True)
+        await a.js("document.querySelector('.visit-panel .knock button[data-v=out]').click()")
+        await a.js("v.setDoor(true); v.removeGuest(v.guests[0].key)")
+        check("door open again, B no guest", await a.until("v.door === 'open' && v.guests.length === 0"), True)
+
+        print("\nthe world: friends' plots round your room, walked onto")
+        world = "http://127.0.0.1:%d/room.html?world=1" % WEB_PORT
+        await a.goto(world)
+        await b.goto(world + "&three=160")
+        up = "window.v && window.room && room.world && v.state === 'online' && v.offices.filter(o => o.ready).length === 2"
+        check("both rooms open as worlds", (bool(await a.until(up, 30)), bool(await b.until(up, 30))), (True, True))
+        await a.js("v.addGuest(v.offices.find(o => o.name === 'B').key, 'B')")
+        await b.js("v.addGuest(v.offices.find(o => o.name === 'A').key, 'A')")
+        seen = "room.world.plots.length === 1 && room.world.plots[0].seen && room.world.plots[0]"
+        pa_, pb_ = await a.until(seen, 20), await b.until(seen, 20)
+        check("guests both ways: each sees the other's plot, in its world", (pa_ and pa_["name"], pb_ and pb_["name"]), ("B", "A"))
+        r = pa_["rect"]
+        check("placed by itself round A's own, not on it", (round(r[2] - r[0], 3), round(r[3] - r[1], 3), not (r[0] < 10 and r[2] > 0 and r[1] < 8 and r[3] > 0)), (10, 8, True))
+        check("A (r128) draws B's (r160) scene with A's own three.js: B's spinner there", await a.until(
+            "(w => !!(w && w.scene && w.scene.T.REVISION === '128' && w.scene.root.getObjectByName('spinner')))([...v._watches.values()][0])"), True)
+        check("and B (r160) A's (r128), with B's", await b.until(
+            "(w => !!(w && w.scene && w.scene.T.REVISION === '160' && w.scene.root.getObjectByName('spinner')))([...v._watches.values()][0])"), True)
+        check("B's lights (r160: lit the new way) over pi in A's world (r128 multiplies them by pi): as B sees them", await a.js(
+            "(s => { let l; s.root.traverse(o => { if (o.isDirectionalLight) l = o; }); return Math.round(l.intensity * 1000) / 1000; })([...v._watches.values()][0].scene)"),
+            round(0.6 / 3.14159265, 3))
+        frames0 = await a.js("window.renders")
+        await asyncio.sleep(0.5)
+        check("and A's page goes on drawing", await a.js("window.renders") > frames0 + 10, True)
+        await a.shot("a_world.png")
+
+        async def walk(tab, x, z, yaw, secs, until=None):
+            """From there, facing there, W held for `secs`, or (`until`, a JS test) until it holds, at most 3 times
+            as long: a page drawing slowly (as these do, on the processor, under load) walks slowly."""
+            await tab.js("Object.assign(room.me, { x: %f, z: %f, yaw: %f })" % (x, z, yaw))
+            await asyncio.sleep(0.1)
+            await tab.key("KeyW", "w", 87, True)
+            if until:
+                for _ in range(int(secs * 30)):
+                    if await tab.js(until):
+                        break
+                    await asyncio.sleep(0.1)
+                await asyncio.sleep(0.3)   # on past the edge a little
+            else:
+                await asyncio.sleep(secs)
+            await tab.key("KeyW", "w", 87, False)
+            await asyncio.sleep(0.4)
+
+        midz = (r[1] + r[3]) / 2
+        await walk(a, r[0] - 1.0, midz, -3.14159 / 2, 1.5, "!!room.where")   # west of B's plot, facing east, through its west doorway
+        check("A walks onto B's plot: in B's room", await a.until("room.where && room.where.name"), "B")
+        check("B has A as its visitor, where A stepped in and on", await b.until("v.visitors.length === 1 && v.visitors[0].pose.x > 0.5 && v.visitors[0].visitor.name"), "A")
+        check("B draws A's body; A's copy of B's room hides it (A's page draws A as itself)", await a.until(
+            "(s => s.own.length === 1 && !s.own[0].visible)([...v._watches.values()][0].scene)"), True)
+        await a.shot("a_in_b.png")
+        await b.shot("b_has_a.png")
+        bx = await b.js("v.visitors[0].pose.x")
+        await walk(a, await a.js("room.me.x"), await a.js("room.me.z"), 3.14159 / 2, 2.0, "room.where === null")   # turned round: back out west
+        check("A walks back off B's plot: home again, and B's visitor gone", (await a.until("room.where === null && room.world.in === null"), await b.until("v.visitors.length === 0")), (True, True))
+        check("A ends up west of B's plot, walking on in its own world", await a.js("room.me.x") < r[0], True)
+
+        print("\nan agreed edge")
+        await a.js("v.proposeEdge(v.offices.find(o => o.name === 'B').key, { mine: 'east', theirs: 'west', along: 0 })")
+        prop = await b.until("v.edgeProposals.length === 1 && v.edgeProposals[0]")
+        check("A proposes its east side against B's west: B is asked, in its own terms", (prop["name"], prop["mine"], prop["theirs"]), ("A", "west", "east"))
+        check("B's panel asks", await b.until("!!document.querySelector('.visit-panel button[data-v=edge_yes]')"), True)
+        await b.js("document.querySelector('.visit-panel button[data-v=edge_yes]').click()")
+        ea = await a.until("room.world.plots[0] && room.world.plots[0].edge && room.world.plots[0].rect")
+        eb = await b.until("room.world.plots[0] && room.world.plots[0].edge && room.world.plots[0].rect")
+        check("agreed: in A's world, B's plot against A's east side", [round(x, 3) for x in ea], [10, 0, 20, 8])
+        check("and in B's, A's against B's west side: the same for both", [round(x, 3) for x in eb], [-10, 0, 0, 8])
+        await walk(a, 8.5, 4, -3.14159 / 2, 1.8, "!!room.where")   # in A's room, facing its east doorway: straight through into B's
+        check("A walks out of its own room's east door and straight into B's, by its west door", await a.until("room.where && room.where.name"), "B")
+        check("B has A", await b.until("v.visitors.length === 1 && v.visitors[0].visitor.name"), "A")
+        await a.shot("a_across_edge.png")
+        await walk(a, await a.js("room.me.x"), await a.js("room.me.z"), 3.14159 / 2, 1.8, "room.where === null")
+        check("and back: home in A's own room", (await a.until("room.where === null"), 0 < await a.js("room.me.x") < 10.01), (True, True))
+
+        print("\nthe door shut: an outline")
+        await b.js("v.setDoor(false)")
+        check("B shuts its door: A no longer sees B's plot, only where it is (agreed), and who",
+              await a.until("(p => p && !p.seen && p.edge && p.name)(room.world.plots[0])", 10), "B")
+        check("drawn as an outline with a name", await a.until("room.world.outlines.children.length === 2"), True)
+        await a.shot("a_outline.png")
+        await b.js("v.setDoor(true)")
+        await b.js("v.removeEdge(v.offices.find(o => o.name === 'A').key)")
+        check("B takes the edge back: gone for A too", await a.until("v.edges.length === 0"), True)
+        await a.js("v.removeGuest(v.guests[0].key)")
+        await b.js("v.removeGuest(v.guests[0].key)")
 
         print("\nwhat a host sends is only data")
         r = await b.js("""(() => { const c = Visit._test.cleanScene, budget = { vertices: 0, objects: 0 };

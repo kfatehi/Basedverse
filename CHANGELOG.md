@@ -9,6 +9,53 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.7.0 — 2026-10-26
+
+**Worlds: your friends' rooms round yours, walked onto without knocking** ([visit/WORLD.md](visit/WORLD.md),
+SPEC 8.4). You stay in your own room, as yourself; each friend's room sits round it as a plot of land your page
+draws, with its own lights, and you walk onto it: its owner's room has you (its `spawn`, `move`, walls) until
+you walk off, home again. Where friends' plots sit is each office's own choice (by itself, a ring round yours);
+two friends can agree an edge ("my east side to your west"), the same for both, walked across seamlessly. A
+friend is a **guest** both ways: an office now has a lasting **key** (its link endpoint's, kept in its state
+file), a guest list of keys and a **door**; through an open door a guest's knock is let in at once, and a guest
+sees your plot. Protocol names are unchanged: a 0.7 office and a 0.6 one still meet and visit (a 0.6 office is
+never watched: its lobby entry does not say `world`).
+
+### What changed
+
+- visit-client: the state file keeps the office's secret key (written readable by its owner only), its door,
+  guests, layout and edges, as well as whether it is away. Page messages `door`, `guest_add`, `guest_remove`,
+  `world`, `enter`, `exit`, `place`, `unplace`, `edge_propose`, `edge_accept`, `edge_decline`, `edge_remove`;
+  and to the page `guests`, `layout`, `edges`, `edge_proposed`, `edge_declined`, `enter` / `exit` (host side),
+  `enter_refused`. `ready` has `key`, `door`, `guests`, `layout`, `edges`; `visit_started` has the other's
+  `peer.key` (as the link proved it), `guest`, and `watch` / `inside`. With the world on, it watches its guests'
+  plots by itself; a knock to watch never reaches a page. Shutting the door, or taking a guest off, ends their
+  watches. Link control messages `enter`, `exit`, `enter_refused`, `edge`, `edge_ok`, `edge_no`, `edge_off`.
+- visit.js: `v.world({ scene, renderer })` with `frame` and `render`; `host({ plot, unit })`;
+  `spawn(visitor, { at })`; `v.key`, `v.door`, `v.guests`, `v.layout`, `v.edges`, `v.edgeProposals`,
+  `v.watchers`; `setDoor`, `addGuest`, `removeGuest`, `place`, `unplace`, `proposeEdge`, `acceptEdge`,
+  `declineEdge`, `removeEdge`. A neighbour's scene is read with your three.js release. Deltas to a watcher not
+  in the room are version 2 (no pose of its). The panel: "your door", a star by each office to make it a guest,
+  and edges proposed to you (Agree / No).
+- The lobby: each office's `key`, `watchers` and `world` in `lobby`; `from.key` on a knock; knocks to watch
+  (`watch: true`: counted apart, at most 8 watchers of a plot and 8 plots watched, 30 a minute, not stopped by
+  busy, never moving the watcher out of the room it is in); hello's `world`.
+- The test room: `?world=1` (doorways, you as a block walking with WASD) and `?three=<r>`.
+- [visit/SPEC.md](visit/SPEC.md): sections 2, 3 (points 9 to 12), 4.1, 5, 6.2 to 6.6, 7.2, 8.1, 8.4 (new), 9, 10,
+  11, 13. [visit/INTEGRATING.md](visit/INTEGRATING.md): "Optional — your world", step 7, the checklist.
+
+### What an integration does
+
+1. **The lobby first** (whoever runs it): `bin/deploy-lobby`, for keys and watches. With an older lobby
+   everything works as in 0.6: guests just knock, and there are no worlds.
+2. Get visit-client 0.7.0.
+3. Make sure your launcher gives visit-client a `VISIT_STATE_FILE` (`bin/setup` does): without one, the office's
+   key is new every run, and its friends no longer know it. The file now holds a secret key: outside your
+   repository, never copied anywhere.
+4. Nothing else is required: a 0.6 page works as before, and with `Visit.panel` your user gets the door and the
+   stars. For a world, follow INTEGRATING.md's "Optional — your world": say your `plot` and `unit`, let visitors
+   walk off it, give `spawn` its `at`, and draw with `visit.world`'s `frame` and `render`.
+
 ## v0.6.0 — 2026-10-26
 
 **Visitors can point, and objects' userData stays home.** A visitor looking around has a crosshair, and a
