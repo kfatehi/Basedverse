@@ -38,7 +38,22 @@
   // draws it with the very three.js release the host runs, fetched from a CDN and checked against the hashes
   // below (Subresource Integrity): nothing else ever runs from it, and what the host sends is only ever read as
   // data (cleanScene). The visitor walks at once, predicted here, and the host's answer corrects it.
-  const KEY = 1, EDIT = 2, AVATAR = 4;   // frames' flags: bit 0 a key delta; bit 1 a scene edit, bit 2 this office's avatar (page to visit-client) (SPEC 5.4)
+  const KEY = 1, EDIT = 2, AVATAR = 4, AUDIO = 8;   // frames' flags: bit 0 a key delta; bit 1 a scene edit, bit 2 this office's avatar (page to visit-client); bit 3 voice (SPEC 5.4)
+  // The huddle (SPEC 8.7): 20 ms of 48 kHz mono a packet, Opus at 24 kbps; played this far behind, to ride out jitter.
+  const VOICE_RATE = 48000, VOICE_FRAME = 960, VOICE_BITRATE = 24000, VOICE_LEAD = 0.06, VOICE_LATE = 0.4;
+  // The microphone's side: 20 ms at a time, to the page (an AudioWorklet, from a blob: as the ticker's Worker is).
+  const MIC_WORKLET = `registerProcessor("visit-mic", class extends AudioWorkletProcessor {
+    constructor() { super(); this.b = new Float32Array(${VOICE_FRAME}); this.n = 0; }
+    process(inputs) {
+      const ch = inputs[0] && inputs[0][0];
+      if (ch) for (let i = 0; i < ch.length; i++) {
+        this.b[this.n++] = ch[i];
+        if (this.n === ${VOICE_FRAME}) { this.port.postMessage(this.b, [this.b.buffer]); this.b = new Float32Array(${VOICE_FRAME}); this.n = 0; }
+      }
+      return true;
+    }
+  });`;
+  const rms = a => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * a[i]; return Math.sqrt(s / (a.length || 1)); };
   // An avatar (SPEC 8.6): at most this much, gzipped; and once read by a host, at most so many vertices and objects.
   const MAX_AVATAR = 4 << 20, AVATAR_VERTICES = 300000, AVATAR_OBJECTS = 2000;
   // How often a host sends its scene's changes, and the places of everything that has moved, regardless; how far
@@ -489,6 +504,12 @@
       this.watchers = [];      // who sees your room from outside it (your guests' worlds, links): [{ id, visitor, inside, link }]
       this.links = [];         // your links (8.5): [{ id, host, where ("corner", "aside" or "world"), inside }]
       this.avatars = { default: "mine", by: [] };   // whose look your visitors have in your room (8.6): "theirs" or "mine"
+      this.huddling = false;   // in the huddle (8.7): your voice goes to those you are linked to who are in it, theirs to you
+      this.muted = false;
+      this.huddlers = [];      // in the huddle with you: [{ key, name, speaking }]
+      this._huddleOn = new Map();   // channel -> the office on the other side of that visit is in the huddle
+      this._voices = new Map();     // their key -> a decoder, and where its next moment plays
+      this._mic = null;
       this.visiting = null;    // the room in the stage: { id, host, paused, link, inside } (a link's: inside once you go there)
       this.visitors = [];      // { id, visitor, pose }
       this._on = {};
@@ -563,7 +584,7 @@
       });
     }
     _send(m) { if (this._ws && this._ws.readyState === 1) this._ws.send(JSON.stringify(m)); }
-    close() { this._closed = true; this._loop.stop(); this._dropAll(); if (this._ws) this._ws.close(); }
+    close() { this._closed = true; this._loop.stop(); this._micStop(); this._dropAll(); if (this._ws) this._ws.close(); }
 
     _ready(m) {
       this.state = m.away ? "away" : m.online ? "online" : "offline";
@@ -576,7 +597,9 @@
       this.edgeProposals = [];
       this.knocks = []; this.knocking = [];
       this._avatarsFrom(m.avatars);
+      this._huddleOn.clear();
       for (const v of m.visits || []) this._started(v);
+      if (m.huddle && !this._mic) this._send({ type: "huddle", on: false });   // a huddle this page has no microphone for
       if (this._avatarOwn) this._avatarSend();   // a visit-client that came back has no avatar of this office's
       if (this._hooks) this._sendHost();   // a visit-client that came back: this page hosts, again
       if (this._world) this._send({ type: "world", on: true });
@@ -614,6 +637,8 @@
         case "guests": this._guests(m); break;
         case "avatars": this._avatarsFrom(m); this._avatarWants(); this._visitorsList(); break;
         case "avatar": this._avatarIn(m); break;
+        case "huddle_peer": if (m.on) this._huddleOn.set(m.channel, true); else this._huddleOn.delete(m.channel); this._huddlersList(); break;
+        case "huddle": if (!m.on && this._mic) this._micStop(); this.huddling = m.on === true && !!this._mic; this._huddlersList(); break;
         case "layout": this.layout = Array.isArray(m.layout) ? m.layout : []; break;
         case "edges": this.edges = Array.isArray(m.edges) ? m.edges : []; this.edgeProposals = this.edgeProposals.filter(p => !this.edges.some(e => e.key === p.key)); break;
         case "edge_proposed": {
@@ -866,6 +891,7 @@
         this._viewer = { id: m.id, channel: m.channel, count: 0, scene: null, sceneQ: null, since: performance.now(), loading: false, failed: false };
         this._placeholder();
       }
+      if (m.huddle) this._huddleOn.set(m.channel, true);
       this._visitorsList();
       this._emit("visit_started", { id: m.id, role: m.role, peer: m.peer, guest: m.guest === true, link: m.link === true });
     }
@@ -878,6 +904,7 @@
       const l = this._links.get(m.channel);
       if (l && l.id === m.id) { this._links.delete(m.channel); this._sceneDrop(l); }
       if (this.visiting && this.visiting.id === m.id) { this._dropViewer(); this.visiting = null; this._cornerNext(); }
+      this._huddleOn.delete(m.channel);
       this._visitorsList();
       this._emit("visit_ended", { id: m.id, reason: m.reason });
     }
@@ -899,6 +926,107 @@
         avatar: h.avatar && h.visitor.key && this.avatarUse(h.visitor.key) === "theirs" ? h.avatar.object : null }));
       this.watchers = hs.filter(h => h.watch).map(h => ({ id: h.id, visitor: h.visitor, inside: h.inside, link: h.link }));
       this.links = [...this._links.values()].map(w => ({ id: w.id, host: w.host, where: w.where, inside: w.inside }));
+      this._huddlersList();
+    }
+
+    // ---------- the huddle (8.7) ----------
+    // Voice with everyone you are linked to (a visit either way, a link, a plot in your world or yours in theirs)
+    // who is in the huddle too: join (your microphone, with echo cancelled: headphones are better still), mute, leave.
+    // A page that goes leaves it (its microphone goes with it).
+    async huddle(on) {
+      if (!on) { this._micStop(); this.huddling = false; this._send({ type: "huddle", on: false }); this._huddlersList(); this._changed(); return; }
+      if (this._mic) return;
+      if (typeof AudioEncoder === "undefined" || typeof AudioDecoder === "undefined") throw new Error("visit.huddle: this browser cannot encode voice (WebCodecs)");
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+      const ctx = this._audio();
+      await ctx.resume();
+      if (!this._micModule) {
+        this._micModule = URL.createObjectURL(new Blob([MIC_WORKLET], { type: "text/javascript" }));
+        await ctx.audioWorklet.addModule(this._micModule);
+      }
+      const src = ctx.createMediaStreamSource(stream), node = new AudioWorkletNode(ctx, "visit-mic"), hush = ctx.createGain();
+      hush.gain.value = 0; src.connect(node); node.connect(hush); hush.connect(ctx.destination);   // pulled by the graph, heard by nobody here
+      const enc = new AudioEncoder({ output: c => this._voiceOut(c), error: e => console.warn("visit: the voice encoder failed", e) });
+      enc.configure({ codec: "opus", sampleRate: VOICE_RATE, numberOfChannels: 1, bitrate: VOICE_BITRATE });
+      const mic = this._mic = { stream, src, node, hush, enc, t: 0, level: 0 };
+      node.port.onmessage = e => {
+        const pcm = e.data;
+        mic.level = rms(pcm);
+        if (this.muted || enc.state !== "configured") return;
+        enc.encode(new AudioData({ format: "f32-planar", sampleRate: VOICE_RATE, numberOfFrames: pcm.length, numberOfChannels: 1, timestamp: mic.t, data: pcm }));
+        mic.t += pcm.length * 1e6 / VOICE_RATE;
+      };
+      this.huddling = true;
+      this._send({ type: "huddle", on: true });
+      this._huddlersList();
+      this._changed();
+    }
+    mute(on) { this.muted = !!on; this._changed(); }
+    _audio() { return this._ctx && this._ctx.state !== "closed" ? this._ctx : (this._ctx = new AudioContext({ sampleRate: VOICE_RATE, latencyHint: "interactive" })); }
+    _micStop() {
+      const m = this._mic;
+      if (!m) return;
+      this._mic = null;
+      m.node.port.onmessage = null;
+      for (const t of m.stream.getTracks()) t.stop();
+      try { m.src.disconnect(); m.node.disconnect(); m.hush.disconnect(); } catch (e) { /* gone */ }
+      if (m.enc.state !== "closed") m.enc.close();
+      for (const s of this._voices.values()) { if (s.dec.state !== "closed") s.dec.close(); s.gain.disconnect(); }
+      this._voices.clear();
+    }
+    // A packet of your voice: to visit-client, which sends it to each office in the huddle with you.
+    _voiceOut(chunk) {
+      if (!this._ws || this._ws.readyState !== 1 || !this.huddling) return;
+      const buf = new Uint8Array(11 + chunk.byteLength), dv = new DataView(buf.buffer);
+      dv.setUint16(0, 0); dv.setUint8(2, AUDIO); dv.setBigUint64(3, BigInt(Math.round(performance.now() * 1000)));
+      chunk.copyTo(buf.subarray(11));
+      this._ws.send(buf);
+    }
+    // A packet of someone's voice: decoded, and played just after the last of theirs (a little behind now, to ride
+    // out the network's unevenness; too far behind, caught up).
+    _voiceIn(ch, data) {
+      if (!this.huddling || !this._ctx) return;
+      const p = this._peerOf(ch), key = (p && p.key) || "channel:" + ch;
+      let s = this._voices.get(key);
+      if (!s) {
+        const ctx = this._ctx, gain = ctx.createGain();
+        gain.connect(ctx.destination);
+        s = { key, gain, next: 0, ts: 0, level: 0, heardAt: 0, frames: 0, dec: null };
+        s.dec = new AudioDecoder({ output: d => this._voicePlay(s, d), error: e => { console.warn("visit: a voice could not be decoded", e); this._voices.delete(key); } });
+        s.dec.configure({ codec: "opus", sampleRate: VOICE_RATE, numberOfChannels: 1 });
+        this._voices.set(key, s);
+      }
+      if (s.dec.state !== "configured") return;
+      s.dec.decode(new EncodedAudioChunk({ type: "key", timestamp: (s.ts += 20000), data }));
+    }
+    _voicePlay(s, d) {
+      const ctx = this._ctx, n = d.numberOfFrames, buf = ctx.createBuffer(1, n, d.sampleRate), pcm = buf.getChannelData(0);
+      try { d.copyTo(pcm, { planeIndex: 0, format: "f32-planar" }); } catch (e) { d.close(); return; }
+      d.close();
+      s.level = rms(pcm); s.frames++;
+      if (s.level > 0.01) s.heardAt = performance.now();
+      const src = ctx.createBufferSource(), now = ctx.currentTime;
+      src.buffer = buf; src.connect(s.gain);
+      if (s.next < now || s.next > now + VOICE_LATE) s.next = now + VOICE_LEAD;
+      src.start(s.next);
+      s.next += buf.duration;
+    }
+    _peerOf(ch) {
+      const h = this._hosted.get(ch);
+      if (h) return h.visitor;
+      const w = this._viewing(ch) || this._links.get(ch);
+      return w ? (w.host || (this.visiting && this.visiting.host)) : null;
+    }
+    // Who is in the huddle with you: each office once (two visits may join you), speaking if heard just now.
+    _huddlersList() {
+      const seen = new Map();
+      if (this.huddling) for (const ch of this._huddleOn.keys()) {
+        const p = this._peerOf(ch), key = p && (p.key || p.id);
+        if (!p || seen.has(key)) continue;
+        const s = this._voices.get(p.key);
+        seen.set(key, { key: p.key || null, name: p.name || "", speaking: !!s && performance.now() - s.heardAt < 400 });
+      }
+      this.huddlers = [...seen.values()];
     }
 
     // ---------- links (8.5) ----------
@@ -1724,6 +1852,7 @@
     // A delta of the scene of the room visited, or of a plot watched (SPEC 5.4).
     _frame(buf) {
       if (buf.byteLength < 11) return;
+      if (new DataView(buf).getUint8(2) === AUDIO) return this._voiceIn(new DataView(buf).getUint16(0), new Uint8Array(buf, 11));
       const dv = new DataView(buf), w = this._viewing(dv.getUint16(0));
       if (w) this._sceneDelta(w, dv, (dv.getUint8(2) & KEY) !== 0);
     }
@@ -2101,6 +2230,7 @@
 .visit-panel button.star.on { color: #e3b341; }
 .visit-panel .knock label { display: flex; align-items: center; gap: 4px; color: #7a4a00; }
 .visit-panel .lnk { display: block; } .visit-panel .lnk .btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.visit-panel .speaking { color: #3fb950; } .visit-panel button.on { background: #9e2f2f; border-color: #9e2f2f; color: #fff; }
 .visit-panel .knock input[type=checkbox] { flex: none; }
 .visit-panel input { flex: 1; min-width: 0; }`;
 
@@ -2140,6 +2270,12 @@
       for (const p of v.edgeProposals) {
         rows.push(`<div class="row knock"><b>${esc(p.name)}</b> proposes their plot's ${esc(p.theirs)} side against your ${esc(p.mine)} side
           <div class="btns"><button class="go" data-v="edge_yes" data-key="${esc(p.key)}">Agree</button><button data-v="edge_no" data-key="${esc(p.key)}">No</button></div></div>`);
+      }
+      // The huddle (8.7): voice with those you are linked to who are in it too.
+      if (v.state === "online") {
+        if (!v.huddling) rows.push(`<div class="row"><span class="grow">huddle <span class="muted">· voice with those you are linked to</span></span><button data-v="huddle" title="your microphone, to everyone linked to you who joins too (headphones are best)">Join huddle</button></div>`);
+        else rows.push(`<div class="row lnk"><div>in the huddle${v.huddlers.length ? ": " + v.huddlers.map(h => `<b class="${h.speaking ? "speaking" : ""}">${h.speaking ? "🔊 " : ""}${esc(h.name)}</b>`).join(", ") : ` <span class="muted">(nobody else yet: those linked to you who join)</span>`}</div>
+          <div class="btns"><button data-v="mute" class="${v.muted ? "on" : ""}">${v.muted ? "Unmute" : "Mute"}</button><button data-v="unhuddle">Leave</button></div></div>`);
       }
       if (v._world && v.state === "online") rows.push(`<div class="row"><span class="grow">your world: ${v._world.plots.length} ${v._world.plots.length === 1 ? "room" : "rooms"} round yours</span><button data-v="map" title="where your friends' rooms sit round yours, from above">Map</button></div>`);
       if (v.visiting && !v.visiting.link) rows.push(`<div class="row"><span class="grow">in <b>${esc(v.visiting.host.name)}</b>'s room${v.visiting.paused ? " (reloading)" : ""}</span><button data-v="leave">Leave</button></div>`);
@@ -2194,6 +2330,9 @@
       }
       else if (act === "leave") v.leave();
       else if (act === "map") (v._mapView || (v._mapView = map(v))).open();
+      else if (act === "huddle") v.huddle(true).catch(x => v._emit("error", { code: "huddle", message: String(x.message || x) }));
+      else if (act === "mute") v.mute(!v.muted);
+      else if (act === "unhuddle") v.huddle(false);
       else if (act === "look") v.useAvatar(b.dataset.key, b.dataset.use === v.avatars.default ? null : b.dataset.use);
       else if (act === "unlink") v.unlink(b.dataset.x);
       else if (act === "step_in") v.stepIn(b.dataset.x);
@@ -2225,8 +2364,9 @@
     root.addEventListener("focusout", () => setTimeout(draw, 0));
     v.on("change", draw);
     timer = setInterval(() => { if (v.knocks.length) draw(); }, 1000);   // the knocks' countdown
+    const speaking = setInterval(() => { if (v.huddling) { v._huddlersList(); draw(); } }, 250);   // who is speaking
     draw();
-    return { element: root, release() { clearInterval(timer); v.off("change", draw); root.remove(); } };
+    return { element: root, release() { clearInterval(timer); clearInterval(speaking); v.off("change", draw); root.remove(); } };
   }
 
   // ---------- your world's map: where friends' rooms sit round yours, seen from above ----------

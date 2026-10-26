@@ -22,6 +22,10 @@ const KEY: u8 = 1;
 const EDIT: u8 = 2;
 /// A page's own avatar (8.6): gzipped JSON, kept by its visit-client for the hosts that ask.
 const AVATAR: u8 = 4;
+/// A moment of this office's voice, or a peer's, in a huddle (8.7): one Opus packet.
+const AUDIO: u8 = 8;
+/// The most one packet of voice takes (20 ms of Opus is some tens of bytes).
+pub const MAX_AUDIO: usize = 1000;
 /// The most an avatar takes gzipped, and unpacked.
 pub const MAX_AVATAR: usize = 4 << 20;
 pub const MAX_AVATAR_JSON: usize = 16 << 20;
@@ -101,6 +105,24 @@ pub fn avatar_from_page(b: &[u8]) -> Option<Bytes> {
         return None;
     }
     Some(Bytes::copy_from_slice(&b[11..]))
+}
+
+/// A packet of the page's voice (its channel and timestamp are ignored), if the frame is one and not too big.
+pub fn audio_from_page(b: &[u8]) -> Option<Bytes> {
+    if b.len() < 12 || b[2] != AUDIO || b.len() - 11 > MAX_AUDIO {
+        return None;
+    }
+    Some(Bytes::copy_from_slice(&b[11..]))
+}
+
+/// A peer's packet of voice for the page, on the channel of the visit it came by.
+pub fn audio_to_page(channel: u16, data: &[u8]) -> Bytes {
+    let mut out = BytesMut::with_capacity(11 + data.len());
+    out.put_u16(channel);
+    out.put_u8(AUDIO);
+    out.put_u64(0);
+    out.extend_from_slice(data);
+    out.freeze()
 }
 
 /// A scene edit on a link's scene stream: its length (u32), then the gzipped JSON.

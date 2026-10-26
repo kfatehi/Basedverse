@@ -137,7 +137,7 @@ async function build(v) {
   const t = await build(v);
   v.host({
     // Where a visitor appears; in a world, where it stepped in (`at`), if that is not in a wall.
-    spawn: (who, { at } = {}) => at && !blocked(at.x, at.z) ? { x: at.x, y: 1.6, z: at.z, yaw: at.yaw, pitch: 0 } : { x: 2, y: 1.6, z: 6, yaw: 0, pitch: 0 },
+    spawn: (who, { at } = {}) => { const p = at && !blocked(at.x, at.z) ? { x: at.x, y: 1.6, z: at.z, yaw: at.yaw, pitch: 0 } : { x: 2, y: 1.6, z: 6, yaw: 0, pitch: 0 }; (window.spawns = window.spawns || []).push({ who: who.name, at: at || null, p, t: Math.round(performance.now()) }); return p; },
     // room.lift (the test sets it): a lift under every visitor, that far up from where they came in
     move: (pose, input, dt, who) => { window.movedFor = who && who.id; const p = Visit.walk(pose, input, dt, { speed: 2.5, blocked }); return window.room.lift != null ? Object.assign({}, p, { y: 1.6 + window.room.lift }) : p; },
     fov: 70,

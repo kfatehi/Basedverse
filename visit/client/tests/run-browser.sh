@@ -11,6 +11,7 @@ pids=()
 for p in 9351 9352; do
   google-chrome --headless=new --remote-debugging-port=$p --user-data-dir="$(mktemp -d)" --window-size=1280,720 \
     --use-angle=swiftshader --enable-unsafe-swiftshader --autoplay-policy=no-user-gesture-required \
+    --use-fake-ui-for-media-stream --use-fake-device-for-media-stream \
     --no-first-run --no-default-browser-check about:blank >/dev/null 2>&1 &
   pids+=($!)
 done

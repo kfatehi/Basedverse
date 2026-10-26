@@ -384,7 +384,13 @@ async def main():
         check("B has A", await b.until("v.visitors.length === 1 && v.visitors[0].visitor.name"), "A")
         await a.shot("a_across_edge.png")
         await walk(a, await a.js("room.me.x"), await a.js("room.me.z"), 3.14159 / 2, 3.0, "room.where === null")   # (at most 9 s: under load, slower)
-        check("and back: home in A's own room", (await a.until("room.where === null"), 0 < await a.js("room.me.x") < 10.01), (True, True))
+        home = (await a.until("room.where === null"), 0 < await a.js("room.me.x") < 10.01)
+        if home != (True, True):
+            r0 = await a.js("window.renders"); await asyncio.sleep(1); r1 = await a.js("window.renders")
+            print("      A:", await a.js("JSON.stringify({ me: room.me, where: room.where, in: room.world.in, keys: [...room.keys] })"), "frames/s:", r1 - r0,
+                  "B has A at:", await b.js("JSON.stringify(v.visitors.map(x => x.pose))"), "B frames/s:", await b.js("window.renders"))
+            print("      B's spawns:", await b.js("JSON.stringify((window.spawns || []).slice(-6))"))
+        check("and back: home in A's own room", home, (True, True))
 
         print("\nthe door shut: an outline")
         await walk(a, 8.5, 4, -3.14159 / 2, 1.8, "!!room.where")   # into B's again, to be lifted there
@@ -521,6 +527,31 @@ async def main():
             "v.visitors[0].avatar === null && !!room.scene.getObjectByName('body:B') && !room.scene.getObjectByName('avatar:B')"), True)
         await b.js("v.leave()")
         await a.until("v.visitors.length === 0")
+
+        print("\nthe huddle: voice with those you are linked to")
+        await a.js("v.knock(v.offices.find(o => o.name === 'B').id, 'talk?')")
+        await b.until("v.knocks.length === 1")
+        await b.js("v.answer(v.knocks[0].id, true)")
+        await b.until("v.visitors.length === 1")
+        await a.js("document.querySelector('.visit-panel button[data-v=huddle]').click()")
+        check("A joins the huddle from its panel (its microphone): nobody else yet", await a.until("v.huddling && v.huddlers.length === 0 && !!v._mic"), True)
+        check("B, not in it, hears nothing of A", (await asyncio.sleep(1)) or await b.js("v._voices.size"), 0)
+        await b.js("document.querySelector('.visit-panel button[data-v=huddle]').click()")
+        check("B joins: each has the other in the huddle", (await a.until("v.huddlers.length === 1 && v.huddlers[0].name"), await b.until("v.huddlers.length === 1 && v.huddlers[0].name")), ("B", "A"))
+        check("B hears A: A's voice decoded and played at B (the fake microphone's tone, loud enough)", await b.until(
+            "(s => !!s && s.frames > 50 && s.level > 0.01)([...v._voices.values()][0])"), True)
+        check("and A hears B", await a.until("(s => !!s && s.frames > 50 && s.level > 0.01)([...v._voices.values()][0])"), True)
+        check("A's panel shows B speaking", await a.until("document.querySelector('.visit-panel').textContent.includes('🔊 B')"), True)
+        await a.js("document.querySelector('.visit-panel button[data-v=mute]').click()")
+        await asyncio.sleep(0.6)
+        n = await b.js("[...v._voices.values()][0].frames")
+        await asyncio.sleep(1)
+        check("A mutes: nothing more of A reaches B", await b.js("[...v._voices.values()][0].frames"), n)
+        await a.js("document.querySelector('.visit-panel button[data-v=unhuddle]').click()")
+        check("A leaves: out of it, its microphone off, and gone from B's huddle", (await a.until("!v.huddling && !v._mic"), await b.until("v.huddling && v.huddlers.length === 0")), (True, True))
+        await b.js("v.huddle(false)")
+        await a.js("v.leave()")
+        await b.until("v.visitors.length === 0")
 
         print("\nwhat a host sends is only data")
         r = await b.js("""(() => { const c = Visit._test.cleanScene, budget = { vertices: 0, objects: 0 };

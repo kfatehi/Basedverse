@@ -48,6 +48,10 @@ const STREAM_DELTAS: u8 = 0;
 const STREAM_SCENE: u8 = 1;
 /// A stream the visitor opens, its host having asked: the visitor's avatar (8.6), gzipped JSON.
 const STREAM_AVATAR: u8 = 2;
+/// What a datagram of voice starts with (8.7); an input's is JSON, and starts with `{`.
+const DATAGRAM_AUDIO: u8 = 0xA0;
+/// The most datagrams of voice taken from the other side a second (one every 20 ms, and some to spare).
+const AUDIO_PER_SECOND: u32 = 100;
 /// The least time between two avatars a host takes from one visitor.
 const AVATAR_EVERY: Duration = Duration::from_secs(2);
 /// The most of a scene's edits (gzipped) that may wait to go: past it, a link is far slower than the room
@@ -69,6 +73,8 @@ pub enum LinkCmd {
     Scene(Bytes),
     /// This office's avatar, gzipped JSON, for the host (8.6).
     Avatar(Bytes),
+    /// A packet of this office's voice, for the other side (sent as a datagram: late is lost, 8.7).
+    Audio(Bytes),
     /// End the link, saying why.
     Close(String),
 }
@@ -371,6 +377,7 @@ async fn run(role: Role, visit: &str, est: Established, cmds: &mut mpsc::Receive
         (tx, q)
     });
     let (mut tick, mut path) = (tokio::time::interval(Duration::from_secs(1)), None::<bool>);
+    let mut audio_in = (Instant::now(), 0u32);
     let ended = loop {
         tokio::select! {
             msg = ctl_rx.recv() => match msg {
@@ -379,8 +386,20 @@ async fn run(role: Role, visit: &str, est: Established, cmds: &mut mpsc::Receive
                 // The other side's control stream ended: its connection is closing (say how), or should be.
                 None => { let _ = tokio::time::timeout(Duration::from_secs(2), conn.closed()).await; break ending(&conn) }
             },
-            d = conn.read_datagram(), if role == Role::Host => match d {
-                Ok(b) => if let Ok(v) = serde_json::from_slice::<Value>(&b) { let _ = core.send(Ev::LinkInput { visit: visit.to_string(), msg: v }); },
+            // Datagrams: the visitor's input (to the host), and either side's voice in a huddle.
+            d = conn.read_datagram() => match d {
+                Ok(b) if b.first() == Some(&DATAGRAM_AUDIO) => {
+                    if audio_in.0.elapsed() >= Duration::from_secs(1) {
+                        audio_in = (Instant::now(), 0);
+                    }
+                    audio_in.1 += 1;
+                    if audio_in.1 <= AUDIO_PER_SECOND && b.len() <= 1 + frames::MAX_AUDIO {
+                        let _ = core.send(Ev::LinkAudio { visit: visit.to_string(), data: b.slice(1..) });
+                    }
+                }
+                Ok(b) => if role == Role::Host {
+                    if let Ok(v) = serde_json::from_slice::<Value>(&b) { let _ = core.send(Ev::LinkInput { visit: visit.to_string(), msg: v }); }
+                },
                 Err(_) => break ending(&conn),
             },
             cmd = cmds.recv() => match cmd {
@@ -403,6 +422,12 @@ async fn run(role: Role, visit: &str, est: Established, cmds: &mut mpsc::Receive
                         let _ = tx.send((q.gen.load(Ordering::SeqCst), gz));
                     }
                 },
+                Some(LinkCmd::Audio(data)) => {
+                    let mut d = Vec::with_capacity(1 + data.len());
+                    d.push(DATAGRAM_AUDIO);
+                    d.extend_from_slice(&data);
+                    let _ = conn.send_datagram(Bytes::from(d));
+                }
                 Some(LinkCmd::Avatar(gz)) => if role == Role::Visitor {
                     tasks.push(tokio::spawn(write_avatar(conn.clone(), gz, visit.to_string())));
                 },
