@@ -1095,7 +1095,7 @@
       const input = fresh ? h.input : { forward: 0, strafe: 0, run: false, yaw: h.input ? h.input.yaw : 0, pitch: h.input ? h.input.pitch : 0 };
       try {
         const turned = Object.assign({}, h.pose, { yaw: h.yaw0 + (input.yaw || 0), pitch: input.pitch || 0 });
-        h.pose = Object.assign({}, this._hooks.move(turned, input, dt) || turned);
+        h.pose = Object.assign({}, this._hooks.move(turned, input, dt, { id: h.id, visitor: h.visitor }) || turned);
         h.fails = 0;
       } catch (e) { return this._hookFailed(h, "move", e); }
       if (now - (h.keptAt || 0) >= 200) {   // where the visitor stands, kept by visit-client for a reload of this page

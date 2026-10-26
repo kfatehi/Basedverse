@@ -529,7 +529,8 @@ v.joinLobby()      //   with VISIT_STATE_FILE); and back
 // lobby to be visited, and cannot knock: every room takes part with its scene.
 v.host({
   spawn(visitor) { return pose; },            // where a new visitor appears
-  move(pose, input, dt) { return pose; },     // where it may go: the library has already set pose.yaw and pose.pitch
+  move(pose, input, dt, { id, visitor }) { return pose; },   // where it may go: the library has already set pose.yaw and
+                                              //   pose.pitch; id is the visit's, visitor { id, name, sim }
   scene: { root, three, renderer, near, far },      // the room's three.js scene (or the part to share), the THREE it was made with
                                                     //   (r125 to r186), its renderer, and visitors' camera range (8.1)
   fov: 70,                                          // visitors' camera's vertical field of view, in degrees

@@ -245,7 +245,9 @@ visit.host({
   },
   // Where the visitor may go. Visit has already set pose.yaw and pose.pitch from where it is looking;
   // you move it with input.forward / input.strafe / input.run, against your own walls and furniture.
-  move(pose, input, dt) {
+  // The fourth argument says whose pose it is ({ id: the visit's, visitor }), for a room that keeps
+  // something of its own per visitor (one sat down, say, stays put).
+  move(pose, input, dt, { id, visitor }) {
     return Visit.walk(pose, input, dt, { speed: 2.5, blocked: (x, z) => myRoom.isBlocked(x, z) });
   },
   // The speed your move() gives Visit.walk: a visitor's page walks at once, and your move() corrects it.

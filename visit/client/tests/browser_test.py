@@ -128,6 +128,7 @@ async def main():
         await a.js("document.querySelector('.visit-panel .knock button.go').click()")
         check("B is in A's room", await b.until("v.visiting && v.visiting.host.name"), "A")
         check("A has B as its visitor", await a.until("v.visitors.length && v.visitors[0].visitor.name"), "B")
+        check("and move() is told whose pose it moves", await a.until("window.movedFor === v.visitors[0].id"), True)
         check("B's stage is up, full-window", await b.js("!document.querySelector('.visit-stage').hidden && document.querySelector('.visit-stage').classList.contains('big')"), True)
 
         print("\nA's scene, drawn by B's own browser")
@@ -222,6 +223,7 @@ async def main():
         check("B points: A hears it, from where A has B, toward the cube: A's ray hits it",
               (pt["visitor"]["name"], [round(x, 2) for x in pt["from"]], round(sum(x * x for x in pt["dir"]), 3), pt["hit"]),
               ("B", [round(pose[k], 2) for k in "xyz"], 1.0, "spinner"))
+        await asyncio.sleep(0.25)   # past the first point's 200 ms: one of the ten may go, and only one
         await b.js("for (let i = 0; i < 10; i++) v._pointNow()")
         await asyncio.sleep(0.6)
         check("ten points at once from B: its page sends one of them (one every 200 ms at most)", await a.js("window.points.length"), 2)

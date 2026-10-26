@@ -22,7 +22,8 @@ unchanged: a 0.6 office and a 0.5 one still meet (a 0.5 host ignores points; a 0
 
 ### What changed
 
-- visit.js: `v.on("point", e)` while hosting: `{ id, visitor, from, dir, yaw, pitch }`. The visitor's view
+- visit.js: `v.on("point", e)` while hosting: `{ id, visitor, from, dir, yaw, pitch }`. `move` is told whose
+  pose it moves: `move(pose, input, dt, { id, visitor })` (a visitor sat down somewhere, say, stays put). The visitor's view
   shows a crosshair while the pointer is locked to it, and a click points (one every 200 ms at most); the
   crosshair shows hot over what the host marked `userData.visitPoint`. A scene's JSON keeps, of `userData`,
   only `visitor` and `visitPoint` (strings, numbers or booleans); the host's objects keep theirs.

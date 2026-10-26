@@ -103,7 +103,7 @@ async function build(v) {
   const t = await build(v);
   v.host({
     spawn: () => ({ x: 2, y: 1.6, z: 6, yaw: 0, pitch: 0 }),
-    move: (pose, input, dt) => Visit.walk(pose, input, dt, { speed: 2.5, blocked }),
+    move: (pose, input, dt, who) => { window.movedFor = who && who.id; return Visit.walk(pose, input, dt, { speed: 2.5, blocked }); },
     fov: 70,
     scene: { root: t.scene, three: t.THREE, renderer: t.renderer, near: 0.05, far: 100 },
     walk: { speed: 2.5 },   // as move() walks: the visitor's page walks at once, before the answer
