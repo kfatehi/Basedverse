@@ -45,11 +45,14 @@ async function build(v) {
   sun.position.set(8, 10, 6); sun.target.position.set(5, 0, 4); scene.add(sun.target); sun.castShadow = true; scene.add(sun);
   const spinner = box(0.4, 0.4, 0.4, lambert(0x3fb950), 5, 1.2, 3.6);
   spinner.name = "spinner";
+  // Something a visitor may point at (userData.visitPoint); and what a room keeps for itself, which never leaves it.
+  spinner.userData = { visitPoint: true, secret: "A's own" };
   const movers = [...Array(MOVERS)].map((_, i) => box(0.15, 0.15, 0.15, lambert(0xe3b341), 5, 0.5 + (i % 10) * 0.15, 4));
   const signCanvas = document.createElement("canvas"); signCanvas.width = 256; signCanvas.height = 64;
   const signTex = new THREE.CanvasTexture(signCanvas);
   const sign = new THREE.Mesh(new THREE.PlaneGeometry(2, 0.5), new THREE.MeshBasicMaterial({ map: signTex }));
   sign.position.set(ROOM.w / 2, 1.8, 0.06); scene.add(sign);
+  sign.userData = { owner: { session: "s-1234" }, part: spinner };
   const write = text => { const x = signCanvas.getContext("2d"); x.fillStyle = "#0d1117"; x.fillRect(0, 0, 256, 64); x.fillStyle = "#e6edf3"; x.font = "28px sans-serif"; x.fillText(text, 12, 42); signTex.needsUpdate = true; };
   write(`${v.office ? v.office.name : "test"}'s room`);
   // Visitors' bodies: each where it stands, marked as its own (userData.visitor), so its own eyes do not see it.
@@ -104,6 +107,14 @@ async function build(v) {
     fov: 70,
     scene: { root: t.scene, three: t.THREE, renderer: t.renderer, near: 0.05, far: 100 },
     walk: { speed: 2.5 },   // as move() walks: the visitor's page walks at once, before the answer
+  });
+  // A visitor pointing (SPEC 8.3): kept, with what it hit first, for the test to read.
+  const ray = new t.THREE.Raycaster();
+  window.points = [];
+  v.on("point", e => {
+    ray.set(new t.THREE.Vector3(...e.from), new t.THREE.Vector3(...e.dir));
+    const hit = ray.intersectObjects(t.scene.children, true).find(h => !h.object.userData.visitor);
+    window.points.push({ ...e, hit: hit ? hit.object.name : null });
   });
   Visit.panel(document.getElementById("panel"), v);
   Visit.stage(v);   // the room visited: full-window, or in a corner while back in this one

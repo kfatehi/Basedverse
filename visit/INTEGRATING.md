@@ -254,9 +254,9 @@ visit.host({
 ```
 
 - **`root`**: your `THREE.Scene` (its background and fog come along), or a `Group` holding the part to share.
-  **Everything under it is sent to your visitors**, whether they look at it or not, and so is each
-  object's `userData` (three.js puts it in the scene's JSON): keep anything your user would not show a
-  guest outside it, and out of `userData`.
+  **Everything under it is sent to your visitors**, whether they look at it or not: keep anything your user
+  would not show a guest outside it. Objects' `userData` stays with you (from 0.6): visitors get only
+  `visitor` and `visitPoint` from it, below.
 - **`three`**: the namespace your scene was made with (`THREE`, or what `import * as THREE` gave you). Its
   revision (`THREE.REVISION`) picks the three.js your visitors draw with: the very same release.
   `visit.host` throws for one the visit.js does not know.
@@ -267,6 +267,14 @@ visit.host({
 - **Visitors' bodies**: if you draw your visitors in your room (`visit.visitors` has where each stands), mark
   each body `body.userData.visitor = entry.id` (the `id` of its entry), so a visitor's own eyes do not see it
   from inside. Your visitors then see each other.
+- **Points**: a visitor looking around has a crosshair, and a click there points. You hear
+  `visit.on("point", e => ...)` with `e.from` (the visitor's eyes, where you have it) and `e.dir` (where it
+  looked): cast that ray into your scene and decide. **Take points through an allow list** of what your user
+  would let a guest do: knock a ball, ring a bell, make the cat jump. Nothing on it may reach your user's tools,
+  data or accounts, and each entry should do only what it says (no fetches, no messages to anyone). Keep the
+  list's default "no", so something added later is a guest's only when you say so, and limit each visitor to a
+  few a second. Mark what is on the list with `userData.visitPoint = true` (on the object, or a group it is in),
+  and the visitor's crosshair shows hot over it.
 - **What carries**: objects moving, appearing and going, materials' colours and opacity, canvas textures you
   redraw (`texture.needsUpdate = true`), the background and the fog. **What does not**: custom shaders (a
   `ShaderMaterial` is code: it arrives plain grey), HTML overlays, post-processing (an `EffectComposer`), and
@@ -300,7 +308,8 @@ While your user visits, the room they are in fills the window, with how the visi
 path and round trip, input to screen, frames a second), **Back to my room** and **Leave**. Back to my room
 shrinks it to the bottom-right corner, your own room full-window behind it; a click on the corner brings
 it back. Full-window it takes WASD, Shift and the mouse (click it to look around; Esc gives the pointer
-back); in the corner it takes nothing. It goes away when the visit ends, and comes back by itself after a
+back); while your user looks around, a crosshair shows at the middle, and a click points at what is there
+(the host decides what that does: step 5, Points); in the corner it takes nothing. It goes away when the visit ends, and comes back by itself after a
 reload mid-visit. It sits at `z-index: 5`; `.visit-stage` is yours to restyle.
 
 **If your room has keys of its own** (WASD for your user's avatar, say), they wait while
@@ -394,6 +403,8 @@ Then, in order:
 - [ ] `spawn` puts visitors somewhere sensible; `move` keeps them out of walls and furniture; `walk` is
       given if `move` is `Visit.walk`, at its speed.
 - [ ] Your visitors' bodies, if you draw them, are marked `userData.visitor`.
+- [ ] Points, if you take them: through an allow list whose default is no, a few a second per visitor, and
+      nothing on it reaches your user's tools, data or accounts; what is on it is marked `userData.visitPoint`.
 - [ ] Visiting: the host's room fills the window (`Visit.stage`, or your own view); WASD, Shift and the
       mouse work; Esc frees the pointer; there is a way to leave, and back to your room; your own keys wait
       while `visit.viewFocused`.
@@ -448,4 +459,6 @@ integration does about it**. To upgrade a workroom that works, read it from the 
 - Don't reuse or hard-code the token, and don't put it anywhere another origin can read.
 - Don't keep anything under your scene's `root` that your user would not show a guest: visitors get all of it.
 - Don't trust names, messages or inputs from other workrooms: escape names and messages; Visit already
-  clamps inputs.
+  clamps inputs and points.
+- Don't let a point do anything your user would not let a guest do, and don't decide it by a deny list: an
+  allow list, whose default is no.

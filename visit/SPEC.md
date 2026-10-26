@@ -82,9 +82,11 @@ program listening on their machine.
    **ticket** (a secret the lobby gives both sides, section 6.4), and the host's checks that the dialling
    endpoint's public key is the one the visitor published to the lobby (section 6.2). A link that fails
    either check is closed before anything else is read.
-7. **A host controls its room.** Visitors only send input. The host's sim decides where a visitor can go
-   (`move`) and what it sees (its scene). The host visit-client clamps every input field to its range and
-   drops inputs beyond 120 a second, and control messages beyond 20 a second from either side of a link.
+7. **A host controls its room.** Visitors only send input, and points: where they looked as they clicked
+   (8.3), never what they claim to have clicked. The host's sim decides where a visitor can go (`move`), what
+   it sees (its scene), and what, if anything, a point does. The host visit-client clamps every input field
+   and every point to its range, drops inputs beyond 120 a second and points beyond 5, and control messages
+   beyond 20 a second from either side of a link.
 8. **A host's scene is data, never code** (section 8.1). The visitor's page runs only the three.js release
    its hash table names, checked as it is fetched; it reads what a host sends only as data, made safe first
    (no shaders, images only as data URLs of a sane size, bounded geometry); its visit-client unpacks each
@@ -122,7 +124,7 @@ A flag wins over its environment variable, and a variable set but blank counts a
 On start it prints **one JSON line** to stdout once it listens, then logs to stderr:
 
 ```json
-{"ready": true, "port": 7401, "version": "0.5.0", "proto": "basedverse-visit-local/2"}
+{"ready": true, "port": 7401, "version": "0.6.0", "proto": "basedverse-visit-local/2"}
 ```
 
 Exit codes: 0 asked to stop (SIGINT/SIGTERM, or idle-exit); 2 bad flags; 3 the port is taken; 4 the
@@ -158,7 +160,7 @@ lobby refused it for good (`proto_unsupported`, `name_invalid`).
 | request | auth | answer |
 |---|---|---|
 | `GET /visit.js` | none | the library (JavaScript), the version built into this binary. `Access-Control-Allow-Origin: *` |
-| `GET /health` | none | `{"ok": true, "version": "0.5.0"}` |
+| `GET /health` | none | `{"ok": true, "version": "0.6.0"}` |
 | `GET /ws` (WebSocket upgrade) | `hello.token` (5.1) | the page connection |
 | anything else | — | 404 |
 
@@ -181,7 +183,7 @@ The page sends, within 5 s:
 The visit-client answers `ready` (or closes: 4401 bad token, 4400 bad `proto`):
 
 ```json
-{"type": "ready", "version": "0.5.0", "office": {"id": "o1a2b3c4", "name": "Magic Room"},
+{"type": "ready", "version": "0.6.0", "office": {"id": "o1a2b3c4", "name": "Magic Room"},
  "online": true, "away": false, "status": "available", "max_visitors": 3,
  "visits": [{"id": "v…", "channel": 1, "role": "host", "peer": {"id": "o…", "name": "Ada", "sim": {…}}}]}
 ```
@@ -202,6 +204,7 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `answer` | `knock`, `accept` (bool), `message`? | let a knocker in, or not |
 | `end` | `visit` | end a visit: yours as a visitor (leave), or a visitor's to you (kick) |
 | `input` | `forward`, `strafe`, `run`, `yaw`, `pitch`, `t` (8.2) | the visitor's input, whole: whenever it changes (at most every 8 ms) and every 33 ms regardless, while visiting |
+| `point` | `yaw`, `pitch` (8.3) | the visitor clicked at the middle of its view, looking there: at most one every 200 ms, while visiting |
 | `keyframe` | `channel` | the visitor's page asks for a key delta (8.1): where everything that moves is |
 | `scene_resync` | `channel` | the visitor's page asks for the host's whole scene again (an edit was lost, or did not apply) |
 | `pose` | `channel`, `state` (≤ 2 KiB) | the host page's state for a visitor (where it stands), about 5 a second; kept by the visit-client and handed back in `ready` to a page that reloads |
@@ -220,6 +223,7 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `visit_ended` | `id`, `channel`, `reason` (6.5) | a visit ended |
 | `host_paused` / `host_resumed` | `channel` | the host's page went away / came back (visitor side) |
 | `input` | `channel`, `seq`, `forward`, `strafe`, `run`, `yaw`, `pitch`, `t` | a visitor's latest input (host side) |
+| `point` | `channel`, `yaw`, `pitch` | a visitor pointed (8.3), clamped, at most 5 a second each (host side) |
 | `link_stats` | `channel`, `path` (`"direct"` \| `"relay"`), `rtt_ms` | the visit's link, about once a second, both sides: a relayed path is slower and rate-limited |
 | `keyframe` | `channel` | send a key delta on this visit soon (host side) |
 | `scene_resync` | `channel` | send this visitor the whole scene again (host side): it asked, or the link dropped edits it had not sent |
@@ -353,6 +357,7 @@ Messages are JSON, each prefixed by its length (u32 big-endian). In order, relia
 |---|---|---|
 | visitor | `{"keyframe": true}` | send a key delta soon (passed to the host's page at most every 500 ms) |
 | visitor | `{"scene_resync": true}` | send the whole scene again (passed to the host's page at most every 2 s; one asked for sooner waits, and goes) |
+| visitor | `{"point": {"yaw", "pitch"}}` | a point (8.3): passed to the host's page with only those two, clamped, at most 5 a second |
 | host | `{"paused": true}` / `{"paused": false}` | the host's page went away / came back |
 | either | `{"bye": "<reason>"}` | ending the visit (also sent to the lobby as `end`) |
 
@@ -432,8 +437,12 @@ data.
   eased the same way: walking then waits for the round trip; looking never does.
 - **Its own body**, which the host draws for everyone else, the host marks `userData.visitor = <visit id>`;
   the visitor's page does not draw it in its own eyes.
+- **userData stays the host's.** Of each object's `userData` (which three.js's `toJSON` would send whole), a
+  visitor gets only what Visit reads: `visitor` (above) and `visitPoint` (8.3), each a string, number or
+  boolean. Everything else a sim keeps there (who a figure is, its handles, references to other objects)
+  never leaves the host's page.
 - **Data, never code.** The visitor's page draws a scene with the host's very three.js revision (its first
-  release, `0.<r>.0`, r125 to r186 in 0.5.0), fetched from `https://cdn.jsdelivr.net/npm/three@0.<r>.0/build/`
+  release, `0.<r>.0`, r125 to r186 in 0.6.0), fetched from `https://cdn.jsdelivr.net/npm/three@0.<r>.0/build/`
   (or a page's own `threeBase`), checked against the SHA-384 hash visit.js carries for it (Subresource
   Integrity) and run as a module of its own: nothing else ever runs. Before three.js reads what a host sent,
   visit.js makes it safe: materials only of the kinds three.js draws itself (a `ShaderMaterial` or
@@ -463,6 +472,24 @@ the mouse moves and sends where it is looking; the host applies it as is. Where 
 host's to decide (`move`), against its own walls and furniture; the visitor's page walks at once by the
 host's `walk` and takes the host's answer (8.1). The host clamps every field to its range.
 
+### 8.3 Points
+
+A visitor clicking at the middle of its view **points**: while it looks around (the pointer locked to the
+view), the view shows a crosshair there, and a click sends `point` with where the visitor looks (its `yaw` and
+`pitch`, as in its input), at most one every 200 ms. Nothing else: not what it saw there, nor what it thinks it
+clicked. The host's visit-client clamps both, drops points beyond 5 a second, and passes them to its page; the
+library makes each a ray in the room's own terms, from where the **host** has the visitor (its pose: x, y, z,
+its eyes) toward where it looked, and the page decides what that does, if anything. A visitor can point only
+from where it stands, in a direction it can look: never through the host's eyes, never at what the host has
+not put there.
+
+What a point may do is the host's to choose, and is a guest's reach into its room: a host takes points through
+an allow list of what its user would let a guest do (pushing a ball, ringing a bell), never anything that
+reaches its user's tools, data or accounts. A host marks what a visitor may point at with
+`userData.visitPoint = true` (on an object, or on a group it is part of): the visitor's crosshair shows hot
+over it (the first thing in its line of sight that is, or is part of, one so marked). The mark is a hint for
+the visitor's eyes; the host still decides each point by its own lights.
+
 ## 9. The library: `visit.js`
 
 The normative surface; INTEGRATING.md shows it in use. Loaded with
@@ -489,7 +516,7 @@ v.knocking     // your knocks still waiting: [{ id, to }]
 v.visiting     // your visit as a visitor: { id, host: { id, name, sim }, paused } or null
 v.visitors     // your visitors as a host: [{ id, visitor: { id, name, sim }, pose }]
 
-v.on(event, fn); v.off(event, fn)   // "change" | "knock" | "answered" | "visit_started" | "visit_ended" | "stats" | "error"
+v.on(event, fn); v.off(event, fn)   // "change" | "knock" | "answered" | "visit_started" | "visit_ended" | "stats" | "error" | "point"
 v.close()          // disconnect for good
 v.setStatus(status); v.setMaxVisitors(n); v.rename(name)
 v.knock(officeId, message); v.answer(knockId, accept, message)
@@ -509,7 +536,13 @@ v.host({
   walk: { speed },                                  // optional: move() walks with Visit.walk at this speed: visitors walk at once
 });
 
-// visiting: where to show the room you are in; the library draws its scene there and captures input
+// hosting: a visitor pointed (8.3): { id (its visit), visitor: { id, name, sim }, from: [x, y, z] (its eyes,
+// where this page has it), dir: [x, y, z] (a unit vector, where it looked), yaw, pitch (in the room's terms) }.
+// What it does, if anything, is yours: take it through an allow list of what a guest may do.
+v.on("point", ({ id, visitor, from, dir }) => { /* ... */ });
+
+// visiting: where to show the room you are in; the library draws its scene there and captures input; while the
+// mouse looks about (the pointer locked), a crosshair at the middle, and a click there points (8.3)
 const view = v.view(element);   // { release(), setActive(on), active, canvas }: inactive, it takes no keys or mouse
 
 // helpers
@@ -531,8 +564,9 @@ tick; three throws in a row end that visit (`"kicked"`).
 
 **Scenes.** Every 33 ms, while it has visitors, the library reads the scene (objects' matrices and
 visibility, materials' state, geometries' and textures' versions) and sends what changed (8.1). A room marks
-each visitor's body with `userData.visitor = <visit id>`; anything under `root` is shared, so what should not
-be belongs outside it.
+each visitor's body with `userData.visitor = <visit id>`, and what a visitor may point at with
+`userData.visitPoint = true`; of `userData`, only those go (8.1). Anything else under `root` is shared, so
+what should not be belongs outside it.
 
 **Timing.** The library ticks from a Worker's timer: a page's own timers slow to once a second or less
 while its tab is in the background, and a host must go on moving its visitors and sending its scene. A page whose
@@ -555,6 +589,7 @@ slowly while its tab is hidden.
 | deltas behind | a delta more than 100 ms older than the newest waiting is dropped, to the next key delta |
 | moving things shown | 70 ms behind the host's clock |
 | input rate | on every change, at most every 8 ms, and every 33 ms regardless; at most 120 a second accepted |
+| points | one every 200 ms from a visitor's page; at most 5 a second accepted |
 | link send window | 64 KiB sent and not yet acknowledged |
 | control messages on a link | at most 20 a second from either side; more are dropped |
 | key delta requests | passed to the host's page at most every 500 ms |

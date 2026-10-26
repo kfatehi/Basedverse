@@ -13,10 +13,11 @@
 // visitor's page walks at once and the host corrects it), and a host renders and encodes nothing for anyone.
 "use strict";
 (function () {
-  const VERSION = "0.5.0", PROTO = "basedverse-visit-local/2";
+  const VERSION = "0.6.0", PROTO = "basedverse-visit-local/2";
   const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, LOOK = 0.0025;
+  const POINT_MS = 200, AIM_MS = 125;   // a visitor's points, at most one this often; what it aims at, looked for this often
   // What the host hears many times a second: none of it changes what the page shows, so none fires "change".
-  const QUIET = new Set(["input", "keyframe", "link_stats", "scene", "scene_lost", "scene_resync"]);
+  const QUIET = new Set(["input", "point", "keyframe", "link_stats", "scene", "scene_lost", "scene_resync"]);
   // A timer from a Worker: a page's own timers slow to once a second (or less) while its tab is in the
   // background, and a host must go on rendering for its visitors.
   function ticker(ms, fn) {
@@ -253,6 +254,24 @@
   const mat16 = (a, b) => { for (let i = 0; i < 16; i++) if (Math.abs(a[i] - b[i]) > 1e-6) return true; return false; };
   const keep = (a, x) => { a.push(x); if (a.length > 6000) a.splice(0, 1000); };
 
+  // An object's JSON as a visitor gets it: of its userData (and its descendants'), only what Visit itself reads
+  // (SPEC 8.1): `visitor` (a visitor's own body) and `visitPoint` (something a visitor may point at). The rest is
+  // the host's own, where a sim keeps its state (who a figure is, its handles), and never leaves its page; it is
+  // put back as it was the moment the JSON is made.
+  const SHARED_DATA = ["visitor", "visitPoint"];
+  function sharedJSON(o) {
+    const kept = [];
+    o.traverse(x => {
+      const u = x.userData;
+      if (!u || typeof u !== "object" || !Object.keys(u).length) return;
+      const shared = {};
+      for (const k of SHARED_DATA) if (["string", "number", "boolean"].includes(typeof u[k])) shared[k] = u[k];
+      kept.push([x, u]);
+      x.userData = shared;
+    });
+    try { return o.toJSON(); } finally { for (const [x, u] of kept) x.userData = u; }
+  }
+
   // The host's side of a scene: what it last sent of each object, material, geometry and texture, so that each
   // round (every SCENE_MS) sends only what changed. One for all of a host's visitors: they get the same edits.
   class SceneSync {
@@ -350,7 +369,7 @@
 
     // An added object, whole: its JSON (with everything it is made of), each object's number, its lights' targets.
     _added(r) {
-      const json = r.o.toJSON(), ids = [];
+      const json = sharedJSON(r.o), ids = [];
       r.o.traverse(o => { const x = this.objs.get(o.uuid); if (x) ids.push([o.uuid, x.idx]); });
       for (const k of ["geometries", "materials", "textures", "images"]) for (const x of json[k] || []) this.sent.add(x.uuid);
       const parent = this.objs.get(r.parent);
@@ -411,7 +430,7 @@
     snapshot(h, hooks) {
       const { root, three, renderer } = this.cfg, w = hooks.walk;
       root.updateMatrixWorld();
-      const json = root.toJSON();
+      const json = sharedJSON(root);
       this.sent = new Set(["geometries", "materials", "textures", "images"].flatMap(k => (json[k] || []).map(x => x.uuid)));
       return { type: "scene", three: String(three.REVISION), json, ids: [...this.objs.values()].map(r => [r.o.uuid, r.idx]), targets: this.targets(root),
         renderer: rendererProps(renderer, three), fov: Number(hooks.fov) || 70, near: Number(this.cfg.near) || 0.1, far: Number(this.cfg.far) || 1000,
@@ -547,7 +566,7 @@
         case "link_stats":
           if (this._viewer && this._viewer.channel === m.channel) { this.stats.rtt = Number(m.rtt_ms); this.stats.path = String(m.path); }
           break;
-        case "keyframe": case "input": case "scene_resync": this._hostMessage(m); break;
+        case "keyframe": case "input": case "scene_resync": case "point": this._hostMessage(m); break;
         case "scene": this._sceneEdit(m); break;
         case "scene_lost": if (this._viewer && this._viewer.channel === m.channel) this._sceneResync(this._viewer); break;
         case "error": this._emit("error", { code: m.code, message: m.message, ref: m.ref }); break;
@@ -634,6 +653,18 @@
       if (m.type === "input") { h.input = m; h.inputAt = performance.now(); this._step(h, h.inputAt); }   // at once: the next delta has it
       else if (m.type === "keyframe") h.keyNext = true;   // a key delta: where everything that moves is
       else if (m.type === "scene_resync") h.sceneSent = false;
+      else if (m.type === "point") this._point(h, m);
+    }
+
+    // A visitor pointed: clicked at the middle of its view (SPEC 8.3). The page hears "point" with where from
+    // (where this page has the visitor: its eyes) and which way (where it looked as it clicked, in the room's own
+    // terms: yaw 0 toward -z, positive turning left, pitch positive up), and decides what, if anything, that does.
+    _point(h, m) {
+      const p = h.pose;
+      if (!p || !Number.isFinite(m.yaw) || !Number.isFinite(m.pitch)) return;
+      const yaw = h.yaw0 + m.yaw, pitch = Math.max(-1.4, Math.min(1.4, m.pitch)), c = Math.cos(pitch);
+      this._emit("point", { id: h.id, visitor: h.visitor, from: [Number(p.x) || 0, Number(p.y) || 0, Number(p.z) || 0],
+        dir: [-Math.sin(yaw) * c, Math.sin(pitch), -Math.cos(yaw) * c], yaw, pitch });
     }
 
     // Every SCENE_MS, for this room's visitors: what changed in its scene (one edit for them all), where its
@@ -973,6 +1004,7 @@
       s.camera.rotation.set(pitch, yaw, 0);
       if (s.offset !== null) this._sceneInterp(s, now - s.offset - INTERP_MS);
       for (const o of s.own) o.visible = false;
+      this._aim(s, now);
       s.renderer.render(s.root, s.camera);
       w.count++;
       this.frames = (this.frames || 0) + 1;
@@ -1090,7 +1122,15 @@
       canvas.tabIndex = 0;
       element.appendChild(canvas);
       const view = { element, canvas, ctx: canvas.getContext("2d"), keys: new Set(), yaw: 0, pitch: 0, sentAt: 0, resizeAt: 0, active: true, pending: false, raf: 0,
-        gl: null, changedAt: 0 };   // gl: the canvas a scene is drawn on, in this one's place
+        gl: null, changedAt: 0, pointAt: 0, cross: null };   // gl: the canvas a scene is drawn on, in this one's place
+      // The crosshair: where a click points, shown while the mouse looks about (the pointer locked); hot over
+      // something the host marked with userData.visitPoint.
+      if (getComputedStyle(element).position === "static") element.style.position = "relative";
+      const cross = view.cross = document.createElement("div");
+      cross.className = "visit-cross";
+      cross.style.cssText = "position:absolute;left:50%;top:50%;width:8px;height:8px;margin:-6px 0 0 -6px;border:2px solid rgba(255,255,255,.9);" +
+        "border-radius:50%;box-shadow:0 0 0 1px rgba(0,0,0,.55);pointer-events:none;display:none;transition:transform .08s,background .08s";
+      element.appendChild(cross);
       const locked = () => !!document.pointerLockElement && (document.pointerLockElement === canvas || document.pointerLockElement === view.gl);
       const ignore = e => e.ctrlKey || e.metaKey || e.altKey || (e.target && (e.target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)));
       const KEYS = ["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "ShiftLeft", "ShiftRight"];
@@ -1103,6 +1143,8 @@
       const up = e => { if (view.keys.delete(e.code)) changed(); };
       const blur = () => { if (view.keys.size) { view.keys.clear(); changed(); } };
       const click = e => { if (view.active && e.currentTarget.requestPointerLock) e.currentTarget.requestPointerLock(); };
+      const press = e => { if (e.button === 0 && locked() && view.active && this.visiting) this._pointNow(); };
+      const lock = () => { cross.style.display = locked() && view.active ? "block" : "none"; };
       const look = e => {
         if (!locked()) return;
         view.yaw -= e.movementX * LOOK;
@@ -1111,6 +1153,7 @@
       };
       addEventListener("keydown", down); addEventListener("keyup", up); addEventListener("blur", blur);
       canvas.addEventListener("click", click); document.addEventListener("mousemove", look);
+      canvas.addEventListener("mousedown", press); document.addEventListener("pointerlockchange", lock);
       const resize = new ResizeObserver(() => { view.resizeAt = performance.now() + 250; });
       resize.observe(element);
       view.attach = gl => {
@@ -1118,13 +1161,13 @@
         gl.style.cssText = canvas.style.cssText; gl.tabIndex = 0;
         element.insertBefore(gl, canvas);
         canvas.style.display = "none";
-        gl.addEventListener("click", click);
+        gl.addEventListener("click", click); gl.addEventListener("mousedown", press);
         view.gl = gl;
       };
       view.detach = () => {
         if (!view.gl) return;
         if (document.pointerLockElement === view.gl) document.exitPointerLock();
-        view.gl.removeEventListener("click", click);
+        view.gl.removeEventListener("click", click); view.gl.removeEventListener("mousedown", press);
         view.gl.remove();
         view.gl = null;
         canvas.style.display = "block";
@@ -1132,6 +1175,8 @@
       view.release = () => {
         removeEventListener("keydown", down); removeEventListener("keyup", up); removeEventListener("blur", blur);
         canvas.removeEventListener("click", click); document.removeEventListener("mousemove", look);
+        canvas.removeEventListener("mousedown", press); document.removeEventListener("pointerlockchange", lock);
+        cross.remove();
         resize.disconnect();
         if (locked()) document.exitPointerLock();
         view.detach();
@@ -1144,6 +1189,7 @@
           if (locked()) document.exitPointerLock();
           if (view.keys.size) { view.keys.clear(); changed(); }
         }
+        lock();
       };
       this._view = view;
       this._sizeView();
@@ -1172,6 +1218,34 @@
       ctx.fillStyle = "#e6edf3"; ctx.font = `${px}px system-ui, sans-serif`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
       ctx.fillText(say, canvas.width / 2, canvas.height / 2);
     }
+    // A click at the middle of the visitor's view: where it looks now (SPEC 8.3), at most one every POINT_MS.
+    _pointNow() {
+      const v = this._view, now = performance.now();
+      if (!v || now - v.pointAt < POINT_MS) return;
+      v.pointAt = now;
+      this._send({ type: "point", yaw: v.yaw, pitch: v.pitch });
+      if (v.cross) { v.cross.style.transform = "scale(1.6)"; setTimeout(() => { v.cross.style.transform = ""; }, 120); }
+    }
+
+    // What the crosshair is on, in the room visited: hot when the first thing there, or what it is part of, has
+    // userData.visitPoint (the visitor's own body never counts).
+    _aim(s, now) {
+      const v = this._view;
+      if (!v || !v.cross || v.cross.style.display === "none" || now - (s.aimAt || 0) < AIM_MS) return;
+      s.aimAt = now;
+      if (!s.ray) { s.ray = new s.T.Raycaster(); s.mid = new s.T.Vector2(0, 0); }
+      s.ray.setFromCamera(s.mid, s.camera);
+      s.ray.camera = s.camera;
+      const shown = o => { for (; o; o = o.parent) if (!o.visible || s.own.includes(o)) return false; return true; };
+      let hot = false;
+      for (const h of s.ray.intersectObject(s.root, true)) {
+        if (!shown(h.object)) continue;
+        for (let o = h.object; o; o = o.parent) if (o.userData && o.userData.visitPoint) { hot = true; break; }
+        break;
+      }
+      v.cross.style.background = hot ? "rgba(255,255,255,.95)" : "";
+    }
+
     // The visitor's input: the state of its keys and look, whole each time (the newest wins; none is ever
     // queued). When it changes, now (at most every 8 ms; a change sooner goes on the next tick); and every
     // 33 ms regardless, so a host knows it is still held. `t` is this page's clock, which the host's frames

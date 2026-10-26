@@ -203,6 +203,21 @@ async def main():
             if m and m["type"] == "keyframe":
                 keys.append(m["channel"])
         check("B asking for a key delta five times at once: A's page is asked once", keys, [cha])
+        await a.drain()
+        await b.send(type="point", yaw=-0.75, pitch=-9, target="something of A's", channel=99)
+        pt = await a.expect("point")
+        check("B's point (a click at the middle of its view) reaches A's page: its look only, clamped, on A's channel",
+              pt, {"type": "point", "channel": cha, "yaw": -0.75, "pitch": -1.4})
+        await a.drain()
+        for n in range(12):
+            await b.send(type="point", yaw=n / 10, pitch=0)
+        await asyncio.sleep(0.4)
+        pts = []
+        while not a.texts.empty():
+            m = a.texts.get_nowait()
+            if m and m["type"] == "point":
+                pts.append(m["yaw"])
+        check("B pointing twelve times at once: A's page hears the first five", pts, [0.0, 0.1, 0.2, 0.3, 0.4])
         sa_stats = await a.until(lambda m: m["type"] == "link_stats", timeout=4)
         sb_stats = await b.until(lambda m: m["type"] == "link_stats", timeout=4)
         check("both pages hear the link's path and round trip, about once a second: direct here",
@@ -268,8 +283,11 @@ async def main():
         await a.send(type="pose", channel=cha, state={"pose": {"x": 1.5, "z": 2}, "yaw0": 0})
         await asyncio.sleep(0.2)
         await a.close()
-        check("A's page goes: B hears its host paused", (await b.expect("host_paused"))["channel"], chb)
-        lob = await b.until(lambda m: m["type"] == "lobby" and any(o["name"] == "A" and not o["ready"] for o in m["offices"]))
+        paused = lob = None
+        while paused is None or lob is None:   # in either order: the link and the lobby are separate ways
+            m = await b.until(lambda m: m["type"] == "host_paused" or (m["type"] == "lobby" and any(o["name"] == "A" and not o["ready"] for o in m["offices"])))
+            paused, lob = (m, lob) if m["type"] == "host_paused" else (paused, m)
+        check("A's page goes: B hears its host paused", paused["channel"], chb)
         check("and A, with no page hosting, is not ready to be visited (the visit goes on)", [o["ready"] for o in lob["offices"] if o["name"] == "A"], [False])
         a = await Page(7411, ta).open()
         ra = await a.expect("ready")

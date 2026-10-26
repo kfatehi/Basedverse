@@ -87,6 +87,8 @@ struct Visit {
     /// that comes back has no scene until it gets one).
     resync_asked: Option<Instant>,
     resync_due: bool,
+    /// Points taken from the visitor in the current second (host side): at most POINTS_PER_SECOND.
+    points: (Instant, u32),
 }
 
 /// The most control messages a link's other side may send a second; more are dropped (a peer flooding
@@ -97,6 +99,9 @@ const RESYNC_EVERY: Duration = Duration::from_secs(2);
 /// The most inputs a second taken from a visitor (it sends one whenever its keys or look change, at most
 /// every 8 ms, and every 33 ms regardless).
 const INPUTS_PER_SECOND: u32 = 120;
+/// The most points a second taken from a visitor (a click at the middle of its view: 8.3); more are dropped.
+/// Its page sends at most one every 200 ms.
+const POINTS_PER_SECOND: u32 = 5;
 
 pub struct Core {
     lobby: mpsc::UnboundedSender<LobbyOut>,
@@ -355,6 +360,12 @@ impl Core {
                     let _ = v.cmd.try_send(LinkCmd::Input(input));
                 }
             }
+            // A click at the middle of the visitor's view, where it looks (8.3): to the host, on the control stream.
+            "point" => {
+                if let Some(v) = self.visiting() {
+                    let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "point": clamp_point(&m) })));
+                }
+            }
             "scene_resync" => {
                 let ch = m.get("channel").and_then(Value::as_u64).unwrap_or(0) as u16;
                 match self.visits.values().find(|v| v.channel == ch && v.up && v.role == Role::Visitor) {
@@ -586,6 +597,7 @@ impl Core {
                 self.visits.insert(id.to_string(), Visit {
                     id: id.to_string(), channel, role, peer: m.get("peer").cloned().unwrap_or(Value::Null), up: false, cmd,
                     last_seq: 0, inputs: (Instant::now(), 0), want_key: false, host_state: None, ctl: (Instant::now(), 0), key_asked: None, resync_asked: None, resync_due: false,
+                    points: (Instant::now(), 0),
                 });
             }
             Err(e) => {
@@ -693,6 +705,17 @@ impl Core {
                 } else if m.get("keyframe").is_some() && v.key_asked.is_none_or(|t| t.elapsed() >= KEY_EVERY) {
                     v.key_asked = Some(Instant::now());
                     self.to_page(json!({ "type": "keyframe", "channel": ch }));
+                } else if let Some(p) = m.get("point") {
+                    if v.points.0.elapsed() >= Duration::from_secs(1) {
+                        v.points = (Instant::now(), 0);
+                    }
+                    if v.points.1 < POINTS_PER_SECOND {
+                        v.points.1 += 1;
+                        let mut p = clamp_point(p);
+                        p["type"] = json!("point");
+                        p["channel"] = json!(ch);
+                        self.to_page(p);
+                    }
                 }
             }
             // From the host.
@@ -754,6 +777,13 @@ fn started(v: &Visit) -> Value {
     m
 }
 
+/// A point (8.3): where the visitor looked as it clicked, `yaw` and `pitch` in the same terms as its input, each
+/// in its range; nothing else of what was sent passes.
+fn clamp_point(m: &Value) -> Value {
+    let angle = |k: &str, lim: f64| m.get(k).and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0.0, |x| x.clamp(-lim, lim));
+    json!({ "yaw": angle("yaw", 1e6), "pitch": angle("pitch", 1.4) })
+}
+
 /// A three.js revision, as `THREE.REVISION` says it: digits.
 fn revision(r: &str) -> bool {
     (1..=4).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_digit())
@@ -787,5 +817,12 @@ mod tests {
         assert_eq!(i, json!({ "forward": 1, "strafe": -1, "run": false, "yaw": 3.0, "pitch": -1.4, "t": 0.0 }));
         let j = clamp_input(&json!({ "t": 1234.5 }));
         assert_eq!(j, json!({ "forward": 0, "strafe": 0, "run": false, "yaw": 0.0, "pitch": 0.0, "t": 1234.5 }));
+    }
+
+    #[test]
+    fn points_are_clamped_and_bare() {
+        let p = clamp_point(&json!({ "type": "point", "yaw": 2.5, "pitch": 9, "target": "the front door", "channel": 3 }));
+        assert_eq!(p, json!({ "yaw": 2.5, "pitch": 1.4 }));
+        assert_eq!(clamp_point(&json!({ "yaw": "left", "pitch": null })), json!({ "yaw": 0.0, "pitch": 0.0 }));
     }
 }

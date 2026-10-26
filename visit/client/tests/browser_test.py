@@ -201,6 +201,33 @@ async def main():
         check("a ShaderMaterial (a program) reaches B as plain grey, not as code", await b.until(
             "(o => o && o.material.type)(v._viewer.scene.root.getObjectByProperty('uuid', %s))" % json.dumps(su)), "MeshLambertMaterial")
 
+        print("\npointing")
+        keys = await b.js("(() => { const k = new Set(); v._viewer.scene.root.traverse(o => Object.keys(o.userData || {}).forEach(x => k.add(x))); return [...k].sort(); })()")
+        check("B's copy of A's scene has none of A's own userData: only what Visit reads", keys, ["visitPoint", "visitor"])
+        check("the cube A marked as one to point at", await b.js("v._viewer.scene.root.getObjectByName('spinner').userData"), {"visitPoint": True})
+        await a.js("room.frozen = true; room.spinner.position.set(%f, 1.4, %f)" % (a2["x"] + 1.5, a2["z"] - 1.5))
+        await asyncio.sleep(0.5)
+        look = """(() => { const s = v._viewer.scene, o = s.root.getObjectByName('spinner'), dx = o.position.x - s.pose.x, dy = o.position.y - s.pose.y,
+          dz = o.position.z - s.pose.z; v._view.yaw = Math.atan2(-dx, -dz) - s.yaw0 + %s; v._view.pitch = Math.atan2(dy, Math.hypot(dx, dz));
+          v._sendInput(performance.now(), true); v._view.cross.style.display = 'block'; return true; })()"""
+        await b.js(look % "0")
+        check("looking at it, B's crosshair is hot", bool(await b.until("!!v._view.cross.style.background")), True)
+        await b.js(look % "Math.PI")
+        check("looking away, it is not", await b.until("!v._view.cross.style.background"), True)
+        await b.js(look % "0")
+        await asyncio.sleep(0.3)
+        await b.js("v._pointNow()")
+        pt = await a.until("window.points.length && window.points[0]")
+        pose = await a.js("({ ...v.visitors[0].pose })")
+        check("B points: A hears it, from where A has B, toward the cube: A's ray hits it",
+              (pt["visitor"]["name"], [round(x, 2) for x in pt["from"]], round(sum(x * x for x in pt["dir"]), 3), pt["hit"]),
+              ("B", [round(pose[k], 2) for k in "xyz"], 1.0, "spinner"))
+        await b.js("for (let i = 0; i < 10; i++) v._pointNow()")
+        await asyncio.sleep(0.6)
+        check("ten points at once from B: its page sends one of them (one every 200 ms at most)", await a.js("window.points.length"), 2)
+        await b.js("v._view.cross.style.display = 'none'")
+        await a.js("room.frozen = false")
+
         print("\npicture in picture")
         await b.js("document.querySelector('.visit-stage button[data-s=small]').click()")
         check("Back to my room: A's room shrinks to a corner, and takes no keys", await b.js("[document.querySelector('.visit-stage').classList.contains('small'), v.viewFocused]"), [True, False])

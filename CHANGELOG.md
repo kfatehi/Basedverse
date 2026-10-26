@@ -9,6 +9,42 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.6.0 — 2026-10-26
+
+**Visitors can point, and objects' userData stays home.** A visitor looking around has a crosshair, and a
+click there **points**: its visit-client sends only where it looked (yaw and pitch), and the host's page hears
+`point`, a ray from where the host has that visitor toward where it looked, and decides what that does
+(SPEC 8.3). The host chooses what a guest may reach; INTEGRATING.md step 5 says how (an allow list whose
+default is no). And the scene a host sends no longer carries its objects' `userData`: three.js's `toJSON`
+put it all in (a sim's state about its figures, references to other objects, sometimes whole copies of
+them), and visitors now get only what Visit reads, `visitor` and the new `visitPoint`. Protocol names are
+unchanged: a 0.6 office and a 0.5 one still meet (a 0.5 host ignores points; a 0.5 visitor sends none).
+
+### What changed
+
+- visit.js: `v.on("point", e)` while hosting: `{ id, visitor, from, dir, yaw, pitch }`. The visitor's view
+  shows a crosshair while the pointer is locked to it, and a click points (one every 200 ms at most); the
+  crosshair shows hot over what the host marked `userData.visitPoint`. A scene's JSON keeps, of `userData`,
+  only `visitor` and `visitPoint` (strings, numbers or booleans); the host's objects keep theirs.
+- visit-client: the page message `point` (visitor side), the link's control message `{"point": {yaw,
+  pitch}}`, and the page message `point` (host side): clamped, at most 5 a second from a visitor.
+- [visit/SPEC.md](visit/SPEC.md): section 3 rule 7, 5.2, 5.3, 7.2, 8.1 (userData), 8.3 (new: points), 9, 10.
+  [visit/INTEGRATING.md](visit/INTEGRATING.md): step 5 (`root`, Points), step 6, the checklist, "Don't".
+- Tests: e2e checks points pass clamped and bare, and five a second at most; the browser test checks a
+  visitor's copy has no host userData, the crosshair is hot over a marked object, and a point's ray hits it.
+  The e2e reload check no longer depends on the lobby's message coming after the link's.
+
+### What an integration does
+
+1. Get visit-client 0.6.0 (`bin/setup` again, download; or this release). The lobby is unchanged: nothing to
+   deploy.
+2. If your page relied on `userData` reaching visitors (only Visit's visitor's page reads a scene, so nothing
+   should): keep that data elsewhere. `userData.visitor` on visitors' bodies still goes.
+3. To let visitors point (optional): `visit.on("point", ...)`, through an allow list of what a guest may do,
+   with a few a second per visitor at most; mark what is on it `userData.visitPoint = true`
+   (INTEGRATING.md step 5, Points). Without a handler, points do nothing.
+4. Run step 8 again: a visitor's crosshair shows while it looks around, and clicks reach your handler.
+
 ## v0.5.0 — 2026-10-25
 
 **Every room is three.js, and video is gone.** A room takes part with its scene: the host sends it, and
