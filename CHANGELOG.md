@@ -9,7 +9,7 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
-## v0.8.0 — unreleased (the `links` branch)
+## v0.8.0 — 2026-10-26
 
 **Links: a room you link with shows in a corner first** ([visit/SPEC.md](visit/SPEC.md) 8.5). The panel's
 **Knock** is now **Link**: once the other office says yes, its room shows in your stage's corner, seen from
