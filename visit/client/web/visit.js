@@ -720,7 +720,9 @@
       if (hooks.unit != null && !(Number(hooks.unit) > 0)) throw new Error("visit.host: unit is how many metres one of the scene's units is (a number above 0)");
       this._hooks = hooks;
       this._sync = null;
-      for (const h of this._hosted.values()) { this._spawn(h); h.sceneSent = false; }
+      this._plotFrom = null;
+      for (const h of this._hosted.values()) { if (h.inside) this._spawn(h); h.sceneSent = false; }
+      for (const w of this._watches.values()) if (w.failed) Object.assign(w, { failed: false, since: performance.now(), askedAt: 0 });   // now it can read them
       this._sendHost();
     }
     _sendHost() { this._send({ type: "host", three: String(this._hooks.scene.three.REVISION) }); }

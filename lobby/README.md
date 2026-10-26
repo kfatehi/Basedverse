@@ -102,5 +102,6 @@ Nothing of your room is visible until you let someone in. Then, in version 1, **
 sees your room, and anyone in the group can let more people in**: leave the group, or set yourself
 `busy`, to stop that. In versions 2 and 3 each visitor is let in by you. In version 3 (and in version 2,
 from a three.js room) they are sent your room's scene, all of it: everything under `root`, whether in their
-view or not, and each object's `userData`. Whatever your room shows, they see: if it shows your work (issue
+view or not (of objects' `userData`, only what Visit itself reads). In version 3 your guests, with your door open, also watch your
+plot (Visit 0.7's worlds): they get the same, without a knock. Whatever your room shows, they see: if it shows your work (issue
 titles, what your agents are doing), so does the scene, or the video.

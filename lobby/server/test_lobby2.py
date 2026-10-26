@@ -426,7 +426,14 @@ async def t_keys():
 async def t_watch():
     """Watches (Visit 0.7's world): a knock with watch: true, to see a plot from outside it. Counted apart from
     visits, never moving the watcher out of the room it is in, not stopped by busy; errors say ref: watch."""
-    a, b, c = (await join("W A", proto=lobby.PROTO3), await join("W B", proto=lobby.PROTO3), await join("W C", proto=lobby.PROTO3))
+    a, b, c = (await join("W A", proto=lobby.PROTO3, world=True), await join("W B", proto=lobby.PROTO3, world=True), await join("W C", proto=lobby.PROTO3, world=True))
+    old = await join("W Old", proto=lobby.PROTO3)
+    await a.send(type="knock", to=old.id, watch=True)
+    e = await a.expect("error")
+    lob = await c.last_lobby()
+    check("an office that did not say world (an older Visit) cannot be watched: not_supported, never asked",
+          (e["code"], e.get("ref"), office(lob, "W Old")["world"], office(lob, "W A")["world"]), ("not_supported", "watch", False, True))
+    await old.send(type="bye")
     await a.send(type="knock", to=c.id)
     await a.expect("knock_sent")
     await c.send(type="answer", knock=(await c.expect("knock"))["id"], accept=True)

@@ -373,6 +373,41 @@ Or build your own from the state and actions: `visit.offices`, `visit.knocks`, `
 
 **Check:** your user can see other workrooms, knock, answer a knock, and go offline and back.
 
+## Optional — your world: friends' plots round your room
+
+With a world ([WORLD.md](WORLD.md), SPEC 8.4) your user stays in their own room, as themselves, and their
+friends' rooms sit round it as plots they walk onto, without knocking. A friend is a guest both ways (the star
+in the panel), with their doors open. Do this once the rest works:
+
+1. **Say your plot** in `visit.host`: `plot: { center: [x, z], size: [w, d] }`, the rectangle of your floor
+   that is your land (in your scene's units), and `unit`, how many metres one of them is. Without it, your plot is
+   what your scene covers, which a big ground plane makes too big.
+2. **Let people walk out.** Your `move` must let a visitor walk off your plot somewhere (a doorway is enough):
+   walking off it is how they go home. And let `spawn(visitor, { at })` put someone who walked in where they
+   stepped (`at`, in your terms), unless that is inside a wall.
+3. **Your user is a body of yours, walking.** If your room has no avatar for your own user, give it one (and a
+   camera that follows it): in a world, your page draws your user wherever they are, in your room or another's.
+4. **Every frame**, after your own walking (only while `!world.inside`: in someone else's plot, their room moves
+   your user), ask the world where your user is, and draw with it:
+
+   ```js
+   const world = visit.world({ scene, renderer });   // your whole scene, and its renderer
+   // each frame:
+   if (!world.inside) walkMyAvatar(dt, input);                       // your own walking, your own walls
+   const at = world.frame(dt, { x, y, z, yaw, pitch }, input);      // input: { forward, strafe, run }
+   avatar.position.set(at.x, at.y, at.z);                            // at home as you said, or as their room has you
+   world.render(camera);                                             // in place of renderer.render(scene, camera)
+   ```
+
+   `world.render` draws your room clipped to your plot: anything of yours outside it (a sky dome, a huge ground)
+   is cut there; use `scene.background` for a sky. A post-processing chain (`EffectComposer`) does not fit it.
+5. **Edges, if you like:** `visit.proposeEdge(friend.key, { mine: "east", theirs: "west" })`; the panel asks the
+   friend, or use `visit.edgeProposals` and `acceptEdge` / `declineEdge` in your own UI.
+
+**Check:** two rooms that are each other's guests see each other's plot; walking onto it puts you in its room
+(its `visit.visitors` lists you), walking off brings you home; with an edge agreed, walking out of your door
+goes straight into theirs.
+
 ## Step 8 — Test it on one machine
 
 You need two workrooms. Run a second visit-client beside the first, with its own name, port and token,
@@ -420,6 +455,8 @@ Then, in order:
       all work, with the knock rules of step 7; names and messages are escaped.
 - [ ] Your user can go offline and back (the panel, or `leaveLobby()` / `joinLobby()`), and stays offline
       across a restart (`VISIT_STATE_FILE`).
+- [ ] A world, if you offer one: your `plot` and `unit` are said, visitors can walk off your plot, `spawn`
+      takes `at`, your user has a body of yours, and you draw with `world.frame` and `world.render`.
 - [ ] Step 8 passes, reloads included.
 
 ## Troubleshooting

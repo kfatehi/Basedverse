@@ -1,6 +1,6 @@
 # Visit — walk around each other's workrooms
 
-**Status: built and tested on one machine (visit-client, visit.js, the lobby's version 3). Visit 0.4 has gone between two machines over the internet; 0.5 not yet.**
+**Status: built and tested on one machine (visit-client, visit.js, the lobby's version 3). Visit 0.4 has gone between two machines over the internet; 0.5 not yet. 0.7 adds worlds ([WORLD.md](WORLD.md)): your friends' rooms round yours, walked onto without knocking.**
 
 Everyone builds their own workroom, with three.js, and Visit lets you walk around each other's with WASD
 and the mouse. The host sends its room's scene, as data; your browser draws it, with the host's very three.js
@@ -11,7 +11,8 @@ pieces everyone drops in unchanged.
 | doc | for |
 |---|---|
 | [INTEGRATING.md](INTEGRATING.md) | adding Visit to a workroom. Written for the coding agent doing it: hand it this file and say "integrate this into my workroom". |
-| [SPEC.md](SPEC.md) | the contract: the local client, the page connection, the lobby (`basedverse-lobby/3`), the link between machines, scenes and input, security, limits, errors, versions. For whoever builds or changes the shared pieces. |
+| [SPEC.md](SPEC.md) | the contract: the local client, the page connection, the lobby (`basedverse-lobby/3`), the link between machines, scenes and input, worlds, security, limits, errors, versions. For whoever builds or changes the shared pieces. |
+| [WORLD.md](WORLD.md) | worlds: why they are the way they are, and what is still to come. |
 
 ## Giving it to someone
 

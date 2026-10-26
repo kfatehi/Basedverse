@@ -118,8 +118,10 @@ const WATCH_PENDING: Duration = Duration::from_secs(15);
 const WATCH_DECLINED: Duration = Duration::from_secs(20);
 /// The most plots an office watches at once (the lobby's own limit is the same).
 const MAX_WATCHING: usize = 8;
-/// With no page for this long, its world's watches end (they are only for a page to draw).
+/// With no page for this long, its world's watches end (they are only for a page to draw); a new page that has
+/// not asked for the world this long after connecting, the same.
 const WORLD_NO_PAGE: Duration = Duration::from_secs(60);
+const WORLD_ASK: Duration = Duration::from_secs(10);
 
 pub struct Core {
     lobby: mpsc::UnboundedSender<LobbyOut>,
@@ -140,8 +142,10 @@ pub struct Core {
     /// Guests let in through the open door (knocker's office id -> its key, and when), until the lobby agrees
     /// their visit: then the visitor's link must be that key.
     admitted: HashMap<String, (String, Instant)>,
-    /// The page draws a world (../WORLD.md): this office watches its guests' plots, by itself.
+    /// The page draws a world (../WORLD.md): this office watches its guests' plots, by itself. After a page
+    /// connects, until it asks for the world again (or WORLD_ASK passes, and the world goes off).
     world: bool,
+    world_ask: Option<Instant>,
     /// Knocks to watch: sent (office id -> when, and in the order sent: the lobby answers each, in order, with
     /// knock_sent or an error), sent and named by the lobby (knock id -> office id), and declined or refused
     /// (key -> when): not made again for a while.
@@ -187,6 +191,7 @@ impl Core {
             key,
             admitted: HashMap::new(),
             world: false,
+            world_ask: None,
             watch_pending: HashMap::new(),
             watch_order: VecDeque::new(),
             watch_knocks: HashMap::new(),
@@ -223,6 +228,10 @@ impl Core {
                     self.admitted.retain(|_, (_, at)| at.elapsed() < ADMITTED_FOR);
                     if self.world && self.page.is_none() && self.page_gone.elapsed() >= WORLD_NO_PAGE {
                         info!("no page for a minute: its world's watches end");
+                        self.set_world(false);
+                    }
+                    if self.world && self.page.is_some() && self.world_ask.is_some_and(|t| t.elapsed() >= WORLD_ASK) {
+                        info!("the page does not draw a world: its watches end");
                         self.set_world(false);
                     }
                     self.watch_guests();
@@ -331,6 +340,7 @@ impl Core {
             let _ = old.text.send(PageOut::Close(4409, "replaced"));
         }
         self.page = Some(Page { id, text, frames });
+        self.world_ask = self.world.then(Instant::now);   // the world goes on only if this page asks for it too
         let visits: Vec<Value> = self.visits.values().filter(|v| v.up).map(started).collect();
         self.to_page(json!({
             "type": "ready", "version": VERSION, "office": self.office, "online": self.online, "away": self.saved.away, "status": self.status,
@@ -996,6 +1006,7 @@ impl Core {
     /// The world on (the page draws its guests' plots) or off (its watches end).
     fn set_world(&mut self, on: bool) {
         self.world = on;
+        self.world_ask = None;
         if on {
             self.watch_declined.clear();   // asked anew: try everyone again
             self.watch_guests();
@@ -1026,7 +1037,9 @@ impl Core {
                 break;
             }
             let (Some(id), Some(key)) = (o.get("id").and_then(Value::as_str), o.get("key").and_then(Value::as_str)) else { continue };
-            if id == me || o.get("ready").and_then(Value::as_bool) != Some(true) || watched.iter().any(|w| w == id)
+            // Only an office whose visit-client takes knocks to watch (an older one would show them to its page).
+            if id == me || o.get("ready").and_then(Value::as_bool) != Some(true) || o.get("world").and_then(Value::as_bool) != Some(true)
+                || watched.iter().any(|w| w == id)
                 || self.watch_pending.contains_key(id) || self.watch_declined.contains_key(key) || !self.saved.guests.iter().any(|g| g.key == key)
             {
                 continue;

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """visit.js in real browsers: the real lobby (in-process), two visit-clients, the test room (room.html, three.js)
-open in two headless Chromes driven over the DevTools protocol. B knocks on A, draws A's scene, walks around
-it with real key presses, sees what A changes, and both pages reload mid-visit. Run by run-browser.sh, which
-starts the Chromes.
+open in two headless Chromes driven over the DevTools protocol, A's made with three.js r128 and B's with r160.
+B knocks on A, draws A's scene, walks around it with real key presses, sees what A changes, and both pages
+reload mid-visit. Then worlds: each draws the other's plot round its own, walks onto it and off, agrees an edge
+and walks across it, and sees an outline when the door shuts. Run by run-browser.sh, which starts the Chromes.
 
     python3 browser_test.py path/to/visit-client CDP_PORT_A CDP_PORT_B OUT_DIR
 """

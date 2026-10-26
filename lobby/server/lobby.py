@@ -385,6 +385,7 @@ class Office2:
         self.proto = PROTO2          # which lobby it is in: it sees, and visits, only offices of the same
         self.link = None             # {"endpoint", "addr"} once published (and until withdrawn)
         self.key = None              # the endpoint it last published: its key, kept while its link is withdrawn
+        self.world = False           # it takes knocks to watch (Visit 0.7 on: its hello said world: true)
         self.visiting = None         # the visit it is on, as a visitor
         self.hosting = set()         # the visits to it, as a host
         self.watching = set()        # the watches it has of others' plots (visits with watch: they see, nothing else)
@@ -415,7 +416,7 @@ def lobby_view2(proto):
     return {"type": "lobby", "offices": [
         {"id": o.id, "name": o.name, "status": o.status, "sim": o.sim, "max_visitors": o.max_visitors,
          "visitors": len(o.hosting), "visiting": VISITS2[o.visiting]["host"] if o.visiting else None,
-         "ready": o.link is not None, "key": o.key, "watchers": len(o.watched)}
+         "ready": o.link is not None, "key": o.key, "watchers": len(o.watched), "world": o.world}
         for o in sorted(OFFICES2.values(), key=lambda o: o.name.casefold()) if o.proto == proto]}
 
 
@@ -526,6 +527,8 @@ def on2_knock(me, m):
         return error2(me, "not_found", "no office with that id", ref)
     if target is me:
         return error2(me, "self_knock", "an office cannot knock on itself", ref)
+    if watch and not target.world:
+        return error2(me, "not_supported", "%s cannot be watched (an older Visit)" % target.name, ref)
     if not watch and target.status != "available":
         return error2(me, "not_available", "%s is not available" % target.name, ref)
     if not watch and len(target.hosting) >= target.max_visitors:
@@ -683,6 +686,7 @@ def hello2(ws, m):
     me.id = "o" + secrets.token_hex(4)
     me.name, me.status, me.max_visitors, me.proto = name, m.get("status", "available"), max_visitors, m["proto"]
     me.sim = {k: str(sim[k])[:40] for k in ("name", "version") if isinstance(sim.get(k), str)}
+    me.world = m.get("world") is True
     OFFICES2[me.id], BY_NAME2[name.casefold()] = me, me.id
     welcome2(me, False)
     announce2()
