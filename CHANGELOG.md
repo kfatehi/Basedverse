@@ -9,6 +9,19 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.7.1 — 2026-10-26
+
+**The world is a step of the guide, not an option.** [visit/INTEGRATING.md](visit/INTEGRATING.md)'s world
+section, "Optional — your world" in 0.7.0, is now **step 9** ("Your world: friends' plots round your room"),
+after the test on one machine, and on the checklist: every workroom does it. Without it a room still knocks
+and visits, but its user sees no friends' rooms round theirs, and a friend who walks onto its plot from their
+world may have no way back out. The code is 0.7.0's; only its version number changes.
+
+### What an integration does
+
+1. Get visit-client 0.7.1 (`bin/setup` again, download; or this release). Nothing else in it changes.
+2. If you have not yet, do INTEGRATING.md step 9, and run its check.
+
 ## v0.7.0 — 2026-10-26
 
 **Worlds: your friends' rooms round yours, walked onto without knocking** ([visit/WORLD.md](visit/WORLD.md),
