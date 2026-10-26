@@ -51,7 +51,7 @@ as before.
   busy, never moving the watcher out of the room it is in); hello's `world`.
 - The test room: `?world=1` (doorways, you as a block walking with WASD) and `?three=<r>`.
 - [visit/SPEC.md](visit/SPEC.md): sections 2, 3 (points 9 to 12), 4.1, 5, 6.2 to 6.6, 7.2, 8.1, 8.3, 8.4 (new), 9,
-  10, 11, 13. [visit/INTEGRATING.md](visit/INTEGRATING.md): "Optional — your world", step 7, the checklist.
+  10, 11, 13. [visit/INTEGRATING.md](visit/INTEGRATING.md): step 9 (new: your world), step 7, the checklist.
 
 ### What an integration does
 
@@ -61,9 +61,10 @@ as before.
 3. Make sure your launcher gives visit-client a `VISIT_STATE_FILE` (`bin/setup` does): without one, the office's
    key is new every run, and its friends no longer know it. The file now holds a secret key: outside your
    repository, never copied anywhere.
-4. Nothing else is required: a 0.6 page works as before, and with `Visit.panel` your user gets the door and the
-   stars. For a world, follow INTEGRATING.md's "Optional — your world": say your `plot` and `unit`, let visitors
-   walk off it, give `spawn` its `at`, and draw with `visit.world`'s `frame` and `render`.
+4. Add your world: INTEGRATING.md step 9. Say your `plot` and `unit`, let visitors walk off it, give `spawn`
+   its `at`, give your user a body, and draw with `visit.world`'s `frame` and `render`. Until you do, a 0.6 page
+   still knocks and visits as before (with `Visit.panel` your user gets the door and the stars), but sees no
+   friends' rooms round its own.
 
 ## v0.6.0 — 2026-10-26
 

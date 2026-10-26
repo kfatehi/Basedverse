@@ -2,7 +2,7 @@
 
 **Status: built (Visit 0.7.0), tested on one machine** (the end-to-end test, and two real
 browsers on different three.js releases). What it settles is in [SPEC.md](SPEC.md): sections 2, 3 (points 9 to
-12), 5, 6.4, 7.2, 8.1 and **8.4**; [INTEGRATING.md](INTEGRATING.md) has the optional step for a workroom. This
+12), 5, 6.4, 7.2, 8.1 and **8.4**; [INTEGRATING.md](INTEGRATING.md) step 9 is what a workroom does for it. This
 file keeps why it is the way it is, and what is still to come.
 
 Before, a visit was a context switch: you knocked, were let in, and were in someone else's room until you went

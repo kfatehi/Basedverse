@@ -644,7 +644,8 @@ v.host({
                                                     //   (r125 to r186), its renderer, and visitors' camera range (8.1)
   fov: 70,                                          // visitors' camera's vertical field of view, in degrees
   walk: { speed },                                  // optional: move() walks with Visit.walk at this speed: visitors walk at once
-  plot: { center: [x, z], size: [w, d] }, unit: 1,  // optional: this room's land in a world (8.4), in its units; metres in one
+  plot: { center: [x, z], size: [w, d] }, unit: 1,  // this room's land in a world (8.4), in its units (without it: what its scene
+                                                    //   covers); unit: metres in one
 });
 
 // a world (8.4): after host(). Every frame, where your page has its user (in its room's terms) and what they press;

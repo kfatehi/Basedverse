@@ -16,7 +16,9 @@ Your sim draws an office (a "workroom") in a browser page, with three.js. After 
 - **as a host**, it lets up to a few visitors walk around your room: Visit sends them your room's three.js
   scene, as data, and their browsers draw it; your page only decides where they may walk;
 - **as a visitor**, it draws the room you are walking around itself, as quickly as your own, and sends your
-  WASD and mouse to its host.
+  WASD and mouse to its host;
+- **in a world** (step 9), your friends' rooms sit round yours as plots, drawn in your own picture with your
+  own three.js: your user walks onto theirs, and they onto yours, without knocking.
 
 You get two shared pieces you do not modify:
 
@@ -26,8 +28,8 @@ You get two shared pieces you do not modify:
   scene to your visitors and moves them with your hooks, draws the scene of the room you visit, captures input.
 
 You write: a launcher step (start visit-client with a token), a way to hand the token to your page, your
-scene and two host hooks, and a little UI (or use the ready-made panel). Your page never opens any connection to
-another machine itself.
+scene and two host hooks, a little UI (or use the ready-made panel), and a few lines in your drawing loop for
+the world. Your page never opens any connection to another machine itself.
 
 ## Before you start
 
@@ -373,11 +375,35 @@ Or build your own from the state and actions: `visit.offices`, `visit.knocks`, `
 
 **Check:** your user can see other workrooms, knock, answer a knock, and go offline and back.
 
-## Optional — your world: friends' plots round your room
+## Step 8 — Test it on one machine
+
+You need two workrooms. Run a second visit-client beside the first, with its own name, port and token,
+and open a second copy of your page pointed at it (add a development-only way to choose, such as
+`?visit=2` selecting port 7402 and its token in your step 3 route):
+
+```sh
+visit-client --lobby "$LOBBY" --name "Test A" --sim my-workroom/1.0 --port 7401 --token-file a.token &
+visit-client --lobby "$LOBBY" --name "Test B" --sim my-workroom/1.0 --port 7402 --token-file b.token &
+```
+
+Then, in order:
+
+1. Both pages show both offices in the lobby.
+2. From B, knock on A; in A, let B in. B's page shows A's room; A's `visit.visitors` lists B.
+3. In B, walk with WASD and look with the mouse: the view moves, and stops at A's walls.
+4. **Reload A's page.** B's view holds, says the host is reloading, then carries on by itself.
+5. **Reload B's page.** It comes back still visiting A, without knocking again.
+6. In B, leave. B's view goes; A's visitors list empties.
+7. Set A's max visitors to 0 (or status busy): B's knock is refused.
+8. Stop B's visit-client: B disappears from A's lobby.
+
+## Step 9 — Your world: friends' plots round your room
 
 With a world ([WORLD.md](WORLD.md), SPEC 8.4) your user stays in their own room, as themselves, and their
 friends' rooms sit round it as plots they walk onto, without knocking. A friend is a guest both ways (the star
-in the panel), with their doors open. Do this once the rest works:
+in the panel), with their doors open. Do it once step 8 passes: it is a few lines in your page, and without it
+your room still knocks and visits as before, but your user sees no friends' rooms round theirs, and a friend who
+walks onto your plot from their world may have no way back out.
 
 1. **Say your plot** in `visit.host`: `plot: { center: [x, z], size: [w, d] }`, the rectangle of your floor
    that is your land (in your scene's units), and `unit`, how many metres one of them is. Without it, your plot is
@@ -404,31 +430,9 @@ in the panel), with their doors open. Do this once the rest works:
 5. **Edges, if you like:** `visit.proposeEdge(friend.key, { mine: "east", theirs: "west" })`; the panel asks the
    friend, or use `visit.edgeProposals` and `acceptEdge` / `declineEdge` in your own UI.
 
-**Check:** two rooms that are each other's guests see each other's plot; walking onto it puts you in its room
-(its `visit.visitors` lists you), walking off brings you home; with an edge agreed, walking out of your door
-goes straight into theirs.
-
-## Step 8 — Test it on one machine
-
-You need two workrooms. Run a second visit-client beside the first, with its own name, port and token,
-and open a second copy of your page pointed at it (add a development-only way to choose, such as
-`?visit=2` selecting port 7402 and its token in your step 3 route):
-
-```sh
-visit-client --lobby "$LOBBY" --name "Test A" --sim my-workroom/1.0 --port 7401 --token-file a.token &
-visit-client --lobby "$LOBBY" --name "Test B" --sim my-workroom/1.0 --port 7402 --token-file b.token &
-```
-
-Then, in order:
-
-1. Both pages show both offices in the lobby.
-2. From B, knock on A; in A, let B in. B's page shows A's room; A's `visit.visitors` lists B.
-3. In B, walk with WASD and look with the mouse: the view moves, and stops at A's walls.
-4. **Reload A's page.** B's view holds, says the host is reloading, then carries on by itself.
-5. **Reload B's page.** It comes back still visiting A, without knocking again.
-6. In B, leave. B's view goes; A's visitors list empties.
-7. Set A's max visitors to 0 (or status busy): B's knock is refused.
-8. Stop B's visit-client: B disappears from A's lobby.
+**Check:** with step 8's two rooms, each starring the other in the panel, each sees the other's plot; walking
+onto it puts you in its room (its `visit.visitors` lists you), walking off brings you home; with an edge agreed,
+walking out of your door goes straight into theirs.
 
 ## Checklist
 
@@ -455,9 +459,10 @@ Then, in order:
       all work, with the knock rules of step 7; names and messages are escaped.
 - [ ] Your user can go offline and back (the panel, or `leaveLobby()` / `joinLobby()`), and stays offline
       across a restart (`VISIT_STATE_FILE`).
-- [ ] A world, if you offer one: your `plot` and `unit` are said, visitors can walk off your plot, `spawn`
-      takes `at`, your user has a body of yours, and you draw with `world.frame` and `world.render`.
 - [ ] Step 8 passes, reloads included.
+- [ ] Your world (step 9): your `plot` and `unit` are said, visitors can walk off your plot, `spawn` takes
+      `at`, your user has a body of yours, you draw with `world.frame` and `world.render`, and step 9's check
+      passes.
 
 ## Troubleshooting
 
@@ -494,7 +499,7 @@ integration does about it**. To upgrade a workroom that works, read it from the 
 2. Get the new visit-client: run setup again (it keeps the `.env`'s answers; choose download), or step 1.
 3. Do each "what an integration does" of the versions you skipped, in order, and add any new setting it
    names to the `.env` (setup adds its own).
-4. Run step 8 again.
+4. Run step 8 again, and step 9's check.
 
 ## Don't
 
