@@ -9,6 +9,50 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.8.0 — unreleased (the `links` branch)
+
+**Links: a room you link with shows in a corner first** ([visit/SPEC.md](visit/SPEC.md) 8.5). The panel's
+**Knock** is now **Link**: once the other office says yes, its room shows in your stage's corner, seen from
+outside (from above it, going round, or from where its host's `preview` says), and you choose: **Go there**
+(its room fills the window, as a visit; **Back to my room** puts it in the corner again), **Put in my world**
+(with a world: their room becomes a plot round yours while the link lasts), or **Unlink**. Saying yes, the
+other office may tick **★ always**, making you a guest from then on. Its panel lists who is linked to it, seeing
+its room from outside, with **Unlink**. A link is a watch (8.4) its host let in itself: the door shutting, the
+guest list and the world going off do not end it. One link is in the corner at a time; a newer one, or a visit,
+takes the corner, and the one it moves waits in the panel (**Show**). Protocol names are unchanged: to an
+office on an older Visit (or through an older lobby) a link is a knock, and you walk straight in, as before.
+
+### What changed
+
+- The lobby: hello's `links`, each office's `links` in `lobby`; a knock with `link: true` (to a door that
+  takes them): answered as a knock (busy stops it, 6 a minute), let in as a watch counted as one (`full` at
+  its door's `max_watchers`, `too_many` at the knocker's `max_watching`, `already_watching`), with `link` on its
+  `knock`, `knock_sent`, `answered` and `visit`.
+- visit-client: hello says `links`; a page's `knock` keeps `link`; `visit_started` says `link`. A link is not
+  ended by `door` shut, `guest_remove` or `world` off. `enter` without a `pose` goes in where the host puts
+  newcomers (control `{"enter": null}`; the host's page hears `enter` without `pose`).
+- visit.js: `v.link(officeId, message)`, `v.stepIn(id)`, `v.stepOut(id)`, `v.toWorld(id)`, `v.unlink(id)`,
+  `v.watching(officeId)`, `v.links`; `link` on `v.knocks`, `v.knocking`, `v.visiting` (with `inside`),
+  `v.visitors`, `v.watchers`, `v.offices`, and the `knock`, `answered` and `visit_started` events; `host({
+  preview })`. `v.knock` is as before: let in, you are in the room. The panel and the stage do the above.
+- The test room's own keys wait while `v.viewFocused`. The tests: the lobby's `t_link`, the end-to-end test's
+  links, the browser test's links (A sees B's room in its corner, goes there, comes back, waits aside while
+  visiting, puts it in its world, unlinks).
+- [visit/SPEC.md](visit/SPEC.md): sections 2, 5.2, 5.3, 6.2 to 6.4, 7.2, 8.5 (new), 9, 13.
+  [visit/INTEGRATING.md](visit/INTEGRATING.md): steps 5 (`preview`), 6, 7 (linking), 8, the checklist.
+
+### What an integration does
+
+1. **The lobby first** (whoever runs it): `bin/deploy-lobby`. With an older lobby a link is a knock.
+2. Get visit-client 0.8.0.
+3. With `Visit.panel` and `Visit.stage`, nothing else: they link, show the corner, and list who is linked to you.
+   With a UI of your own (INTEGRATING.md steps 6 and 7): offer `visit.link` to offices whose `links` is true
+   (`visit.knock` to the others); when `visit.visiting.link`, show its room small until `visit.visiting.inside`,
+   with `stepIn`, `stepOut`, `toWorld` (if you have a world) and `unlink`; show `visit.watchers` with `link`,
+   with a way to end each (`visit.kick`). Your own keys still wait while `visit.viewFocused`.
+4. Optional: `preview` in `visit.host`, where a link sees your room from.
+5. Run step 8 again (it links now), and step 9's check.
+
 ## v0.7.2 — 2026-10-26
 
 **In a friend's plot, up and down with their room** (#4, kfatehi). A room with floors (stairs, a lift) moves a

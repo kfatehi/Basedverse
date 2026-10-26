@@ -13,7 +13,7 @@
 // visitor's page walks at once and the host corrects it), and a host renders and encodes nothing for anyone.
 "use strict";
 (function () {
-  const VERSION = "0.7.2", PROTO = "basedverse-visit-local/2";
+  const VERSION = "0.8.0", PROTO = "basedverse-visit-local/2";
   const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, LOOK = 0.0025;
   const POINT_MS = 200, AIM_MS = 125;   // a visitor's points, at most one this often; what it aims at, looked for this often
   // What the host hears many times a second: none of it changes what the page shows, so none fires "change".
@@ -457,7 +457,8 @@
       return { type: "scene", three: String(three.REVISION), json, ids: [...this.objs.values()].map(r => [r.o.uuid, r.idx]), targets: this.targets(root),
         renderer: rendererProps(renderer, three), fov: Number(hooks.fov) || 70, near: Number(this.cfg.near) || 0.1, far: Number(this.cfg.far) || 1000,
         walk: w && Number(w.speed) > 0 ? { speed: Number(w.speed) } : null, yaw0: h.yaw0, pose: h.pose,
-        plot: hooks.plot ? { center: hooks.plot.center.map(Number), size: hooks.plot.size.map(Number) } : null, unit: Number(hooks.unit) > 0 ? Number(hooks.unit) : 1 };
+        plot: hooks.plot ? { center: hooks.plot.center.map(Number), size: hooks.plot.size.map(Number) } : null, unit: Number(hooks.unit) > 0 ? Number(hooks.unit) : 1,
+        preview: hooks.preview ? ["x", "y", "z", "yaw", "pitch"].reduce((o, k) => Object.assign(o, { [k]: Number(hooks.preview[k]) }), {}) : null };
     }
   }
 
@@ -473,17 +474,19 @@
       this.key = null;         // this office's key: its lasting identity, the same every run (with a state file)
       this.door = "open";      // "open": your guests come in without knocking; "closed": everyone knocks
       this.guests = [];        // [{ key, name }]: who walks in through the open door
-      this.knocks = [];        // on your door: { id, from, message, until }
-      this.knocking = [];      // yours, waiting: { id, to }
+      this.knocks = [];        // on your door: { id, from, message, until, link }
+      this.knocking = [];      // yours, waiting: { id, to, link }
       this.layout = [];        // where you have put friends' plots in your world: [{ key, x, z, turn }]
       this.edges = [];         // sides of your plot agreed with friends': [{ key, name, mine, theirs, along, size }]
       this.edgeProposals = []; // edges friends propose, waiting for you: [{ key, name, mine, theirs, along, size }]
-      this.watchers = [];      // who watches your plot (your guests, with your door open): [{ id, visitor, inside }]
-      this.visiting = null;    // { id, host, paused }
+      this.watchers = [];      // who sees your room from outside it (your guests' worlds, links): [{ id, visitor, inside, link }]
+      this.links = [];         // your links (8.5): [{ id, host, where ("corner", "aside" or "world"), inside }]
+      this.visiting = null;    // the room in the stage: { id, host, paused, link, inside } (a link's: inside once you go there)
       this.visitors = [];      // { id, visitor, pose }
       this._on = {};
       this._hosted = new Map();   // channel -> a visit to this office (or a watch of its plot)
       this._watches = new Map();  // channel -> a plot this office watches: { id, channel, host, inside, scene, ... }
+      this._links = new Map();    // channel -> a link of this office's, wherever it is (in _watches too, in the world)
       this._world = null;         // v.world(): friends' plots drawn around this room
       this._hooks = null;         // until visit.host(): this office is not in the lobby to be visited, nor knocks
       // A visitor's numbers, about once a second (the "stats" event): input to screen (drawn here) and the
@@ -573,7 +576,7 @@
       switch (m.type) {
         case "online":   // (again, after a drop): its own knocks still waiting are these
           this.state = "online"; this.office = m.office;
-          if (Array.isArray(m.knocking)) this.knocking = m.knocking.map(k => ({ id: k.id, to: k.to }));
+          if (Array.isArray(m.knocking)) this.knocking = m.knocking.map(k => ({ id: k.id, to: k.to, link: k.link === true }));
           break;
         case "offline":   // away: this office left the lobby on purpose, and sees nobody until it joins again
           this.state = m.away ? "away" : "offline";
@@ -582,19 +585,19 @@
         case "lobby":
           this.offices = (m.offices || []).map(o => ({ id: String(o.id), name: String(o.name), status: String(o.status), sim: o.sim || {},
             maxVisitors: Number(o.max_visitors) || 0, visitors: Number(o.visitors) || 0, visiting: o.visiting || null, ready: o.ready === true,
-            key: typeof o.key === "string" ? o.key : null }));
+            key: typeof o.key === "string" ? o.key : null, links: o.links === true }));
           { const me = this.offices.find(o => this.office && o.id === this.office.id); if (me) { this.status = me.status; this.maxVisitors = me.maxVisitors; } }
           break;
         case "knock":
-          this.knocks = this.knocks.filter(k => k.id !== m.id).concat([{ id: m.id, from: m.from, message: m.message || "", until: Date.now() + 1000 * (m.expires_in || 60) }]);
+          this.knocks = this.knocks.filter(k => k.id !== m.id).concat([{ id: m.id, from: m.from, message: m.message || "", until: Date.now() + 1000 * (m.expires_in || 60), link: m.link === true }]);
           this._emit("knock", this.knocks[this.knocks.length - 1]);
           break;
         case "knock_cancelled": this.knocks = this.knocks.filter(k => k.id !== m.id); break;
-        case "knock_sent": this.knocking = this.knocking.concat([{ id: m.id, to: m.to }]); break;
+        case "knock_sent": this.knocking = this.knocking.concat([{ id: m.id, to: m.to, link: m.link === true }]); break;
         case "answered": {
           const k = this.knocking.find(x => x.id === m.knock);
           this.knocking = this.knocking.filter(x => x.id !== m.knock);
-          this._emit("answered", { to: k && k.to, accept: m.accept, reason: m.reason, message: m.message || "" });
+          this._emit("answered", { to: k && k.to, accept: m.accept, reason: m.reason, message: m.message || "", link: m.link === true });
           break;
         }
         case "guests": this._guests(m); break;
@@ -615,6 +618,7 @@
         case "host_paused": case "host_resumed":
           if (this.visiting && this._viewer && this._viewer.channel === m.channel) this.visiting.paused = m.type === "host_paused";
           if (this._watches.has(m.channel)) this._watches.get(m.channel).paused = m.type === "host_paused";
+          if (this._links.has(m.channel)) this._links.get(m.channel).paused = m.type === "host_paused";
           break;
         case "link_stats":
           if (this._viewer && this._viewer.channel === m.channel) { this.stats.rtt = Number(m.rtt_ms); this.stats.path = String(m.path); }
@@ -630,9 +634,59 @@
     setStatus(status) { this._send({ type: "status", status }); }
     setMaxVisitors(n) { this._send({ type: "max_visitors", n }); }
     rename(name) { this._send({ type: "rename", name }); }
+    // A knock: to walk into their room as soon as they let you in. A link (8.5; to an office whose `links` is
+    // true): let in, you see their room in a corner (the stage's), from above, and choose: go there (stepIn), put it
+    // in your world (toWorld), or not (unlink). To an older office a link is a knock.
     knock(officeId, message = "") { this._send({ type: "knock", to: officeId, message }); }
+    link(officeId, message = "") { this._send({ type: "knock", to: officeId, message, link: true }); }
     answer(knockId, accept, message = "") { this.knocks = this.knocks.filter(k => k.id !== knockId); this._send({ type: "answer", knock: knockId, accept, message }); this._changed(); }
-    leave() { if (this.visiting) this._send({ type: "end", visit: this.visiting.id }); }
+    leave() { if (this.visiting) this._send({ type: "end", visit: this.visiting.id }); }   // a link: unlinked
+    // Your links (by visit id; the corner's, by default). Into its room, as a visit is (its host's spawn says where),
+    // facing the way the corner looked: the corner fills the stage, and your keys and mouse go there. A visit you
+    // are on ends first (in one room at a time).
+    stepIn(id) {
+      const w = this._link(id);
+      if (!w || w.inside || w.where === "world") return false;
+      if (this._viewer && !this._viewer.link) { this._send({ type: "end", visit: this._viewer.id }); this._leaveCorner(); }
+      if (w.where !== "corner") this._toCorner(w);
+      const s = w.scene;
+      if (this._view && s && s.lookYaw != null) { this._view.yaw = s.lookYaw - s.yaw0; this._view.pitch = 0; }
+      w.inside = true; this.visiting.inside = true;
+      this._send({ type: "enter", channel: w.channel });
+      this._changed();
+      return true;
+    }
+    // Back to your own room: the link's room in the corner again.
+    stepOut(id) {
+      const w = this._link(id);
+      if (!w || !w.inside || w.where === "world") return false;
+      w.inside = false;
+      if (this.visiting && this.visiting.id === w.id) this.visiting.inside = false;
+      this._send({ type: "exit", channel: w.channel });
+      if (this._view) { this._view.keys.clear(); if (document.pointerLockElement) document.exitPointerLock(); }
+      this._changed();
+      return true;
+    }
+    // A link's room into your world (v.world first): a plot round yours, as a guest's, while the link lasts.
+    toWorld(id) {
+      const w = this._link(id);
+      if (!w || !this._world || w.where === "world") return false;
+      if (w.inside) this.stepOut(w.id);
+      if (this._viewer === w) this._leaveCorner(); else this._sceneDrop(w);
+      Object.assign(w, { where: "world", plot: true, failed: false, since: performance.now(), askedAt: 0 });
+      this._watches.set(w.channel, w);
+      this._sceneResync(w);   // whole again, to be read with this page's three.js
+      this._cornerNext();
+      this._visitorsList();
+      this._changed();
+      return true;
+    }
+    unlink(id) { const w = this._link(id); if (w) this._send({ type: "end", visit: w.id }); }
+    // Whether this office sees that one's room from outside it: a plot in its world (a guest's, or a link put there).
+    watching(officeId) { return [...this._watches.values()].some(w => w.host.id === officeId); }
+    _link(id) { return id == null ? (this._viewer && this._viewer.link ? this._viewer : null) : [...this._links.values()].find(w => w.id === id) || null; }
+    // In the room in the stage (a visit, or a link gone there): where keys, the mouse and points go.
+    _inRoom() { return !!this.visiting && (!this.visiting.link || this.visiting.inside); }
     // Out of the lobby (nobody sees this office or can knock; its visits end) and back. visit-client keeps
     // it out across its restarts when it has a state file (VISIT_STATE_FILE).
     leaveLobby() { this._send({ type: "leave_lobby" }); }
@@ -676,23 +730,26 @@
       if (m.role === "host") {
         // A watcher (../../WORLD.md) sees this room's plot from outside it: sent the scene, never spawned, until it
         // steps in (`enter`).
-        const h = { id: m.id, channel: m.channel, visitor: m.peer || {}, guest: m.guest === true, watch: m.watch === true, inside: m.watch !== true || m.inside === true,
+        const h = { id: m.id, channel: m.channel, visitor: m.peer || {}, guest: m.guest === true, watch: m.watch === true, link: m.link === true, inside: m.watch !== true || m.inside === true,
           pose: null, yaw0: 0, input: null, inputAt: 0, keyNext: true, fails: 0, sceneSent: false, posed: null, sharedAdds: m.shared_adds === true };
         if (m.state && m.state.pose && h.inside) { h.pose = m.state.pose; h.yaw0 = m.state.yaw0 || 0; }   // back after this page reloaded
         this._hosted.set(m.channel, h);
         if (h.inside) this._spawn(h);
       } else if (m.watch) {
-        const w = { id: m.id, channel: m.channel, host: m.peer || {}, watch: true, inside: false, paused: false, count: 0, scene: null, sceneQ: null,
-          since: performance.now(), loading: false, failed: false };
-        this._watches.set(m.channel, w);
+        // A plot watched (the world's), or a link (8.5): the corner's if it is free, else aside, waiting for it.
+        const w = { id: m.id, channel: m.channel, host: m.peer || {}, watch: true, link: m.link === true, plot: m.link !== true, where: m.link ? "aside" : null,
+          inside: false, paused: false, count: 0, scene: null, sceneQ: null, since: performance.now(), loading: false, failed: false };
+        if (w.link) this._links.set(m.channel, w); else this._watches.set(m.channel, w);
         if (m.inside) this._send({ type: "exit", channel: m.channel });   // this page lost where it was: it starts at home
+        if (w.link && !this._viewer) this._toCorner(w);
       } else {
-        this.visiting = { id: m.id, host: m.peer || {}, paused: false };
+        if (this._viewer && this._viewer.link) this._aside(this._viewer);   // a visit: the corner's link waits aside
+        this.visiting = { id: m.id, host: m.peer || {}, paused: false, link: false, inside: true };
         this._viewer = { id: m.id, channel: m.channel, count: 0, scene: null, sceneQ: null, since: performance.now(), loading: false, failed: false };
         this._placeholder();
       }
       this._visitorsList();
-      this._emit("visit_started", { id: m.id, role: m.role, peer: m.peer, guest: m.guest === true });
+      this._emit("visit_started", { id: m.id, role: m.role, peer: m.peer, guest: m.guest === true, link: m.link === true });
     }
 
     _ended(m) {
@@ -700,7 +757,9 @@
       if (h && h.id === m.id) this._hosted.delete(m.channel);
       const w = this._watches.get(m.channel);
       if (w && w.id === m.id) { this._sceneDrop(w); this._watches.delete(m.channel); }
-      if (this.visiting && this.visiting.id === m.id) { this._dropViewer(); this.visiting = null; }
+      const l = this._links.get(m.channel);
+      if (l && l.id === m.id) { this._links.delete(m.channel); this._sceneDrop(l); }
+      if (this.visiting && this.visiting.id === m.id) { this._dropViewer(); this.visiting = null; this._cornerNext(); }
       this._visitorsList();
       this._emit("visit_ended", { id: m.id, reason: m.reason });
     }
@@ -709,6 +768,8 @@
       this._hosted.clear();
       for (const w of this._watches.values()) this._sceneDrop(w);
       this._watches.clear();
+      for (const w of this._links.values()) this._sceneDrop(w);
+      this._links.clear();
       this._dropViewer();
       this.visiting = null;
       this._visitorsList();
@@ -716,8 +777,38 @@
 
     _visitorsList() {
       const hs = [...this._hosted.values()];
-      this.visitors = hs.filter(h => h.inside).map(h => ({ id: h.id, visitor: h.visitor, guest: h.guest, pose: h.pose }));
-      this.watchers = hs.filter(h => h.watch).map(h => ({ id: h.id, visitor: h.visitor, inside: h.inside }));
+      this.visitors = hs.filter(h => h.inside).map(h => ({ id: h.id, visitor: h.visitor, guest: h.guest, pose: h.pose, link: h.link }));
+      this.watchers = hs.filter(h => h.watch).map(h => ({ id: h.id, visitor: h.visitor, inside: h.inside, link: h.link }));
+      this.links = [...this._links.values()].map(w => ({ id: w.id, host: w.host, where: w.where, inside: w.inside }));
+    }
+
+    // ---------- links (8.5) ----------
+    // A link into the corner: the stage's small picture, its room drawn as its host draws it, from above, until you
+    // step in. A link back from aside or the world has no scene here: it asks for the whole one again.
+    _toCorner(w) {
+      if (this._viewer && this._viewer !== w) { if (this._viewer.link) this._aside(this._viewer); else return; }   // a visit keeps the stage
+      if (w.where === "world") { this._watches.delete(w.channel); this._sceneDrop(w); w.stale = true; }
+      const stale = w.stale;
+      Object.assign(w, { where: "corner", plot: false, stale: false, failed: false, since: performance.now(), askedAt: 0 });
+      this._viewer = w;
+      this.visiting = { id: w.id, host: w.host, paused: w.paused, link: true, inside: w.inside };
+      if (stale) this._sceneResync(w);
+      this._placeholder();
+      this._visitorsList();
+    }
+    // Out of the corner, waiting: no scene kept (its edits are not read meanwhile).
+    _aside(w) {
+      if (w.inside) this.stepOut(w.id);
+      if (this._viewer === w) this._leaveCorner(); else this._sceneDrop(w);
+      Object.assign(w, { where: "aside", stale: true });
+      this._visitorsList();
+    }
+    _leaveCorner() { this._dropViewer(); this.visiting = null; }
+    // The corner free: the newest link waiting takes it.
+    _cornerNext() {
+      if (this._viewer) return;
+      const next = [...this._links.values()].filter(w => w.where === "aside").pop();
+      if (next) this._toCorner(next);
     }
 
     // ---------- hosting ----------
@@ -740,6 +831,10 @@
       if (pl != null && !(isObj(pl) && Array.isArray(pl.center) && Array.isArray(pl.size) && pl.center.length === 2 && pl.size.length === 2
         && [...pl.center, ...pl.size].every(Number.isFinite) && pl.size[0] > 0 && pl.size[1] > 0)) throw new Error("visit.host: plot is { center: [x, z], size: [w, d] }");
       if (hooks.unit != null && !(Number(hooks.unit) > 0)) throw new Error("visit.host: unit is how many metres one of the scene's units is (a number above 0)");
+      // `preview` (optional): { x, y, z, yaw, pitch }, where a link sees this room from before going in (8.5); without
+      // it, from above its plot, going round.
+      const pv = hooks.preview;
+      if (pv != null && !(isObj(pv) && ["x", "y", "z", "yaw", "pitch"].every(k => Number.isFinite(pv[k])))) throw new Error("visit.host: preview is { x, y, z, yaw, pitch }");
       this._hooks = hooks;
       this._sync = null;
       this._plotFrom = null;
@@ -863,7 +958,7 @@
       if (!w || !isObj(m.edit)) return;
       const whole = m.edit.type === "scene";
       if (whole) w.loading = true;
-      w.sceneQ = (w.sceneQ || Promise.resolve()).then(() => !this._live(w) ? null : whole ? (w.watch ? this._watchStart(w, m.edit) : this._sceneStart(w, m.edit)) : this._sceneApply(w, m.edit))
+      w.sceneQ = (w.sceneQ || Promise.resolve()).then(() => !this._live(w) ? null : whole ? (w.plot ? this._watchStart(w, m.edit) : this._sceneStart(w, m.edit)) : this._sceneApply(w, m.edit))
         .finally(() => { if (whole) w.loading = false; })
         .catch(e => {
           if (!this._live(w)) return;
@@ -871,7 +966,7 @@
             console.warn("visit: cannot draw this room's scene", e);
             w.failed = true;
             this._sceneDrop(w);
-            if (!w.watch) this._placeholder(`cannot draw ${(this.visiting && this.visiting.host.name) || "this"}'s room: ${e.message || e}`);
+            if (!w.plot) this._placeholder(`cannot draw ${(this.visiting && this.visiting.host.name) || "this"}'s room: ${e.message || e}`);
             this._emit("error", { code: "scene", message: String(e.message || e) });
           } else { console.warn("visit: a scene edit that did not apply; asking for the whole scene again", e); this._sceneResync(w); }
         });
@@ -943,6 +1038,11 @@
       if (typeof r.colorManagement === "boolean" && T.ColorManagement && "enabled" in T.ColorManagement) T.ColorManagement.enabled = r.colorManagement;
       s.camera = new T.PerspectiveCamera(Math.min(150, Math.max(10, num(e.fov, 70))), 1, Math.max(0.001, num(e.near, 0.1)), Math.max(1, num(e.far, 1000)));
       s.camera.rotation.order = "YXZ";
+      if (w.link) {   // seen from outside until you go there: its plot from above, or where its host says to look from
+        s.plot = plotOf(e.plot, s.root, T);
+        const p = e.preview;
+        s.preview = isObj(p) && ["x", "y", "z", "yaw", "pitch"].every(k => Number.isFinite(p[k])) ? p : null;
+      }
       w.scene = s;
       this._sceneOwn(s);
       this._sceneAttach(w);
@@ -1174,8 +1274,8 @@
       if (!cw || !ch) return;   // not shown
       const k = Math.min(window.devicePixelRatio || 1, Math.sqrt(MAX_PIXELS / (cw * ch))), W = Math.max(2, Math.round(cw * k)), H = Math.max(2, Math.round(ch * k));
       if (c.width !== W || c.height !== H) { s.renderer.setSize(W, H, false); s.camera.aspect = W / H; s.camera.updateProjectionMatrix(); }
-      const yaw = s.yaw0 + (v ? v.yaw : 0), pitch = v ? v.pitch : 0;
-      if (s.walk && v && v.active && this.visiting && !this.visiting.paused) {
+      const yaw = s.yaw0 + (v ? v.yaw : 0), pitch = v ? v.pitch : 0, outside = w.link && !w.inside;
+      if (s.walk && v && v.active && !outside && this.visiting && !this.visiting.paused) {
         const key = x => v.keys.has(x);
         const p = walk({ x: s.pose.x, z: s.pose.z, yaw }, { forward: (key("KeyW") || key("ArrowUp") ? 1 : 0) - (key("KeyS") || key("ArrowDown") ? 1 : 0),
           strafe: (key("KeyD") || key("ArrowRight") ? 1 : 0) - (key("KeyA") || key("ArrowLeft") ? 1 : 0), run: key("ShiftLeft") || key("ShiftRight") }, dt, s.walk);
@@ -1185,11 +1285,11 @@
       while (s.hist.length > 2 && now - s.hist[0][0] > 2000) s.hist.shift();
       const fade = Math.exp(-dt / 0.1);
       s.vis.x *= fade; s.vis.y *= fade; s.vis.z *= fade;
-      s.camera.position.set(s.pose.x + s.vis.x, s.pose.y + s.vis.y, s.pose.z + s.vis.z);
-      s.camera.rotation.set(pitch, yaw, 0);
+      if (outside) this._lookOn(s, now);
+      else { s.camera.position.set(s.pose.x + s.vis.x, s.pose.y + s.vis.y, s.pose.z + s.vis.z); s.camera.rotation.set(pitch, yaw, 0); }
       if (s.offset !== null) this._sceneInterp(s, now - s.offset - INTERP_MS);
       for (const o of s.own) o.visible = false;
-      this._aim(s, now);
+      if (!outside) this._aim(s, now);
       s.renderer.render(s.root, s.camera);
       w.count++;
       this.frames = (this.frames || 0) + 1;
@@ -1202,6 +1302,17 @@
         keep(this._samples.latency, ms);
       }
       if (now - s.gcAt > 30000) { s.gcAt = now; this._sceneGc(s); }
+    }
+
+    // A link's room from outside: from where its host says (`preview`), or from above its plot, going round it once a
+    // minute. lookYaw: the way it looks, which a visitor going there walks in facing.
+    _lookOn(s, now) {
+      const c = s.camera, p = s.preview;
+      if (p) { c.position.set(p.x, p.y, p.z); c.rotation.set(Math.max(-1.4, Math.min(1.4, p.pitch)), p.yaw, 0); s.lookYaw = p.yaw; return; }
+      const pl = s.plot, r = Math.max(pl.size[0], pl.size[1]), a = now / 60000 * 2 * Math.PI;
+      c.position.set(pl.center[0] + Math.sin(a) * r * 0.85, r * 0.6, pl.center[1] + Math.cos(a) * r * 0.85);
+      c.lookAt(pl.center[0], 0, pl.center[1]);
+      s.lookYaw = a;
     }
 
     _sceneInterp(s, at) {
@@ -1301,7 +1412,7 @@
     // Where the room you are visiting is drawn. While the view is active (the default) it takes WASD, Shift and
     // the mouse; inactive (setActive(false): a picture-in-picture, say) it takes nothing, and the page's own
     // keys are its own again. `viewFocused` says which.
-    get viewFocused() { return !!(this.visiting && this._view && this._view.active); }
+    get viewFocused() { return !!(this._inRoom() && this._view && this._view.active); }
 
     view(element) {
       if (this._view) this._view.release();
@@ -1324,14 +1435,14 @@
       const KEYS = ["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "ShiftLeft", "ShiftRight"];
       const changed = () => { view.changedAt = view.changedAt || performance.now(); this._sendInput(performance.now(), true); };   // at once (at most every 8 ms): no waiting for a tick
       const down = e => {
-        if (!this.visiting || !view.active || ignore(e) || !KEYS.includes(e.code)) return;
+        if (!this._inRoom() || !view.active || ignore(e) || !KEYS.includes(e.code)) return;
         e.preventDefault();
         if (!view.keys.has(e.code)) { view.keys.add(e.code); changed(); }
       };
       const up = e => { if (view.keys.delete(e.code)) changed(); };
       const blur = () => { if (view.keys.size) { view.keys.clear(); changed(); } };
-      const click = e => { if (view.active && e.currentTarget.requestPointerLock) e.currentTarget.requestPointerLock(); };
-      const press = e => { if (e.button === 0 && locked() && view.active && this.visiting) this._pointNow(); };
+      const click = e => { if (view.active && this._inRoom() && e.currentTarget.requestPointerLock) e.currentTarget.requestPointerLock(); };
+      const press = e => { if (e.button === 0 && locked() && view.active && this._inRoom()) this._pointNow(); };
       const lock = () => { cross.style.display = locked() && view.active ? "block" : "none"; };
       const look = e => {
         if (!locked()) return;
@@ -1400,7 +1511,7 @@
       if (!v) return;
       const { canvas, ctx } = v;
       ctx.fillStyle = "#000"; ctx.fillRect(0, 0, canvas.width, canvas.height);
-      const say = text || (this.visiting && !(this._viewer && this._viewer.scene) ? `walking into ${this.visiting.host.name || "their"}'s room…` : "");
+      const say = text || (this.visiting && !(this._viewer && this._viewer.scene) ? `${this.visiting.link ? "looking into" : "walking into"} ${this.visiting.host.name || "their"}'s room…` : "");
       if (!say) return;
       const px = Math.max(14, Math.round(canvas.height / 30));
       ctx.fillStyle = "#e6edf3"; ctx.font = `${px}px system-ui, sans-serif`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
@@ -1442,7 +1553,7 @@
       const v = this._view;
       if (!v) return;
       if (v.resizeAt && now >= v.resizeAt) this._sizeView();
-      if (!this.visiting) return;
+      if (!this._inRoom()) return;
       if (now - v.sentAt < (changed ? INPUT_MIN_MS : INPUT_MS)) { if (changed) v.pending = true; return; }
       v.sentAt = now; v.pending = false;
       const k = c => v.keys.has(c);
@@ -1458,8 +1569,16 @@
       if (w) this._sceneDelta(w, dv, (dv.getUint8(2) & KEY) !== 0);
     }
 
-    // Stepping onto a plot refused by its host (full), or ended by a visit elsewhere: back where this was before.
+    // Stepping onto a plot refused by its host (full), or ended by a visit elsewhere: back where this was before. A
+    // link's: in the corner again.
     _enterRefused(m) {
+      const l = this._links.get(m.channel);
+      if (l && l.where !== "world") {
+        l.inside = false;
+        if (this.visiting && this.visiting.id === l.id) this.visiting.inside = false;
+        if (m.reason !== "moved") this._emit("error", { code: "enter_refused", message: `${l.host.name || "their"} room: ${m.reason || "refused"}` });
+        return;
+      }
       const w = this._watches.get(m.channel);
       if (!w) return;
       w.inside = false;
@@ -1816,6 +1935,9 @@
 .visit-panel .knock { display: block; background: #fff0d6; color: #7a4a00; } .visit-panel .knock .btns { display: flex; gap: 6px; margin-top: 4px; }
 .visit-panel button.star { border: 0; background: none; padding: 0 2px; color: #6e7681; font-size: 14px; line-height: 1; }
 .visit-panel button.star.on { color: #e3b341; }
+.visit-panel .knock label { display: flex; align-items: center; gap: 4px; color: #7a4a00; }
+.visit-panel .lnk { display: block; } .visit-panel .lnk .btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.visit-panel .knock input[type=checkbox] { flex: none; }
 .visit-panel input { flex: 1; min-width: 0; }`;
 
   function panel(element, v) {
@@ -1826,41 +1948,60 @@
     root.className = "visit-panel";
     element.appendChild(root);
     let composing = null, timer = null, drawn = "";
-    const knockable = o => o.ready && o.status === "available" && (!v.office || o.id !== v.office.id) && o.visitors < o.maxVisitors
-      && !(v.visiting && v.visiting.host.id === o.id) && !v.knocking.some(k => k.to === o.id);
+    const always = new Set();   // links on your door to let in for good (a guest, ★), as you answer them
     function draw() {
       if (root.contains(document.activeElement) && document.activeElement.tagName === "INPUT") return;   // never under a typing hand
       const me = v.office, rows = [];
-      rows.push(`<div class="row hd"><span class="dot ${v.state === "online" ? esc(v.status) : ""}"></span><span class="grow">Visit${me ? " · " + esc(me.name) : ""}</span><span class="muted">${esc(v.state)}</span>${v.state === "online" ? `<button data-v="away" title="leave the lobby: nobody sees you or can knock until you come back">Go offline</button>` : ""}</div>`);
-      if (v.state === "away") rows.push(`<div class="row"><span class="grow muted">out of the lobby: nobody sees you or can knock</span><button class="go" data-v="back">Go online</button></div>`);
+      rows.push(`<div class="row hd"><span class="dot ${v.state === "online" ? esc(v.status) : ""}"></span><span class="grow">Visit${me ? " · " + esc(me.name) : ""}</span><span class="muted">${esc(v.state)}</span>${v.state === "online" ? `<button data-v="away" title="leave the lobby: nobody sees you or can link until you come back">Go offline</button>` : ""}</div>`);
+      if (v.state === "away") rows.push(`<div class="row"><span class="grow muted">out of the lobby: nobody sees you or can link</span><button class="go" data-v="back">Go online</button></div>`);
       if (v.state === "online") {
         rows.push(`<div class="row"><span class="grow">you are</span><select data-v="status">${["available", "busy"].map(s => `<option${s === v.status ? " selected" : ""}>${s}</option>`).join("")}</select>
           <select data-v="max" title="how many visitors at once">${[0, 1, 2, 3, 4, 5, 6, 7, 8].map(n => `<option value="${n}"${n === v.maxVisitors ? " selected" : ""}>${n} visitors</option>`).join("")}</select></div>`);
-        rows.push(`<div class="row"><span class="grow">your door</span><select data-v="door" title="open: your guests (★) come in without knocking">
-          <option value="open"${v.door === "open" ? " selected" : ""}>open to guests</option><option value="closed"${v.door === "closed" ? " selected" : ""}>closed: all knock</option></select>
+        rows.push(`<div class="row"><span class="grow">your door</span><select data-v="door" title="open: your guests (★) link and walk in without asking">
+          <option value="open"${v.door === "open" ? " selected" : ""}>open to guests</option><option value="closed"${v.door === "closed" ? " selected" : ""}>closed: everyone asks</option></select>
           <span class="muted">${v.guests.length} ★</span></div>`);
       }
       // A star: whether this key is a guest (click to change); nothing for an office with no key yet.
       const star = (key, name) => !key ? "" : `<button class="star${v.isGuest(key) ? " on" : ""}" data-v="guest" data-key="${esc(key)}" data-name="${esc(name)}"
-        title="${v.isGuest(key) ? `a guest: walks in without knocking while your door is open (click: no longer)` : `make ${esc(name)} a guest: in without knocking while your door is open`}">${v.isGuest(key) ? "★" : "☆"}</button>`;
+        title="${v.isGuest(key) ? `a guest: links and walks in without asking while your door is open (click: no longer)` : `make ${esc(name)} a guest: in without asking while your door is open`}">${v.isGuest(key) ? "★" : "☆"}</button>`;
       for (const k of v.knocks) {
-        rows.push(`<div class="row knock"><b>${esc(k.from.name)}</b> is knocking${k.message ? `: “${esc(k.message)}”` : ""}
-          <div class="btns"><button class="go" data-v="in" data-k="${esc(k.id)}">Let in</button><button data-v="out" data-k="${esc(k.id)}">Not now</button>
-          <span class="muted">${Math.max(0, Math.round((k.until - Date.now()) / 1000))}s</span></div></div>`);
+        const forGood = k.link && k.from.key && !v.isGuest(k.from.key)
+          ? `<label title="make ${esc(k.from.name)} a guest: in without asking from now on, while your door is open"><input type="checkbox" data-v="always" data-k="${esc(k.id)}"${always.has(k.id) ? " checked" : ""}>★ always</label>` : "";
+        rows.push(`<div class="row knock"><b>${esc(k.from.name)}</b> ${k.link ? "wants to link" : "is knocking"}${k.message ? `: “${esc(k.message)}”` : ""}
+          <div class="btns"><button class="go" data-v="in" data-k="${esc(k.id)}">${k.link ? "Link" : "Let in"}</button><button data-v="out" data-k="${esc(k.id)}">Not now</button>
+          ${forGood}<span class="muted">${Math.max(0, Math.round((k.until - Date.now()) / 1000))}s</span></div></div>`);
       }
       for (const p of v.edgeProposals) {
         rows.push(`<div class="row knock"><b>${esc(p.name)}</b> proposes their plot's ${esc(p.theirs)} side against your ${esc(p.mine)} side
           <div class="btns"><button class="go" data-v="edge_yes" data-key="${esc(p.key)}">Agree</button><button data-v="edge_no" data-key="${esc(p.key)}">No</button></div></div>`);
       }
-      if (v.visiting) rows.push(`<div class="row"><span class="grow">in <b>${esc(v.visiting.host.name)}</b>'s room${v.visiting.paused ? " (reloading)" : ""}</span><button data-v="leave">Leave</button></div>`);
-      for (const x of v.visitors) rows.push(`<div class="row">${star(x.visitor.key, x.visitor.name)}<span class="grow"><b>${esc(x.visitor.name)}</b> ${x.guest ? "walked in" : "is visiting"}</span><button data-v="kick" data-x="${esc(x.id)}">Kick</button></div>`);
+      if (v.visiting && !v.visiting.link) rows.push(`<div class="row"><span class="grow">in <b>${esc(v.visiting.host.name)}</b>'s room${v.visiting.paused ? " (reloading)" : ""}</span><button data-v="leave">Leave</button></div>`);
+      // Your links: in the corner (go there, or into your world), in their room, waiting for the corner, in your world.
+      for (const l of v.links) {
+        const n = `<b>${esc(l.host.name)}</b>`, id = esc(l.id), un = `<button data-v="unlink" data-x="${id}" title="the link ends: their room goes">Unlink</button>`;
+        rows.push(`<div class="row lnk"><div>${
+          l.where === "world" ? `${n}'s room is in your world` : l.where === "aside" ? `linked with ${n} <span class="muted">(waiting for the corner)</span>`
+          : l.inside ? `in ${n}'s room` : `linked with ${n}: their room is in the corner`}</div><div class="btns">${
+          l.where === "aside" ? `<button data-v="show" data-x="${id}">Show</button>`
+          : l.where === "corner" && l.inside ? `<button data-v="step_out" data-x="${id}" title="your own room; theirs back in the corner">Back to my room</button>`
+          : l.where === "corner" ? `<button class="go" data-v="step_in" data-x="${id}" title="walk into their room">Go there</button>${v._world ? `<button data-v="to_world" data-x="${id}" title="their room as a plot beside yours, walked onto">Put in my world</button>` : ""}` : ""}${un}</div></div>`);
+      }
+      for (const x of v.visitors) rows.push(`<div class="row">${star(x.visitor.key, x.visitor.name)}<span class="grow"><b>${esc(x.visitor.name)}</b> ${x.guest && !x.link ? "walked in" : "is visiting"}</span><button data-v="kick" data-x="${esc(x.id)}">Kick</button></div>`);
+      // Who sees your room from outside it: links (unlink them here) and your guests' worlds (un-star them to stop it).
+      for (const x of v.watchers) {
+        if (x.inside) continue;
+        rows.push(`<div class="row">${star(x.visitor.key, x.visitor.name)}<span class="grow"><b>${esc(x.visitor.name)}</b> ${x.link ? "is linked: sees your room" : "sees your plot from their world"}</span>${
+          x.link ? `<button data-v="kick" data-x="${esc(x.id)}">Unlink</button>` : ""}</div>`);
+      }
       for (const o of v.offices) {
         if (me && o.id === me.id) continue;
-        const why = !o.ready ? "not ready" : o.status !== "available" ? o.status : o.visitors >= o.maxVisitors ? "full"
-          : v.visiting && v.visiting.host.id === o.id ? "you are there" : v.knocking.some(k => k.to === o.id) ? "knocking…" : "";
+        const word = o.links ? "Link" : "Knock", asking = v.knocking.some(k => k.to === o.id);
+        const why = !o.ready ? "not ready" : o.status !== "available" ? o.status : !o.links && o.visitors >= o.maxVisitors ? "full"
+          : v.visiting && v.visiting.host.id === o.id ? "you are there" : v.links.some(l => l.host.id === o.id) ? "linked"
+          : v.watching(o.id) ? "in your world" : asking ? "asking…" : "";
         rows.push(`<div class="row"><span class="dot ${esc(o.status)}"></span>${star(o.key, o.name)}<span class="grow" title="${esc(o.name)}">${esc(o.name)} <span class="muted">${esc(o.sim.name || "")} ${o.visitors}/${o.maxVisitors}</span></span>
-          <button data-v="knock" data-o="${esc(o.id)}" ${why ? `disabled title="${esc(why)}"` : ""}>${v.knocking.some(k => k.to === o.id) ? "Knocking…" : "Knock"}</button></div>`);
-        if (composing === o.id) rows.push(`<form class="row" data-o="${esc(o.id)}"><input maxlength="280" placeholder="a message for ${esc(o.name)}"><button class="go">Knock</button></form>`);
+          <button data-v="knock" data-o="${esc(o.id)}" ${why ? `disabled title="${esc(why)}"` : `title="${o.links ? "see their room in a corner, once they say yes: then go there, or put it in your world" : "an older Visit: you walk into their room once they say yes"}"`}>${asking ? `${word}ing…` : word}</button></div>`);
+        if (composing === o.id) rows.push(`<form class="row" data-o="${esc(o.id)}"><input maxlength="280" placeholder="a message for ${esc(o.name)}"><button class="go">${word}</button></form>`);
       }
       if (v.state === "online" && v.offices.length < 2) rows.push(`<div class="row muted">nobody else is here yet</div>`);
       const html = rows.join("");
@@ -1875,8 +2016,18 @@
       if (!b) return;
       const act = b.dataset.v;
       if (act === "knock") { composing = composing === b.dataset.o ? null : b.dataset.o; draw(); }
-      else if (act === "in" || act === "out") v.answer(b.dataset.k, act === "in");
+      else if (act === "in" || act === "out") {
+        const k = v.knocks.find(x => x.id === b.dataset.k);
+        if (act === "in" && k && always.has(k.id) && k.from.key) v.addGuest(k.from.key, k.from.name);
+        always.delete(b.dataset.k);
+        v.answer(b.dataset.k, act === "in");
+      }
       else if (act === "leave") v.leave();
+      else if (act === "unlink") v.unlink(b.dataset.x);
+      else if (act === "step_in") v.stepIn(b.dataset.x);
+      else if (act === "step_out") v.stepOut(b.dataset.x);
+      else if (act === "to_world") v.toWorld(b.dataset.x);
+      else if (act === "show") v._toCorner(v._link(b.dataset.x)), v._changed();
       else if (act === "kick") v.kick(b.dataset.x);
       else if (act === "away") v.leaveLobby();
       else if (act === "back") v.joinLobby();
@@ -1885,14 +2036,15 @@
       else if (act === "edge_no") v.declineEdge(b.dataset.key);
     });
     root.addEventListener("change", e => {
+      if (e.target.dataset.v === "always") { if (e.target.checked) always.add(e.target.dataset.k); else always.delete(e.target.dataset.k); }
       if (e.target.dataset.v === "status") v.setStatus(e.target.value);
       if (e.target.dataset.v === "max") v.setMaxVisitors(Number(e.target.value));
       if (e.target.dataset.v === "door") v.setDoor(e.target.value === "open");
     });
     root.addEventListener("submit", e => {
       e.preventDefault();
-      const f = e.target.closest("form");
-      v.knock(f.dataset.o, f.querySelector("input").value.trim());
+      const f = e.target.closest("form"), o = v.offices.find(x => x.id === f.dataset.o);
+      (o && o.links ? v.link : v.knock).call(v, f.dataset.o, f.querySelector("input").value.trim());
       composing = null;
       f.querySelector("input").blur();
       draw();
@@ -1914,12 +2066,18 @@
 .visit-stage .bar .grow { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .visit-stage .bar .stats { color: #8b949e; white-space: nowrap; }
 .visit-stage .bar button { font: inherit; color: inherit; background: #161b22; border: 1px solid #2d333b; border-radius: 6px; padding: 2px 10px; cursor: pointer; }
-.visit-stage.small .bar button, .visit-stage.small .bar .stats { display: none; }`;
+.visit-stage.small .bar button, .visit-stage.small .bar .stats { display: none; }
+.visit-stage .menu { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; background: rgba(13,17,23,.72); font: 12px/1.3 ui-monospace, Consolas, monospace; color: #e6edf3; }
+.visit-stage .menu[hidden] { display: none; }
+.visit-stage .menu button { font: inherit; color: inherit; background: #161b22; border: 1px solid #2d333b; border-radius: 6px; padding: 3px 12px; cursor: pointer; min-width: 150px; }
+.visit-stage .menu button.go { background: #2f9e4f; border-color: #2f9e4f; color: #fff; }`;
 
   // While you visit: the room you are in fills the window, with how it is going (the link's path and round
   // trip, input to screen, frames a second), "Back to my room" and "Leave". Back in your room, the visit
   // shrinks to a corner (and takes no keys: v.viewFocused is false, so the page's own are its own); a click
-  // on it brings it back to the full window. Gone when the visit ends. { element, big, shrink(), grow(),
+  // on it brings it back to the full window. A link (8.5) starts in the corner, seen from outside: a click on it
+  // offers "Go there" (the full window, in their room: "Back to my room" puts it in the corner again), "Put in my
+  // world" (with v.world) and "Unlink". Gone when the visit or link ends. { element, big, shrink(), grow(),
   // release() }
   function stage(v, { parent = document.body } = {}) {
     if (!document.getElementById("visit-stage-css")) {
@@ -1928,18 +2086,27 @@
     const root = document.createElement("div");
     root.className = "visit-stage big"; root.hidden = true;
     root.innerHTML = `<div class="screen"></div><div class="bar"><span class="grow"></span><span class="stats"></span>`
-      + `<button type="button" data-s="small" title="your own room, with this one in the corner">Back to my room</button><button type="button" data-s="leave">Leave</button></div>`;
+      + `<button type="button" data-s="small" title="your own room, with this one in the corner">Back to my room</button><button type="button" data-s="leave">Leave</button></div>`
+      + `<div class="menu" hidden><button type="button" class="go" data-s="in">Go there</button><button type="button" data-s="world">Put in my world</button>`
+      + `<button type="button" data-s="leave">Unlink</button><button type="button" data-s="close">Not now</button></div>`;
     parent.appendChild(root);
-    const screen = root.querySelector(".screen"), cap = root.querySelector(".grow"), nums = root.querySelector(".stats");
-    let view = null, big = true;
-    function set(on) { big = on; root.className = "visit-stage " + (on ? "big" : "small"); if (view) view.setActive(on); draw(); stats(); }
+    const screen = root.querySelector(".screen"), cap = root.querySelector(".grow"), nums = root.querySelector(".stats"), menu = root.querySelector(".menu");
+    const leaveB = root.querySelector(".bar button[data-s=leave]"), worldB = menu.querySelector("button[data-s=world]");
+    let view = null, big = true, shown = null;
+    function set(on) { big = on; root.className = "visit-stage " + (on ? "big" : "small"); if (view) view.setActive(on); menu.hidden = true; draw(); stats(); }
     function draw() {
       if (v.visiting && !view) { root.hidden = false; view = v.view(screen); big = true; root.className = "visit-stage big"; }
-      if (!v.visiting && view) { view.release(); view = null; root.hidden = true; }
+      if (!v.visiting && view) { view.release(); view = null; root.hidden = true; menu.hidden = true; shown = null; }
       if (!v.visiting) return;
-      const name = v.visiting.host.name || "Their";
-      cap.textContent = big ? `${name}'s room${v.visiting.paused ? " (reloading)" : ""} · click to look around, WASD to walk, Shift to run, Esc frees the mouse`
-        : `${name}'s room · click to go back in`;
+      const vi = v.visiting, name = vi.host.name || "Their";
+      if (vi.link) {   // a link: big while in their room, in the corner while not
+        const want = !!vi.inside, now = vi.id + ":" + want;
+        if (shown !== now) { shown = now; if (want !== big) set(want); if (!want) menu.hidden = true; }
+      } else if (shown !== vi.id) { shown = vi.id; if (!big) set(true); }
+      leaveB.textContent = vi.link ? "Unlink" : "Leave";
+      worldB.hidden = !v._world;
+      cap.textContent = big ? `${name}'s room${vi.paused ? " (reloading)" : ""} · click to look around, WASD to walk, Shift to run, Esc frees the mouse`
+        : vi.link ? `${name}'s room · click: go there, or not` : `${name}'s room · click to go back in`;
     }
     function stats() {
       const x = v.stats;
@@ -1947,9 +2114,18 @@
         x.latency != null && `input to screen ${Math.round(x.latency)} ms`, x.fps ? `${x.fps} fps` : ""].filter(Boolean).join(" · ");
     }
     root.addEventListener("click", e => {
-      const b = e.target.closest("button[data-s]");
-      if (b) { e.stopPropagation(); return b.dataset.s === "leave" ? v.leave() : set(false); }
-      if (!big) set(true);
+      const b = e.target.closest("button[data-s]"), s = b && b.dataset.s, link = v.visiting && v.visiting.link;
+      if (b) {
+        e.stopPropagation();
+        menu.hidden = true;
+        if (s === "leave") return v.leave();
+        if (s === "in") return v.stepIn();
+        if (s === "world") return v.toWorld();
+        if (s === "close") return;
+        return link ? v.stepOut() : set(false);   // Back to my room
+      }
+      if (big) return;
+      if (link) menu.hidden = !menu.hidden; else set(true);
     });
     v.on("change", draw); v.on("stats", stats);
     draw();

@@ -1,7 +1,8 @@
 # The lobby — knock on other sims' offices
 
 A meeting place for agent-office sims of any make. Each sim joins under a name, sees who else is online
-and whether they are `available`, and knocks on an available office with a message. It speaks three
+and whether they are `available`, and knocks on an available office with a message (or, Visit 0.8 on, links
+with it: let in, its room shows in a corner first). It speaks three
 versions side by side, each its own lobby (a client's first hello decides):
 
 - **version 1** ([PROTOCOL.md](PROTOCOL.md)): once let in, every office in the group sees every other
@@ -103,5 +104,6 @@ sees your room, and anyone in the group can let more people in**: leave the grou
 `busy`, to stop that. In versions 2 and 3 each visitor is let in by you. In version 3 (and in version 2,
 from a three.js room) they are sent your room's scene, all of it: everything under `root`, whether in their
 view or not (of objects' `userData`, only what Visit itself reads). In version 3 your guests, with your door open, also watch your
-plot (Visit 0.7's worlds): they get the same, without a knock. Whatever your room shows, they see: if it shows your work (issue
+plot (Visit 0.7's worlds): they get the same, without a knock. Someone you let link with you (Visit 0.8) gets it too, seeing
+your room from outside it until either of you ends the link; your panel lists them. Whatever your room shows, they see: if it shows your work (issue
 titles, what your agents are doing), so does the scene, or the video.

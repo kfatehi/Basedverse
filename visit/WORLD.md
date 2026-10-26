@@ -20,6 +20,9 @@ What we agreed on, and what we did not need to:
   someone whose layout differs: you leave by one wall and come in by another. That is fine.
 - **Two friends who care agree an edge**: "my east side to your west side". Then it is the same for both, and
   walking across it is seamless; with their door shut, you still see where they are, as an outline.
+- **Someone you are not guests with** can still be in your world for a while: link with them (Visit 0.8, SPEC
+  8.5), and once they say yes, their room shows in your corner; **Put in my world** makes it a plot round yours
+  until the link ends.
 
 ## How it fits together
 

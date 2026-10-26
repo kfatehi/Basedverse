@@ -64,6 +64,10 @@ visit-clients talk to each other**. A page reload breaks nothing but the localho
   outside it, sending nothing, until the watcher **steps in** (`enter`) and is in the room as a visitor is,
   and **steps out** (`exit`). **Layout**: where an office has put each friend's plot in its world, by key.
   **Edge**: a side of two plots agreed by both offices to touch.
+- **Linking** (8.5): what the panel offers on an office that takes it: a knock that, let in, starts a watch its
+  knocker sees in a corner, from outside, and goes into, puts in its world, or ends. That watch is "a link" to
+  people (`link: true` in messages); every visit, linked or not, also has a link in the sense above, its QUIC
+  connection.
 
 ## 3. Security
 
@@ -238,7 +242,7 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `edge_propose` | `key`, `mine`, `theirs` (`"north"`, `"east"`, `"south"`, `"west"`), `along` (m)?, `size` ([w, d] m: this plot's) | propose that this plot's side `mine` touch theirs (8.4), over a link to that office (`no_link` if there is none) |
 | `edge_accept` / `edge_decline` | `key`, `size` (this plot's, to accept) | answer an edge proposed to this office |
 | `edge_remove` | `key` | take an agreed edge back: for both |
-| `knock` | `to` (office id), `message`? (≤ 280) | ask to visit an office (refused `not_hosting` before `host`) |
+| `knock` | `to` (office id), `message`? (≤ 280), `link`? (true: a link, 8.5) | ask to visit an office, or to link with it (refused `not_hosting` before `host`) |
 | `answer` | `knock`, `accept` (bool), `message`? | let a knocker in, or not |
 | `end` | `visit` | end a visit: yours as a visitor (leave), or a visitor's to you (kick) |
 | `input` | `forward`, `strafe`, `run`, `yaw`, `pitch`, `t` (8.2) | the visitor's input, whole: whenever it changes (at most every 8 ms) and every 33 ms regardless, while visiting |
@@ -257,13 +261,13 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `layout` / `edges` | `layout`: [{`key`, `x`, `z`, `turn`}] / `edges`: [{`key`, `name`, `mine`, `theirs`, `along`, `size`}] | after a change (an edge also when the other office agrees, or takes it back) |
 | `edge_proposed` | `key`, `name`, `mine`, `theirs`, `along`, `size` (theirs), all in this office's terms | a friend proposes an edge: answer with `edge_accept` or `edge_decline` |
 | `edge_declined` | `key` | your proposal was declined |
-| `enter` / `exit` | `channel`, `pose` {`x`, `y`, `z`, `yaw`} (for `enter`) | a watcher stepped into this room, there (host side: spawn it, as a visitor), or out of it |
+| `enter` / `exit` | `channel`, `pose`? {`x`, `y`, `z`, `yaw`} (for `enter`) | a watcher stepped into this room, there (host side: spawn it, as a visitor), or out of it; no `pose`: a link going there, spawned where newcomers go |
 | `enter_refused` | `channel`, `reason` (`"full"`, or `"moved"`: a visit to a room began, and this office stepped out) | stepping into a watched room was refused, or undone: outside it |
-| `online` / `offline` | `office`, `knocking` / `away`? | the lobby session came up (after a drop: the same office if it resumed), with this office's own knocks still waiting ([{`id`, `to`}]) / went down: `away: true` when the page took it out (`leave_lobby`), `false` when it is on its way back (`join_lobby`), absent when the lobby is out of reach |
-| `lobby` | `offices`: [{`id`, `name`, `status`, `sim`, `max_visitors`, `visitors`, `visiting`, `ready`, `key`}] | every change (6.3) |
-| `knock` | `id`, `from` {`id`, `name`, `sim`, `key`}, `message`, `expires_in` | someone wants to visit you (never a guest at your open door: let in without asking) |
+| `online` / `offline` | `office`, `knocking` / `away`? | the lobby session came up (after a drop: the same office if it resumed), with this office's own knocks still waiting ([{`id`, `to`, `link`?}]) / went down: `away: true` when the page took it out (`leave_lobby`), `false` when it is on its way back (`join_lobby`), absent when the lobby is out of reach |
+| `lobby` | `offices`: [{`id`, `name`, `status`, `sim`, `max_visitors`, `visitors`, `visiting`, `ready`, `key`, `watchers`, `world`, `links`}] | every change (6.3) |
+| `knock` | `id`, `from` {`id`, `name`, `sim`, `key`}, `message`, `expires_in`, `link`? | someone wants to visit you, or (`link`) to link with you (never a guest at your open door: let in without asking) |
 | `knock_sent` / `knock_cancelled` / `answered` | as in section 6 | your knock's fate; a knock on you withdrawn |
-| `visit_started` | `id`, `channel`, `role` (`"host"` \| `"visitor"`), `peer` {`id`, `name`, `sim`, `key`}, `guest`?, `shared_adds`?, `state`? | a visit began (its link is up). `peer.key` is the other office's key, as the link proved it; `guest: true`, a guest let in through the open door, without asking the page; `watch: true` (and `inside`), a watch (8.4); in `ready`, a host's visit carries the last `state` its page sent |
+| `visit_started` | `id`, `channel`, `role` (`"host"` \| `"visitor"`), `peer` {`id`, `name`, `sim`, `key`}, `guest`?, `watch`?, `inside`?, `link`?, `shared_adds`?, `state`? | a visit began (its link is up). `peer.key` is the other office's key, as the link proved it; `guest: true`, a guest let in through the open door, without asking the page; `watch: true` (and `inside`), a watch (8.4); `link: true` too, a link (8.5); in `ready`, a host's visit carries the last `state` its page sent |
 | `visit_ended` | `id`, `channel`, `reason` (6.5) | a visit ended |
 | `host_paused` / `host_resumed` | `channel` | the host's page went away / came back (visitor side) |
 | `input` | `channel`, `seq`, `forward`, `strafe`, `run`, `yaw`, `pitch`, `t` | a visitor's latest input (host side) |
@@ -325,11 +329,11 @@ starts a new session (`resumed: false`).
 
 | type | fields | effect |
 |---|---|---|
-| `hello` | `proto`: `"basedverse-lobby/3"`, `name`, `sim`?, `status`?, `max_visitors`? (default 3), `resume`?, `world`? (true: this office takes knocks to watch) | join, or resume a dropped session (6.1) |
+| `hello` | `proto`: `"basedverse-lobby/3"`, `name`, `sim`?, `status`?, `max_visitors`? (default 3), `resume`?, `world`? (true: this office takes knocks to watch), `links`? (true: it takes links, 8.5) | join, or resume a dropped session (6.1) |
 | `link` | `endpoint` (the iroh endpoint id: its public key, as a string), `addr` (an object, ≤ 2 KiB as JSON, passed through untouched: how to reach it); or both null | publish or update how to reach this office; both null: withdraw it (not ready, until published again) |
 | `status` | `status` | as version 1 |
 | `max_visitors` | `n` (0–8) | change it |
-| `knock` | `to`, `message`?, `watch`? (true: to watch, 6.4) | ask to visit, or to watch |
+| `knock` | `to`, `message`?, `watch`? (true: to watch, 6.4), `link`? (true: a link, 6.4) | ask to visit, to watch, or to link |
 | `answer` | `knock`, `accept`, `message`? | answer a knock on your door |
 | `end` | `visit`, `reason`? (`"left"`, `"kicked"`, `"link_failed"`) | end a visit you are in, either side |
 | `rename` | `name` | a new name, if it is free (`name_taken`, `name_invalid` otherwise; the office keeps its own) |
@@ -340,12 +344,12 @@ starts a new session (`resumed: false`).
 | type | fields | when |
 |---|---|---|
 | `welcome` | `proto`, `id`, `name`, `relays`: [url], `resume` (32 hex), `resumed` (bool), `visits`: [id], `knocking`: [{`id`, `to`}], `limits` | after a good `hello` |
-| `lobby` | `offices`: [{`id`, `name`, `status`, `sim`, `max_visitors`, `visitors` (count), `visiting` (the host's office id, or `null`), `ready`, `key` (the endpoint it last published, kept while its link is withdrawn; `null` before it has published one), `watchers` (count), `world` (it takes knocks to watch)}], you included | on any change |
-| `knock` | `id`, `from` {`id`, `name`, `sim`, `key`}, `message`, `expires_in`, `watch`? | someone knocked (to watch, with `watch`) |
-| `knock_sent` | `id`, `to` | your knock reached the door |
+| `lobby` | `offices`: [{`id`, `name`, `status`, `sim`, `max_visitors`, `visitors` (count), `visiting` (the host's office id, or `null`), `ready`, `key` (the endpoint it last published, kept while its link is withdrawn; `null` before it has published one), `watchers` (count), `world` (it takes knocks to watch), `links` (it takes links)}], you included | on any change |
+| `knock` | `id`, `from` {`id`, `name`, `sim`, `key`}, `message`, `expires_in`, `watch`?, `link`? | someone knocked (to watch, with `watch`; to link, with `link`) |
+| `knock_sent` | `id`, `to`, `watch`?, `link`? | your knock reached the door (a knock to link with a door that does not take links is an ordinary knock: no `link`) |
 | `knock_cancelled` | `id`, `reason`: `"timeout"` \| `"gone"` | a knock on you was withdrawn |
-| `answered` | `knock`, `accept`, `reason`? (`"declined"`, `"timeout"`, `"gone"`, `"full"`, `"not_ready"`), `message`? | your knock's answer |
-| `visit` | `id`, `role`, `peer` {`id`, `name`, `sim`}, `ticket` (32 hex), `peer_link` {`endpoint`, `addr`}, `watch`? | a visit (or a watch) was agreed: the visitor dials, the host waits for it (section 7) |
+| `answered` | `knock`, `accept`, `reason`? (`"declined"`, `"timeout"`, `"gone"`, `"full"`, `"not_ready"`), `message`?, `watch`?, `link`? | your knock's answer |
+| `visit` | `id`, `role`, `peer` {`id`, `name`, `sim`}, `ticket` (32 hex), `peer_link` {`endpoint`, `addr`}, `watch`?, `link`? | a visit (or a watch, or a link: a watch with `link`) was agreed: the visitor dials, the host waits for it (section 7) |
 | `visit_ended` | `id`, `reason` (6.5) | a visit ended |
 | `error` | `code`, `message`, `ref`? | a refusal (section 11) |
 
@@ -376,6 +380,13 @@ starts a new session (`resumed: false`).
   `watch_knocks_per_minute` (30: visit-clients make them by themselves). A watch agreed does not move the
   knocker out of the room it is in, and does not count toward `max_visitors` or `visiting`. The door's
   visit-client answers it itself: yes for a guest through its open door, no for anyone else.
+- **Links** (8.5): a knock with `link: true`, to a door whose hello said `links`. Its `knock`, `knock_sent`,
+  `answered` and `visit` say `link`; its errors are a knock's (`ref: "knock"`). Refused as a knock is (`busy`
+  stops it, and 6 a minute), except: `full` is the door's `max_watchers`, `too_many` the knocker's
+  `max_watching`, and `already_watching` when the knocker watches the door's plot already. The door answers it as
+  any knock: its page, or its visit-client for a guest through its open door. Let in, it is a watch (`watch` and
+  `link` on its `visit`), counted as one. To a door that does not take links (an older Visit), it is an ordinary
+  knock, and nothing says `link`.
 
 ### 6.5 Why visits end
 
@@ -417,7 +428,7 @@ Messages are JSON, each prefixed by its length (u32 big-endian). In order, relia
 | visitor | `{"point": {"yaw", "pitch"}}` | a point (8.3): passed to the host's page with only those two, clamped, at most 5 a second |
 | visitor | `{"shared_adds": true}` | its page reads an `add` that names what it already has by uuid only (8.3; Visit 0.7 on): sent each time the link is up, passed to the host's page once as `shared_adds` |
 | host | `{"paused": true}` / `{"paused": false}` | the host's page went away / came back |
-| watcher | `{"enter": {"x", "y", "z", "yaw"}}` / `{"exit": true}` | stepping into the room watched, there (clamped, passed to the host's page as `enter`), or out (8.4); in, it counts toward `max_visitors` |
+| watcher | `{"enter": {"x", "y", "z", "yaw"} \| null}` / `{"exit": true}` | stepping into the room watched, there (clamped, passed to the host's page as `enter`; null: a link going there, spawned where newcomers go), or out (8.4, 8.5); in, it counts toward `max_visitors` |
 | host | `{"enter_refused": "full"}` | the room is full: the watcher stays outside |
 | either | `{"edge": {"from", "to", "along", "size"}}` | an edge proposed (8.4): the sender's side `from` against the receiver's `to`, the receiver's middle `along` metres from the sender's, the sender's plot `size` |
 | either | `{"edge_ok": {"from", "to", "along", "size"}}` / `{"edge_no": true}` | the proposal agreed (in the agreeing side's terms, with its plot's size) / declined |
@@ -589,6 +600,31 @@ An office's world is its own room with its friends' plots round it, drawn by its
   the other's plot against that side, facing it. An agreed neighbour not watched (its door shut to you, or it is
   away) is drawn as an outline of its plot, with its name.
 
+### 8.5 Links
+
+Linking (Visit 0.8) is how two offices meet: instead of walking straight into a room once let in, the knocker
+sees it in a corner first, and chooses.
+
+- **Asking.** `knock` with `link: true` (`v.link`), to an office whose lobby entry says `links`; the door's page
+  is asked as for any knock (`knock` with `link`), and may make the knocker a guest as it says yes. A guest
+  through the open door is let in without asking. To an office on an older Visit, a link is a knock: let in, the
+  knocker walks into its room, as before.
+- **A link** is a watch (8.4) that the door let in itself: the host sends it the scene and deltas (version 2) and
+  does not spawn it; the host's page lists it in `watchers` with `link: true`, and may end it (`end`, as a kick).
+  Unlike a guest's watch, it is not ended by the door shutting, by the guest list, or by the knocker's world going
+  off: it lasts until either side ends it, or one leaves the lobby.
+- **The corner.** The knocker's page draws a link's room in its stage's small corner, with the host's own
+  three.js (as a visit is drawn), from outside: from where the host's `preview` says ({x, y, z, yaw, pitch}, in
+  its terms), or from above its plot, going round once a minute. Its input goes nowhere.
+- **Going there** (`stepIn`): `enter` with no pose, so the host spawns it where newcomers go; from then it is in the
+  room as a visitor is (its input and points count, it counts toward `max_visitors`), facing the way the corner
+  looked, until **back to its own room** (`stepOut`, `exit`): the corner again. Going there ends a visit the
+  knocker is on (in one room at a time).
+- **Into the world** (`toWorld`, with `v.world`): the link's room becomes a plot round the knocker's own, read
+  again with its own three.js, walked onto as any (8.4), for as long as the link lasts.
+- **One corner.** A newer link, or a visit, takes the corner; a link it moves waits (`where: "aside"`, its scene
+  not kept), and takes the corner again when it is free.
+
 ## 9. The library: `visit.js`
 
 The normative surface; INTEGRATING.md shows it in use. Loaded with
@@ -605,28 +641,37 @@ const v = await Visit.connect({ port, token, sim: { name, version }, threeBase }
 v.state        // "connecting" | "online" | "offline" (the lobby out of reach) | "away" (out of it on purpose)
 v.stats        // while visiting, about once a second: { latency (input to screen, drawn here, ms), rtt (the link's,
                //   ms), path ("direct" | "relay"), fps (frames drawn a second) }
-v.viewFocused  // visiting, and the view takes the keys and mouse (not shrunk to a corner): the page's own keys wait
+v.viewFocused  // in a room you visit (or went to by a link), and the view takes the keys and mouse (not in a corner):
+               //   the page's own keys wait
 v.office       // { id, name } while online
 v.key          // this office's key: its lasting identity (the same every run, with a state file)
-v.door         // "open" (your guests come in without knocking) | "closed" (everyone knocks)
+v.door         // "open" (your guests link and come in without asking) | "closed" (everyone asks)
 v.guests       // [{ key, name }]: who walks in through the open door
 v.status       // "available" | "busy"
 v.maxVisitors  // number
-v.offices      // [{ id, name, status, sim, maxVisitors, visitors, visiting, ready, key }], you included
+v.offices      // [{ id, name, status, sim, maxVisitors, visitors, visiting, ready, key, links }], you included
 v.layout       // [{ key, x, z, turn }]: where you have put friends' plots (8.4)
 v.edges        // [{ key, name, mine, theirs, along, size }]: edges you have agreed
 v.edgeProposals // [{ key, name, mine, theirs, along, size }]: edges proposed to you, waiting
-v.watchers     // [{ id, visitor, inside }]: who watches your plot
-v.knocks       // knocks on your door: [{ id, from: { id, name, sim }, message, until (ms epoch) }]
-v.knocking     // your knocks still waiting: [{ id, to }]
-v.visiting     // your visit as a visitor: { id, host: { id, name, sim }, paused } or null
-v.visitors     // your visitors as a host: [{ id, visitor: { id, name, sim, key }, guest, pose }]
+v.watchers     // [{ id, visitor, inside, link }]: who sees your room from outside it (your guests' worlds; links, 8.5)
+v.knocks       // knocks on your door: [{ id, from: { id, name, sim, key }, message, until (ms epoch), link }]
+v.knocking     // your knocks still waiting: [{ id, to, link }]
+v.visiting     // the room in your stage: { id, host: { id, name, sim }, paused, link, inside } or null (a link's: in
+               //   the corner until you go there, inside: true)
+v.visitors     // your visitors as a host: [{ id, visitor: { id, name, sim, key }, guest, pose, link }]
+v.links        // your links (8.5): [{ id, host, where ("corner" | "aside" | "world"), inside }]
 
 v.on(event, fn); v.off(event, fn)   // "change" | "knock" | "answered" | "visit_started" | "visit_ended" | "stats" | "error" | "point"
+                   //   (knock, answered and visit_started say link: true for a link's)
 v.close()          // disconnect for good
 v.setStatus(status); v.setMaxVisitors(n); v.rename(name)
 v.knock(officeId, message); v.answer(knockId, accept, message)
-v.leave()          // end your visit
+v.link(officeId, message)   // ask to link (8.5): let in, their room in your stage's corner (to an older office: a knock)
+v.stepIn(id); v.stepOut(id) // a link (by visit id; the corner's by default): go into its room, and back to your own
+v.toWorld(id)      // a link's room as a plot in your world (v.world first), while the link lasts
+v.unlink(id)       // end a link
+v.watching(officeId)        // whether a plot of theirs is in your world (a guest's, or a link put there)
+v.leave()          // end your visit (the stage's link: unlink it)
 v.kick(visitId)    // end someone's visit to you
 v.leaveLobby()     // away: out of the lobby, nobody sees you or can knock, your visits end (kept across restarts
 v.joinLobby()      //   with VISIT_STATE_FILE); and back
@@ -646,6 +691,8 @@ v.host({
   walk: { speed },                                  // optional: move() walks with Visit.walk at this speed: visitors walk at once
   plot: { center: [x, z], size: [w, d] }, unit: 1,  // this room's land in a world (8.4), in its units (without it: what its scene
                                                     //   covers); unit: metres in one
+  preview: { x, y, z, yaw, pitch },                 // optional: where a link sees this room from, before going in (8.5); without
+                                                    //   it, from above its plot, going round
 });
 
 // a world (8.4): after host(). Every frame, where your page has its user (in its room's terms) and what they press;
@@ -671,9 +718,15 @@ const view = v.view(element);   // { release(), setActive(on), active, canvas }:
 
 // helpers
 Visit.walk(pose, input, dt, { speed, blocked })   // first-person walking with wall sliding, for move()
-Visit.panel(element, v)                          // an optional ready-made lobby panel, with Go offline / Go online: { element, release() }
+Visit.panel(element, v)                          // an optional ready-made lobby panel: Link (Knock, to an older office) with a
+                                                 //   message; links asked of you (Link, Not now, ★ always: a guest from now on);
+                                                 //   your links (Go there, Back to my room, Put in my world, Unlink); your visitors
+                                                 //   and who is linked to you (Kick, Unlink); stars, door, status, Go offline / online:
+                                                 //   { element, release() }
 Visit.stage(v)                                   // an optional ready-made visit view: the room visited full-window (with the
-                                                 //   link's numbers, Back to my room, Leave), or in a corner; { element, big, shrink(), grow(), release() }
+                                                 //   link's numbers, Back to my room, Leave), or in a corner; a link starts in the
+                                                 //   corner, whose click offers Go there, Put in my world (with v.world), Unlink;
+                                                 //   { element, big, shrink(), grow(), release() }
 ```
 
 **Poses** are the host's own: the library only stores them and passes them back. `Visit.walk` uses
@@ -763,6 +816,8 @@ match never opens: the visit ends `"link_failed"`.
   host's own user is seen in its room by others is for a later version.
 - **Further worlds.** A world holds an office's own friends' plots; a friend's friends (a world beyond the
   next plot) are not drawn.
+- **More than one corner.** One link is shown in the corner at a time; others wait. A page could show several,
+  each with its own renderer, if people link with many at once.
 - **Other engines.** Every room is three.js. glTF could carry other engines' scenes the same way, if one
   ever needs to take part.
 - **Audio.** None in version 1.

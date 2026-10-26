@@ -12,7 +12,8 @@ below are relative to `visit/`.
 
 Your sim draws an office (a "workroom") in a browser page, with three.js. After this integration:
 
-- it shows up in a lobby where other workrooms are, and can knock on theirs or let them in;
+- it shows up in a lobby where other workrooms are, and can link with theirs or let them link: a linked room
+  shows in a corner, to go into, or to put in your world;
 - **as a host**, it lets up to a few visitors walk around your room: Visit sends them your room's three.js
   scene, as data, and their browsers draw it; your page only decides where they may walk;
 - **as a visitor**, it draws the room you are walking around itself, as quickly as your own, and sends your
@@ -234,7 +235,7 @@ lists you (and anyone else in the lobby).
 
 Register your room once, right after `connect` (on every page load: Visit keeps visits across reloads and
 asks the new page for them). **Until you do, your office is not in the lobby to be visited, and cannot
-knock**: every room takes part with its scene.
+link**: every room takes part with its scene.
 
 ```js
 visit.host({
@@ -255,6 +256,9 @@ visit.host({
   },
   // The speed your move() gives Visit.walk: a visitor's page walks at once, and your move() corrects it.
   walk: { speed: 2.5 },
+  // Optional: where someone linked with you sees your room from, before going in (step 7). Without it,
+  // from above your plot, going round.
+  preview: { x: 0, y: 6, z: 10, yaw: 0, pitch: -0.4 },
 });
 ```
 
@@ -317,6 +321,10 @@ back); while your user looks around, a crosshair shows at the middle, and a clic
 (the host decides what that does: step 5, Points); in the corner it takes nothing. It goes away when the visit ends, and comes back by itself after a
 reload mid-visit. It sits at `z-index: 5`; `.visit-stage` is yours to restyle.
 
+A **link** (step 7) starts in the corner: the other room seen from outside, from above it, going round. A click
+on it offers **Go there** (the room fills the window, as a visit; Back to my room puts it in the corner again),
+**Put in my world** (with a world, step 9: their room becomes a plot beside yours) and **Unlink**.
+
 **If your room has keys of its own** (WASD for your user's avatar, say), they wait while
 `visit.viewFocused` is true, and work while it is false (not visiting, or the visit in the corner):
 
@@ -331,7 +339,9 @@ Or your own view: `const view = visit.view(element)` draws the host's room in an
 captures the keyboard and mouse; `view.setActive(false)` stops it capturing (a picture-in-picture, say),
 `view.release()` takes it away. Show it when `visit.visiting` becomes true (and at once after a reload, if
 already visiting), give your user a way to leave (`visit.leave()`), and show `visit.stats` if you can:
-it is what to look at when a visit feels slow.
+it is what to look at when a visit feels slow. A link's room (`visit.visiting.link`) is drawn there too, from
+outside, until `visit.stepIn()`; keep it small until `visit.visiting.inside`, and offer `visit.stepIn()`,
+`visit.stepOut()`, `visit.toWorld()` and `visit.unlink()`.
 
 The host's scene is drawn by your page itself, in that view: nothing for you to do. It fetches the host's
 release of three.js from cdn.jsdelivr.net (checked against its hash) and runs it from a `blob:` URL, so a
@@ -341,7 +351,7 @@ Content-Security-Policy on your page needs `connect-src https://cdn.jsdelivr.net
 **Check:** with a host to visit (step 8), its room fills the window; WASD and the mouse move you in it,
 and turning is instant; Back to my room shrinks it to the corner and gives your room its keys back.
 
-## Step 7 — The lobby: knocking and letting in
+## Step 7 — The lobby: linking and letting in
 
 The quickest way: the ready-made panel, in any element of yours (a corner of the page, say):
 
@@ -350,30 +360,39 @@ Visit.panel(document.getElementById("visit-panel"), visit);
 ```
 
 It lists the workrooms online (with whether each is available, how many visitors it has and takes), lets
-your user knock with a message, shows knocks on your door with **Let in** / **Not now**, shows your
-visitors (with **Kick**) and your visit (with **Leave**), sets your status and max visitors, and has
-**Go offline** / **Go online**. A star (☆) by each office makes it a **guest**: while your door is open (the
-panel's "your door"), a guest's knock lets them in at once, without asking your user.
+your user **link** with one (with a message): once they say yes, their room shows in the stage's corner (step 6),
+and your user chooses to go there, put it in their world, or unlink. It shows links asked of you with **Link** /
+**Not now** and **★ always** (make them a guest as you say yes), your links, your visitors and who is linked to
+you (with **Kick** / **Unlink**), sets your status and max visitors, and has **Go offline** / **Go online**. A
+star (☆) by each office makes it a **guest**: while your door is open (the panel's "your door"), a guest's link
+is let in at once, without asking your user. An office on an older Visit gets **Knock** instead: let in, your
+user walks straight into its room, as before.
 
 Or build your own from the state and actions: `visit.offices`, `visit.knocks`, `visit.visiting`,
-`visit.visitors`, `visit.knock(id, message)`, `visit.answer(knockId, true | false)`, `visit.leave()`,
+`visit.visitors`, `visit.links`, `visit.watchers`, `visit.link(id, message)` (or `visit.knock`, for an office
+whose `links` is false), `visit.answer(knockId, true | false)`, `visit.stepIn()`, `visit.stepOut()`,
+`visit.toWorld()`, `visit.unlink(id)`, `visit.leave()`,
 `visit.kick(visitId)`, `visit.setStatus("available" | "busy")`, `visit.setMaxVisitors(n)`,
 `visit.leaveLobby()`, `visit.joinLobby()`, and the door and guests: `visit.door`, `visit.guests`,
 `visit.setDoor(open)`, `visit.addGuest(office.key, office.name)`, `visit.removeGuest(key)`; redraw on
 `"change"`. Rules your UI must follow:
 
-- Offer **Knock** only for offices that are `ready`, `available`, not you, not full
-  (`visitors < maxVisitors`), and not the one you are visiting.
-- Show each knock on your door with who, their message and the seconds left, and both answers.
+- Offer **Link** only for offices that are `ready`, `available`, not you, and not already linked or visited
+  (and **Knock**, for one whose `links` is false, only when it is not full: `visitors < maxVisitors`).
+- Show each link and knock on your door (`knock.link` says which) with who, their message and the seconds
+  left, and both answers.
+- Show your user who is linked to them, seeing their room from outside it: `visit.watchers` with `link`
+  (and `inside` once they come in), with a way to end it (`visit.kick(id)`).
 - Escape all names and messages before putting them in HTML: they come from strangers.
 - Give your user a way to **go offline and back** (`leaveLobby()` / `joinLobby()`), and show when they
-  are: `visit.state === "away"`. Away, nobody sees them or can knock, and their visits end; with
+  are: `visit.state === "away"`. Away, nobody sees them or can link, and their visits end; with
   `VISIT_STATE_FILE` they stay away until they come back, restarts included. Do not stop visit-client for
   this: it keeps your page connected while away, so the switch works.
 - If you offer guests, show which offices are guests, and whether the door is open; say plainly that a
   guest walks in without asking. A visitor let in that way has `guest: true` in `visit.visitors`.
 
-**Check:** your user can see other workrooms, knock, answer a knock, and go offline and back.
+**Check:** your user can see other workrooms, link with one (its room in the corner; go there and back), answer
+a link, and go offline and back.
 
 ## Step 8 — Test it on one machine
 
@@ -389,12 +408,15 @@ visit-client --lobby "$LOBBY" --name "Test B" --sim my-workroom/1.0 --port 7402 
 Then, in order:
 
 1. Both pages show both offices in the lobby.
-2. From B, knock on A; in A, let B in. B's page shows A's room; A's `visit.visitors` lists B.
+2. From B, link with A; in A, say yes. B's page shows A's room in the corner, from above; A's
+   `visit.watchers` lists B, linked. Click the corner, **Go there**: A's room fills B's window, and A's
+   `visit.visitors` lists B.
 3. In B, walk with WASD and look with the mouse: the view moves, and stops at A's walls.
 4. **Reload A's page.** B's view holds, says the host is reloading, then carries on by itself.
-5. **Reload B's page.** It comes back still visiting A, without knocking again.
-6. In B, leave. B's view goes; A's visitors list empties.
-7. Set A's max visitors to 0 (or status busy): B's knock is refused.
+5. **Reload B's page.** It comes back still linked with A, without asking again (in the corner: Go there).
+6. In B, **Back to my room**: A's room in the corner again, A's visitors list empty. Then **Unlink**: B's corner
+   goes, and A's watchers list empties.
+7. Set A's status to busy: B's link is refused.
 8. Stop B's visit-client: B disappears from A's lobby.
 
 ## Step 9 — Your world: friends' plots round your room
@@ -459,8 +481,9 @@ walking out of your door goes straight into theirs.
 - [ ] Visiting: the host's room fills the window (`Visit.stage`, or your own view); WASD, Shift and the
       mouse work; Esc frees the pointer; there is a way to leave, and back to your room; your own keys wait
       while `visit.viewFocused`.
-- [ ] The lobby: offices, knocks, answers, visitors (kick), your visit (leave), status and max visitors
-      all work, with the knock rules of step 7; names and messages are escaped.
+- [ ] The lobby: offices, links and knocks, answers, links into a corner (go there, back, unlink), visitors and
+      who is linked to you (kick, unlink), status and max visitors all work, with the rules of step 7; names
+      and messages are escaped.
 - [ ] Your user can go offline and back (the panel, or `leaveLobby()` / `joinLobby()`), and stays offline
       across a restart (`VISIT_STATE_FILE`).
 - [ ] Step 8 passes, reloads included.

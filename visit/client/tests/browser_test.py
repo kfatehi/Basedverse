@@ -3,7 +3,8 @@
 open in two headless Chromes driven over the DevTools protocol, A's made with three.js r128 and B's with r160.
 B knocks on A, draws A's scene, walks around it with real key presses, sees what A changes, and both pages
 reload mid-visit. Then worlds: each draws the other's plot round its own, walks onto it and off, agrees an edge
-and walks across it, and sees an outline when the door shuts. Run by run-browser.sh, which starts the Chromes.
+and walks across it, and sees an outline when the door shuts. Last, links: A sees B's room in a corner, goes
+there, comes back, puts it in its world, and unlinks. Run by run-browser.sh, which starts the Chromes.
 
     python3 browser_test.py path/to/visit-client CDP_PORT_A CDP_PORT_B OUT_DIR
 """
@@ -386,6 +387,50 @@ async def main():
         check("B takes the edge back: gone for A too", await a.until("v.edges.length === 0"), True)
         await a.js("v.removeGuest(v.guests[0].key)")
         await b.js("v.removeGuest(v.guests[0].key)")
+
+        print("\nlinks: their room in a corner, then gone to, or put in your world")
+        btn = "(id => document.querySelector(`.visit-panel button[data-v=knock][data-o=\"${id}\"]`))(v.offices.find(o => o.name === 'B').id)"
+        check("A's panel offers B a link (B takes them)", await a.js(btn + ".textContent"), "Link")
+        await a.js(btn + ".click()")
+        await a.js("(f => { f.querySelector('input').value = 'look?'; f.querySelector('button.go').click(); })(document.querySelector('.visit-panel form'))")
+        check("B's panel: A wants to link, with its message", await b.until("(k => k && k.textContent.includes('wants to link') && k.textContent.includes('look?'))(document.querySelector('.visit-panel .knock'))"), True)
+        await b.js("(c => { c.checked = true; c.dispatchEvent(new Event('change', { bubbles: true })); })(document.querySelector('.visit-panel .knock input[data-v=always]'))")
+        await b.js("document.querySelector('.visit-panel .knock button[data-v=in]').click()")
+        check("B links, ★ always ticked: A is B's guest from now on", await b.until("v.guests.some(g => g.name === 'A')"), True)
+        check("A: B's room in the stage's corner, not in it", await a.until(
+            "v.links.length === 1 && v.links[0].where === 'corner' && !v.links[0].inside && !document.querySelector('.visit-stage').hidden && document.querySelector('.visit-stage').classList.contains('small')"), True)
+        check("drawn with B's own three.js (r160), from above, going round", await a.until(
+            "(w => !!(w.scene && w.scene.T.REVISION === '160' && w.count > 10 && w.scene.camera.position.y > 3))(v._viewer)"), True)
+        check("B's panel: A is linked, seeing B's room, not in it", await b.until(
+            "v.watchers.length === 1 && v.watchers[0].link && v.visitors.length === 0 && document.querySelector('.visit-panel').textContent.includes('is linked')"), True)
+        await a.shot("a_link_corner.png")
+        await a.js("document.querySelector('.visit-stage').click()")
+        check("a click on the corner: go there, put it in my world, unlink", await a.js(
+            "[...document.querySelectorAll('.visit-stage .menu button')].filter(b => !b.hidden).map(b => b.textContent)"), ["Go there", "Put in my world", "Unlink", "Not now"])
+        await a.js("document.querySelector('.visit-stage .menu button[data-s=in]').click()")
+        check("Go there: A is in B's room, full-window, with the keys", await a.until(
+            "v.visiting.inside && document.querySelector('.visit-stage').classList.contains('big') && v.viewFocused"), True)
+        check("B has A, where B's spawn put it", await b.until("v.visitors.length === 1 && v.visitors[0].link && v.visitors[0].pose && v.visitors[0].pose.x"), 2)
+        await a.shot("a_link_in.png")
+        await a.js("document.querySelector('.visit-stage button[data-s=small]').click()")
+        check("Back to my room: B's room in the corner again, B's visitor gone, the link on", (await a.until(
+            "!v.visiting.inside && document.querySelector('.visit-stage').classList.contains('small') && !v.viewFocused"), await b.until("v.visitors.length === 0 && v.watchers.length === 1")), (True, True))
+        await a.js("v.knock(v.offices.find(o => o.name === 'B').id)")   # an ordinary visit (A is B's guest now: in at once)
+        check("a visit to B meanwhile: it has the stage, full-window; the link waits aside", await a.until(
+            "v.visiting && !v.visiting.link && v.links[0].where === 'aside' && document.querySelector('.visit-stage').classList.contains('big')"), True)
+        await a.js("v.leave()")
+        check("the visit over: the link in the corner again, its room drawn anew", await a.until(
+            "v.links[0] && v.links[0].where === 'corner' && (w => !!(w && w.scene && w.count > 5))(v._viewer) && document.querySelector('.visit-stage').classList.contains('small')"), True)
+        await a.js("document.querySelector('.visit-stage').click()")
+        await a.js("document.querySelector('.visit-stage .menu button[data-s=world]').click()")
+        check("Put in my world: the corner empties, B's plot round A's room", await a.until(
+            "v.links[0].where === 'world' && document.querySelector('.visit-stage').hidden && (p => !!(p && p.seen && p.name === 'B'))(room.world.plots[0])"), True)
+        check("read again with A's own three.js (r128)", await a.until("(w => !!(w && w.scene && w.scene.T.REVISION === '128'))([...v._watches.values()].find(w => w.link))"), True)
+        await a.shot("a_link_world.png")
+        await a.js("document.querySelector('.visit-panel button[data-v=unlink]').click()")
+        check("A unlinks from its panel: gone for both", (await a.until("v.links.length === 0 && room.world.plots.length === 0"), await b.until("v.watchers.length === 0")), (True, True))
+        await b.js("v.removeGuest(v.guests[0].key)")
+        await b.until("v.guests.length === 0")
 
         print("\nwhat a host sends is only data")
         r = await b.js("""(() => { const c = Visit._test.cleanScene, budget = { vertices: 0, objects: 0 };
