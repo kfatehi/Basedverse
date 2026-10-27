@@ -14,15 +14,27 @@ so walking in it is as quick as in your own. What everyone agrees on is a thin i
 two hooks, and two pieces everyone drops in unchanged.
 
 <p align="center">
+  <img alt="A workroom, an office: blocky agents at their desks, what each is doing written above it, a kanban board on the wall, one agent's console open beside you, the Visit panel, and you, walking around" src=".github/assets/office.png">
+  <br>
+  <em>A workroom: the office. Its kanban board on the wall, and an agent's console, open beside you.</em>
+</p>
+
+<p align="center">
   <img alt="A workroom in a jungle: blocky agents at their desks, what each is doing written above it, a workplace safety sign, a rat-vs-snake tally, and you, walking around" src=".github/assets/jungle-sweatshop.png">
   <br>
-  <em>A workroom: the jungle sweatshop. Time since last accident: 26 seconds (death by exhaustion). Rat vs. snake: 14–14.</em>
+  <em>Another: the jungle sweatshop. Time since last accident: 26 seconds (death by exhaustion). Rat vs. snake: 14–14.</em>
 </p>
 
 <p align="center">
   <img alt="Another workroom, in a dark cave: blocky agents at their desks, what each is doing written above it, a kanban board on the wall, a tally of recruits lost, the Visit panel, and you, walking around" src=".github/assets/terrorist-sweatshop.png">
   <br>
-  <em>Another: the terrorist sweatshop. Recruits lost: 0 (shot by the boss: 0, blew up: 0).</em>
+  <em>And another: the terrorist sweatshop. Recruits lost: 0 (shot by the boss: 0, blew up: 0).</em>
+</p>
+
+<p align="center">
+  <img alt="The chat window: a picture shared into a friend's room's chat, lines from both rooms, and its box, talking to Gooshy's room, with buttons for what was shared, the room's voice and sound" src=".github/assets/chat.png" width="689">
+  <br>
+  <strong>Chat, share assets, and do voice calls</strong>
 </p>
 
 | | |
