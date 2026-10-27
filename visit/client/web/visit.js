@@ -13,7 +13,7 @@
 // visitor's page walks at once and the host corrects it), and a host renders and encodes nothing for anyone.
 "use strict";
 (function () {
-  const VERSION = "0.14.1", PROTO = "basedverse-visit-local/2";
+  const VERSION = "0.15.0", PROTO = "basedverse-visit-local/2";
   const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, LOOK = 0.0025;
   const POINT_MS = 200, AIM_MS = 125;   // a visitor's points, at most one this often; what it aims at, looked for this often
   // What the host hears many times a second: none of it changes what the page shows, so none fires "change".
@@ -56,6 +56,8 @@
   // Chat (SPEC 8.9): a line is at most CHAT_LEN characters, at most CHATS of them every CHAT_WINDOW ms (as visit-client
   // takes them), and shows over its speaker's head a while, the longer the longer it is.
   const CHAT_LEN = 200, CHATS = 5, CHAT_WINDOW = 10000, chatShows = text => Math.min(12000, 4000 + 70 * text.length);
+  // The chat window (Visit.chat) keeps the last CHAT_LOG lines, and fades CHAT_FADE ms after the last one.
+  const CHAT_LOG = 100, CHAT_FADE = 20000;
   // The microphone's side: 20 ms at a time, to the page (an AudioWorklet, from a blob: as the ticker's Worker is).
   const MIC_WORKLET = `registerProcessor("visit-mic", class extends AudioWorkletProcessor {
     constructor() { super(); this.b = new Float32Array(${VOICE_FRAME}); this.n = 0; }
@@ -636,6 +638,8 @@
       this._voices = new Map();   // their key -> a decoder, its panner, and where its next moment plays
       this._voiceTo = 0;          // where your voice may go: VOICE_ROOM, VOICE_CALLS, both, or nowhere (nothing encoded)
       this._chats = new Map();    // lines said in the rooms you are in or host (8.9), still showing, by who said them
+      this.chatLog = [];       // the last CHAT_LOG lines of chat, of every scope (8.9), as "chat" gave them, with `at` (ms)
+      this.lobbyChat = false;  // the lobby relays chat (8.9): say(text, "lobby") goes to everyone in it
       this._kept = new Map();     // guests' plots kept while they are away (8.10): key -> { key, name, plot, unit, json, asked, built }
       this._landText = null;      // this room's landscape, as last given to visit-client
       this._said = [];            // when you last said lines (CHATS every CHAT_WINDOW)
@@ -729,6 +733,7 @@
       this.office = m.office && m.office.id ? m.office : null;
       this.status = m.status; this.maxVisitors = m.max_visitors;
       this.key = typeof m.key === "string" ? m.key : null;
+      this.lobbyChat = m.lobby_chat === true;
       this._guests(m);
       this.layout = Array.isArray(m.layout) ? m.layout : [];
       this.voiceRange = Number(m.voice_range) > 0 ? Number(m.voice_range) : VOICE_RANGE;
@@ -765,7 +770,7 @@
     _message(m) {
       switch (m.type) {
         case "online":   // (again, after a drop): its own knocks still waiting are these
-          this.state = "online"; this.office = m.office;
+          this.state = "online"; this.office = m.office; this.lobbyChat = m.lobby_chat === true;
           if (Array.isArray(m.knocking)) this.knocking = m.knocking.map(k => ({ id: k.id, to: k.to, link: k.link === true }));
           break;
         case "offline":   // away: this office left the lobby on purpose, and sees nobody until it joins again
@@ -796,10 +801,16 @@
         case "phone": if (m.on) this._phoneOn.add(m.channel); else { this._phoneOn.delete(m.channel); const p = this._peerOf(m.channel); if (p && p.key) this._callEnd(p.key, "their phone went", false); } break;
         case "call": this._callIn(m); break;
         case "layout": this.layout = Array.isArray(m.layout) ? m.layout : []; break;
-        case "chat":   // a line said (8.9): in your room by a visitor (their channel), or in the room you are in
-          this._chatIn({ key: String(m.key || ""), name: String(m.name || ""), text: String(m.text || "").slice(0, 4 * CHAT_LEN), id: typeof m.id === "string" ? m.id : null,
-            owner: m.owner === true, channel: m.channel, room: this._hosted.has(m.channel) ? "home" : m.channel });
+        case "chat": {   // a line (8.9): said in your room by a visitor (their channel), or in a room you are in or see;
+          // into your room (home) or the one you are in, from a linked office ("sim"); in the lobby ("lobby")
+          const line = { key: String(m.key || ""), name: String(m.name || ""), text: String(m.text || "").slice(0, 4 * CHAT_LEN) };
+          if (m.scope === "lobby") this._chatIn({ ...line, scope: "lobby", mine: !!this.office && m.id === this.office.id });
+          else if (m.scope === "sim") {
+            const p = m.home === true ? { key: this.key || "", name: this.office ? this.office.name : "" } : this._peerOf(m.channel) || {};
+            this._chatIn({ ...line, scope: "sim", channel: m.channel, to: { key: String(p.key || ""), name: String(p.name || "") } });
+          } else this._chatIn({ ...line, id: typeof m.id === "string" ? m.id : null, owner: m.owner === true, channel: m.channel, room: this._hosted.has(m.channel) ? "home" : m.channel });
           break;
+        }
         case "voice_near": {   // who is near your user (8.7): in your room (no channel), or in the one you are in
           const near = (Array.isArray(m.near) ? m.near : []).filter(isObj).map(n => ({ key: String(n.key), name: String(n.name || ""), distance: Number(n.distance) || 0,
             id: typeof n.id === "string" ? n.id : null, phone: n.phone === true }));
@@ -1356,7 +1367,7 @@
       try { p.obs = new PerformanceObserver(l => { for (const e of l.getEntries()) p.long.push(e.duration); }); p.obs.observe({ type: "longtask" }); } catch (e) { p.obs = null; }
       const el = p.el = document.createElement("div");
       el.className = "visit-perf";
-      el.style.cssText = "position:fixed;left:8px;bottom:8px;z-index:30;max-width:min(560px,calc(100vw - 16px));padding:6px 8px;border-radius:8px;" +
+      el.style.cssText = "position:fixed;right:8px;bottom:8px;z-index:30;max-width:min(560px,calc(100vw - 16px));padding:6px 8px;border-radius:8px;" +
         "font:11px/1.45 ui-monospace,Consolas,monospace;color:#e6edf3;background:rgba(13,17,23,.88);border:1px solid #2d333b;white-space:pre-wrap";
       el.addEventListener("click", e => {
         const b = e.target.closest("button[data-p]");
@@ -1398,20 +1409,39 @@
     }
 
     // ---------- chat (8.9) ----------
-    // Say a line: everyone in the room your user is in sees it over their head for a few seconds (you too, over
-    // yours), and nobody else, not even next door in a world. Plain text, at most 200 characters, 5 lines every 10 s
-    // (false: not said). "chat" says each line said where you are, and in your room: { key, name, text, mine, owner,
-    // id, channel }; v.chats, those still showing. Visit draws them in the views it draws (your world, and another's
-    // room); a room without a world draws its own (Visit.bubble).
-    say(text) {
+    // Say a line, where `to` says, as a game's chat does:
+    //   nothing (or "here"): everyone who can see you: the room your user is in, over your head for a few seconds
+    //     (you too, over yours), and those who have that room in their world or in a corner; nobody else.
+    //   { key } (or a key): into the room of an office you are linked with, either way (v.chatTargets): everyone in
+    //     it has it in their chat, wherever you are.
+    //   "lobby": everyone in the lobby has it in their chat (v.lobbyChat: a lobby that relays it, and you in it).
+    // Plain text, at most 200 characters, 5 lines every 10 s wherever they go (false: not said). "chat" says each line
+    // that comes: { scope ("say", "sim" or "lobby"), key, name, text, mine, owner, id, channel, to } (`to`, a "sim"
+    // line's: the room it was said into, { key, name }, yours with your key); v.chatLog, the last 100; v.chats, the
+    // lines over heads still showing. Visit draws those in the views it draws (your world, and another's room); a room
+    // without a world draws its own (Visit.bubble). Visit.chat, the chat window (the panel's), shows them all.
+    say(text, to) {
       const t = [...String(text == null ? "" : text).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim()].slice(0, CHAT_LEN).join("").trim(), now = Date.now();
+      const scope = to == null || to === "here" ? "say" : to === "lobby" ? "lobby" : "sim";
+      const target = scope === "sim" ? this.chatTargets.find(o => o.key === String(isObj(to) ? to.key : to)) : null;
       this._said = this._said.filter(at => now - at < CHAT_WINDOW);
       if (!t || this._said.length >= CHATS || !this._ws || this._ws.readyState !== 1) return false;
+      if ((scope === "sim" && !target) || (scope === "lobby" && !(this.lobbyChat && this.state === "online"))) return false;
       this._said.push(now);
-      this._send({ type: "say", text: t });
-      const r = this._room();
-      this._chatIn({ key: this.key || "", name: this.office ? this.office.name : "", text: t, mine: true, owner: false, id: null, room: r.kind === "home" ? "home" : r.w.channel });
-      return true;
+      this._send(scope === "say" ? { type: "say", text: t } : { type: "say", text: t, to: scope === "lobby" ? "lobby" : { key: target.key } });
+      const me = { key: this.key || "", name: this.office ? this.office.name : "", text: t, mine: true, owner: false, id: null };
+      if (scope === "say") { const r = this._room(); this._chatIn({ ...me, room: r.kind === "home" ? "home" : r.w.channel }); }
+      else if (scope === "sim") this._chatIn({ ...me, scope, to: { key: target.key, name: target.name } });
+      return true;   // (a lobby line comes back from the lobby, in its order)
+    }
+    // Whom you may say a line to (say(text, { key })): the offices linked with yours, either way, now.
+    get chatTargets() {
+      const by = new Map();
+      for (const h of this._hosted.values()) if (h.visitor && h.visitor.key) by.set(h.visitor.key, h.visitor.name);
+      for (const w of [...this._links.values(), ...this._watches.values()]) if (w.host && w.host.key) by.set(w.host.key, w.host.name);
+      if (this.visiting && this.visiting.host && this.visiting.host.key) by.set(this.visiting.host.key, this.visiting.host.name);
+      by.delete(this.key);
+      return [...by].map(([key, name]) => ({ key, name: String(name || "") })).sort((a, b) => a.name.localeCompare(b.name));
     }
     get chats() {
       const now = performance.now();
@@ -1419,10 +1449,15 @@
     }
     _chatIn(c) {
       if (!c.text) return;
-      c.until = performance.now() + chatShows(c.text);
-      this._chats.set(c.mine ? "mine" : c.key + "|" + (c.id || ""), c);
-      this._emit("chat", { key: c.key, name: c.name, text: c.text, mine: !!c.mine, owner: !!c.owner, id: c.id, channel: c.channel });
-      this._changed();
+      const scope = c.scope || "say", line = { scope, key: c.key, name: c.name, text: c.text, mine: !!c.mine, owner: !!c.owner, id: c.id || null, channel: c.channel, to: c.to || null };
+      if (scope === "say") {   // over the speaker's head, a while
+        c.until = performance.now() + chatShows(c.text);
+        this._chats.set(c.mine ? "mine" : c.key + "|" + (c.id || ""), c);
+      }
+      this.chatLog.push({ at: Date.now(), ...line });
+      if (this.chatLog.length > CHAT_LOG) this.chatLog.shift();
+      this._emit("chat", line);
+      if (scope === "say") this._changed();
     }
     // Who your user hears speaking (v.voices), each where `who(key)` says it is in the room they are in: a 🔊 over
     // each (8.7). In another's room, keys are its owner's, "relay:" a visitor's visit there, "relay:phone…" a call on
@@ -2200,10 +2235,10 @@
       for (const o of s.own) o.visible = false;
       if (!outside) this._aim(s, now);
       s.renderer.render(s.root, s.camera);
-      if ((this._chats.size || this.voices.some(x => x.speaking) || s.bubbles) && !outside) {   // lines said in this room, and who you hear speaking
+      if (this._chats.size || (this.voices.some(x => x.speaking) && !outside) || s.bubbles) {   // lines said in this room (seen from in it or outside), and who you hear speaking
         const b = s.bubbles || (s.bubbles = new Bubbles(s.T)), k = s.unit || 1, hostKey = (w.host || (this.visiting && this.visiting.host) || {}).key;
         b.draw(s.renderer, s.camera, this._chatsIn(w.channel, c => c.mine ? null : b.over(c.id ? this._body(s, c.id) : s.root.getObjectByName("visit:me"), 2.4 / k, 0.6 / k))
-          .concat(this._speakersIn(key => this._speakerIn(s, hostKey, key, b, k))), k);
+          .concat(outside ? [] : this._speakersIn(key => this._speakerIn(s, hostKey, key, b, k))), k);
       }
       w.count++;
       this.frames = (this.frames || 0) + 1;
@@ -3039,27 +3074,26 @@
       } finally { r.autoClear = auto; r.clippingPlanes = planes; }
     }
 
-    // The lines said in the room your user is in (8.9), over their speakers: at home, you and your visitors (their
-    // bodies in your scene, as your room marks them, or where you have them); on a plot, its owner (its mark), its
-    // visitors (their bodies there) and you.
+    // The lines said (8.9) over their speakers, everywhere this world shows: at home, you and your visitors (their
+    // bodies in your scene, as your room marks them, or where you have them); on each plot, its owner (its mark), its
+    // visitors (their bodies there) and you. The 🔊 marks, in the room your user is in.
     _bubbles(camera, list) {
       const v = this.v, b = this.bubbles, u = v._unit(), hk = v._hooks, me = this.me, x = this.in != null && list.find(p => p.w && p.w.channel === this.in);
       const mine = () => me ? { x: me.x, y: (Number(me.y) || 0) + 2.4 / u, z: me.z } : null;
-      let items, speakers = [];
-      if (x && x.w.scene) {
-        const s = x.w.scene, hostKey = (x.w.host || {}).key;
-        items = v._chatsIn(this.in, c => c.mine ? mine() : b.over(c.id ? v._body(s, c.id) : s.root.getObjectByName("visit:me"), 2.4 / u, 0.6 / u));
-        if (this.showSpeaking) speakers = v._speakersIn(key => v._speakerIn(s, hostKey, key, b, u));
-      } else {
-        if (!this.homeBodies || this.homeBodies.root !== hk.scene.root) this.homeBodies = { root: hk.scene.root, bodiesAt: 0 };   // your scene's bodies, looked for once a second
-        const over = (h, up, gap) => b.over(v._body(this.homeBodies, h.id), up, gap) || (h.pose ? { x: h.pose.x, y: (Number(h.pose.y) || 0) + gap * 2, z: h.pose.z } : null);
-        items = v._chatsIn("home", c => {
-          if (c.mine) return mine();
-          const h = v._hosted.get(c.channel);
-          return h ? over(h, 2.4 / u, 0.6 / u) : null;
-        });
-        if (this.showSpeaking) speakers = v._speakersIn(key => { const h = [...v._hosted.values()].find(y => y.inside && y.visitor.key === key); return h ? over(h, 2.0 / u, 0.15 / u) : null; });
+      if (!this.homeBodies || this.homeBodies.root !== hk.scene.root) this.homeBodies = { root: hk.scene.root, bodiesAt: 0 };   // your scene's bodies, looked for once a second
+      const over = (h, up, gap) => b.over(v._body(this.homeBodies, h.id), up, gap) || (h.pose ? { x: h.pose.x, y: (Number(h.pose.y) || 0) + gap * 2, z: h.pose.z } : null);
+      let items = v._chatsIn("home", c => {
+        if (c.mine) return mine();
+        const h = v._hosted.get(c.channel);
+        return h ? over(h, 2.4 / u, 0.6 / u) : null;
+      }), speakers = [];
+      for (const p of list) {
+        if (!p.w || !p.w.scene) continue;
+        const s = p.w.scene;
+        items = items.concat(v._chatsIn(p.w.channel, c => c.mine ? mine() : b.over(c.id ? v._body(s, c.id) : s.root.getObjectByName("visit:me"), 2.4 / u, 0.6 / u)));
       }
+      if (this.showSpeaking && x && x.w.scene) { const s = x.w.scene, hostKey = (x.w.host || {}).key; speakers = v._speakersIn(key => v._speakerIn(s, hostKey, key, b, u)); }
+      else if (this.showSpeaking) speakers = v._speakersIn(key => { const h = [...v._hosted.values()].find(y => y.inside && y.visitor.key === key); return h ? over(h, 2.0 / u, 0.15 / u) : null; });
       b.draw(this.renderer, camera, (this.showLines ? items : []).concat(speakers), u);
     }
 
@@ -3106,7 +3140,7 @@
     return `${name} put your room ${dir} of theirs` + (Number.isFinite(gap) ? `, ${Math.round(gap)} m off` : "");
   }
 
-  function panel(element, v) {
+  function panel(element, v, { chat: withChat = true } = {}) {
     if (!document.getElementById("visit-panel-css")) {
       const st = document.createElement("style"); st.id = "visit-panel-css"; st.textContent = PANEL_CSS; document.head.appendChild(st);
     }
@@ -3114,6 +3148,7 @@
     root.className = "visit-panel";
     element.appendChild(root);
     let composing = null, timer = null, drawn = "";
+    const cw = withChat ? chat(v) : null;   // the chat window (8.9), bottom left (chat: false, none: your page has its own)
     const always = new Set();   // links on your door to let in for good (a guest, ★), as you answer them
     // Notes, a while each: where a friend's world put your room (once it settles: a friend dragging it about on their
     // Map tells you at every step; never again for the same place), and a call that ended other than hung up.
@@ -3199,13 +3234,12 @@
         if (composing === o.id) rows.push(`<form class="row" data-o="${esc(o.id)}"><input maxlength="280" placeholder="a message for ${esc(o.name)}"><button class="go">${word}</button></form>`);
       }
       if (v.state === "online" && v.offices.length < 2) rows.push(`<div class="row muted">nobody else is here yet</div>`);
-      // Chat (8.9), last: a line, over your head for everyone in the room you are in.
-      if (v.state === "online") rows.push(`<form class="row" data-v="say"><input maxlength="${CHAT_LEN}" placeholder="say something to the room you are in" title="everyone in the room you are in sees it over your head; nobody else"><button type="submit">Say</button></form>`);
+      if (cw && v.state === "online") rows.push(`<div class="row muted" title="Enter, or /: type a line. /s say (everyone who can see you), /w name (into a linked room), /1 the lobby, /r reply">Enter to chat</div>`);
       const html = rows.join("");
       if (html === drawn) return;   // nothing new: an open menu stays open, a click lands
       drawn = html;
       root.innerHTML = html;
-      const input = root.querySelector("form[data-o] input");   // a knock's message, being written (never the say box: only on a key or click)
+      const input = root.querySelector("form[data-o] input");   // a knock's message, being written
       if (input) input.focus();
     }
     root.addEventListener("click", e => {
@@ -3248,12 +3282,6 @@
     root.addEventListener("submit", e => {
       e.preventDefault();
       const f = e.target.closest("form");
-      if (f.dataset.v === "say") {   // said: the box empties and lets go of the keys (Enter again, or a click, for another)
-        const i = f.querySelector("input");
-        if (v.say(i.value)) i.value = "";
-        i.blur();
-        return;
-      }
       const o = v.offices.find(x => x.id === f.dataset.o);
       (o && o.links ? v.link : v.knock).call(v, f.dataset.o, f.querySelector("input").value.trim());
       composing = null;
@@ -3265,9 +3293,138 @@
     timer = setInterval(() => { if (v.knocks.length) draw(); }, 1000);   // the knocks' countdown
     const speaking = setInterval(() => { if (v.mic || v.voices.length || v._calls.size) draw(); }, 250);   // who is near, and speaking
     draw();
-    return { element: root, release() { clearInterval(timer); clearInterval(speaking); v.off("change", draw); v.off("seen", onSeen); v.off("call", onCall); for (const t of seenWait.values()) clearTimeout(t); root.remove(); },
-      // the say box, focused: for a key of your page's own (Enter, say) to start a line
-      say() { const i = root.querySelector("form[data-v=say] input"); if (i) i.focus(); } };
+    return { element: root, chat: cw,
+      release() { clearInterval(timer); clearInterval(speaking); v.off("change", draw); v.off("seen", onSeen); v.off("call", onCall); for (const t of seenWait.values()) clearTimeout(t); if (cw) cw.release(); root.remove(); },
+      say() { if (cw) cw.open(); } };   // the chat window, open to type a line (as Enter does)
+  }
+
+  // ---------- the chat window (8.9): bottom left, as in a game ----------
+  // Enter (or /) to type a line, Enter to say it, Esc to stop. Where it goes is before the box: Say (everyone who can
+  // see you), To <name>'s room (an office linked with yours), Lobby (everyone in it); pick it there, or start the line
+  // with /s, /w <name>, /1 (or /l), /r (back to whoever last said a line into a room of yours, or the one you are in)
+  // and a space. It stays for the next line. The window fades `fade` ms after the last line, and comes back with the
+  // next one, or Enter. `element`: where it goes (the page). Its place: --visit-chat-left, --visit-chat-bottom.
+  const CHAT_CSS = `
+.visit-chat { position: fixed; left: var(--visit-chat-left, 16px); bottom: var(--visit-chat-bottom, 16px); z-index: 19; width: min(440px, calc(100vw - 32px)); font: 13px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif; color: #fff; transition: opacity .8s; }
+.visit-chat.idle { opacity: 0; pointer-events: none; }
+.visit-chat .log { max-height: 11em; overflow-y: auto; padding: 4px 8px; border-radius: 6px; text-shadow: 0 1px 2px #000, 0 0 4px #000; scrollbar-width: none; overflow-wrap: anywhere; }
+.visit-chat .log:empty { display: none; }
+.visit-chat:hover .log, .visit-chat.typing .log { background: rgba(0,0,0,.4); }
+.visit-chat .line.sim, .visit-chat[data-scope=sim] form { color: #ff80ff; }
+.visit-chat .line.lobby, .visit-chat[data-scope=lobby] form { color: #ffc864; }
+.visit-chat .line.note { color: #ffff00; }
+.visit-chat form { display: none; align-items: center; gap: 4px; margin-top: 4px; padding: 3px 6px; background: rgba(0,0,0,.7); border: 1px solid #6e7681; border-radius: 6px; }
+.visit-chat.typing form { display: flex; }
+.visit-chat select { font: inherit; color: inherit; background: none; border: 0; padding: 0; max-width: 45%; cursor: pointer; }
+.visit-chat option { color: #e6edf3; background: #161b22; }
+.visit-chat input { flex: 1; min-width: 0; font: inherit; color: inherit; background: none; border: 0; outline: none; }`;
+
+  function chat(v, { element = document.body, fade = CHAT_FADE } = {}) {
+    if (!document.getElementById("visit-chat-css")) {
+      const st = document.createElement("style"); st.id = "visit-chat-css"; st.textContent = CHAT_CSS; document.head.appendChild(st);
+    }
+    const root = document.createElement("div");
+    root.className = "visit-chat";
+    root.dataset.scope = "say";
+    root.innerHTML = `<div class="log" aria-live="polite"></div><form><select title="where your line goes"></select><input maxlength="${CHAT_LEN}" autocomplete="off" spellcheck="false"></form>`;
+    element.appendChild(root);
+    const log = root.querySelector(".log"), form = root.querySelector("form"), pick = form.querySelector("select"), input = form.querySelector("input");
+    let to = { scope: "say" }, choices = [], typing = false, last = null, fadeTimer = null;
+    const label = t => t.scope === "lobby" ? "Lobby" : t.scope === "sim" ? `To ${t.name}'s room` : "Say";
+    const shown = l => {
+      const who = `[${l.name || "someone"}]`;
+      if (l.scope === "note") return l.text;
+      if (l.scope === "lobby") return `[Lobby] ${who}: ${l.text}`;
+      if (l.scope === "sim") return l.mine ? `To ${l.to.name}'s room: ${l.text}` : `${who} to ${l.to && l.to.key === v.key ? "your room" : `${(l.to && l.to.name) || "a"}'s room`}: ${l.text}`;
+      return `${who} says: ${l.text}`;
+    };
+    const wake = () => {
+      root.classList.remove("idle");
+      clearTimeout(fadeTimer);
+      if (fade > 0) fadeTimer = setTimeout(function sleep() { if (typing || root.matches(":hover")) fadeTimer = setTimeout(sleep, 1000); else root.classList.add("idle"); }, fade);
+    };
+    const add = l => {
+      const end = log.scrollTop + log.clientHeight >= log.scrollHeight - 4, d = document.createElement("div");
+      d.className = "line " + l.scope; d.textContent = shown(l);
+      log.appendChild(d);
+      while (log.childElementCount > CHAT_LOG) log.firstChild.remove();
+      if (end) log.scrollTop = log.scrollHeight;
+      wake();
+    };
+    const note = text => add({ scope: "note", text });
+    const fill = () => {   // the choices before the box: Say, each office linked with yours, the lobby
+      choices = [{ scope: "say" }, ...v.chatTargets.map(o => ({ scope: "sim", key: o.key, name: o.name })), ...(v.lobbyChat ? [{ scope: "lobby" }] : [])];
+      if (!choices.some(c => c.scope === to.scope && c.key === to.key)) choices.splice(1, 0, to);   // (gone, or no lobby chat: said so if used)
+      pick.innerHTML = choices.map((c, i) => `<option value="${i}">${esc(label(c))}:</option>`).join("");
+      pick.value = String(choices.findIndex(c => c.scope === to.scope && c.key === to.key));
+      root.dataset.scope = to.scope;
+    };
+    const open = (start = "") => {
+      if (document.pointerLockElement) document.exitPointerLock();
+      typing = true; root.classList.add("typing"); fill(); wake();
+      input.value = start; input.focus();
+    };
+    const close = () => { typing = false; root.classList.remove("typing"); input.value = ""; if (root.contains(document.activeElement)) document.activeElement.blur(); wake(); };
+    // A command at the start of the box, once a space follows it (or on Enter): where lines go from now. True: it was
+    // one, and what follows it is the line.
+    const command = done => {
+      const m = /^\/(\S+)(?:\s([\s\S]*))?$/.exec(input.value);
+      if (!m) { if (done) input.value = ""; return false; }
+      if (m[2] === undefined && !done) return false;
+      const cmd = m[1].toLowerCase();
+      let rest = m[2] || "", next = null;
+      if (cmd === "s" || cmd === "say") next = { scope: "say" };
+      else if (cmd === "1" || cmd === "l" || cmd === "lobby") next = v.lobbyChat ? { scope: "lobby" } : (done && note("No lobby chat: this lobby does not carry it, or you are not in it"), null);
+      else if (cmd === "r" || cmd === "reply") next = last ? { scope: "sim", key: last.key, name: last.name } : (done && note("Nobody has said a line into your room yet"), null);
+      else if (["w", "t", "whisper", "tell"].includes(cmd)) {
+        const low = rest.toLowerCase(), o = v.chatTargets.filter(o => o.name && (low === o.name.toLowerCase() || low.startsWith(o.name.toLowerCase() + " "))).sort((a, b) => b.name.length - a.name.length)[0];
+        if (o) { next = { scope: "sim", key: o.key, name: o.name }; rest = rest.slice(o.name.length + 1); }
+        else if (!done) return false;   // a name still being typed
+        else note(rest ? `You are not linked with anyone called ${rest.trim()}` : "/w and the name of someone you are linked with");
+      } else if (done) note(`Unknown: /${cmd}. /s say (everyone who can see you) · /w name (into a linked room) · /1 the lobby · /r reply`);
+      if (next) { to = next; fill(); input.value = rest; return true; }
+      if (done) input.value = "";
+      return false;
+    };
+    input.addEventListener("input", () => command(false));
+    input.addEventListener("keydown", e => {
+      e.stopPropagation();   // the page's own keys (walking) are not for this box
+      if (e.key === "Escape") { e.preventDefault(); close(); }
+    });
+    pick.addEventListener("change", () => { to = choices[Number(pick.value)] || { scope: "say" }; fill(); input.focus(); });
+    form.addEventListener("submit", e => {
+      e.preventDefault();
+      const cmd = input.value.startsWith("/");
+      if (cmd && !command(true)) return;   // not a line (said why)
+      const t = input.value.trim();
+      if (!t) { if (!cmd) close(); return; }   // (a command alone: where the next line goes, the box still open)
+      if (v.say(t, to.scope === "say" ? undefined : to.scope === "lobby" ? "lobby" : { key: to.key })) return close();
+      if (to.scope === "sim" && !v.chatTargets.some(o => o.key === to.key)) { note(`${to.name}'s room: you are not linked with them now`); to = { scope: "say" }; fill(); }
+      else if (to.scope === "lobby" && !v.lobbyChat) { note("No lobby chat: this lobby does not carry it, or you are not in it"); to = { scope: "say" }; fill(); }
+      else if (v.state === "offline" && to.scope === "lobby") note("You are not in the lobby");
+      else note(`Too fast: at most ${CHATS} lines every ${CHAT_WINDOW / 1000} s`);
+    });
+    root.addEventListener("focusout", () => setTimeout(() => { if (typing && !root.contains(document.activeElement)) { typing = false; root.classList.remove("typing"); wake(); } }, 0));
+    const key = e => {   // Enter (or /), anywhere but a box of the page's own: type a line
+      if (e.defaultPrevented || e.repeat || e.ctrlKey || e.metaKey || e.altKey || e.isComposing || typing) return;
+      const t = e.target;
+      if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT|BUTTON)$/.test(t.tagName))) return;
+      if (e.key === "Enter") { e.preventDefault(); open(); }
+      else if (e.key === "/") { e.preventDefault(); open("/"); }
+    };
+    const onChat = l => {
+      add(l);
+      if (l.scope === "sim" && !l.mine && l.key && l.key !== v.key) last = { key: l.key, name: l.name };
+    };
+    const onError = e => { if (e && e.ref === "say") note(String(e.message || e.code)); };
+    addEventListener("keydown", key);
+    v.on("chat", onChat); v.on("error", onError);
+    for (const l of v.chatLog) add(l);
+    note("Enter to chat · /s say · /w name · /1 lobby · /r reply");
+    return {
+      element: root, open, close,
+      release() { removeEventListener("keydown", key); v.off("chat", onChat); v.off("error", onError); clearTimeout(fadeTimer); root.remove(); },
+    };
   }
 
   // ---------- your world's map: where friends' rooms sit round yours, seen from above ----------
@@ -3598,6 +3755,7 @@
     walk,
     bubble,
     panel,
+    chat,
     stage,
     map,
     _test: { cleanScene, imageDims },   // for visit-client's own tests

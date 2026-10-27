@@ -21,6 +21,7 @@ How this workroom uses basedverse's Visit, and every way it differs from Visit's
 | 🔊 over who is speaking | vanilla | |
 | phone | vanilla | (where it stands) |
 | chat bubbles | vanilla | |
+| chat window (say, a linked room, the lobby) | vanilla | |
 | landscapes, offline plots | vanilla | (what is marked `visitStatic`, and how) |
 
 State is one of:

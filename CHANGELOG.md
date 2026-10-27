@@ -9,6 +9,38 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.15.0 — 2026-10-26
+
+**Chat, as in a game.** A chat window, bottom left: Enter to type a line, Enter to say it, Esc to stop. It fades
+when nobody has said anything for 20 s, and comes back with the next line, or Enter. A line goes one of three ways:
+
+- **Say** (the default, `/s`): everyone who can see you. That is the room you are in, as before, and now also
+  everyone who sees it from outside (in their world, in a corner): over your head, and in their chat.
+- **Into a linked room** (`/w name`): everyone in the room of a friend you are linked with, either way, wherever
+  you are. It shows in their chat. `/r` answers whoever last said a line into a room of yours.
+- **Lobby** (`/1`): everyone in the lobby, in their chat.
+
+Where a line goes is shown before the box, and can be picked there; it stays for the next line. Each scope has its
+own colour in the window: say white, a room's pink, the lobby's gold. In code: `v.say(text, to)` (`to`: nothing,
+`{ key }`, or `"lobby"`), `v.chatTargets`, `v.lobbyChat`, `v.chatLog`, and every line in the `chat` event with its
+`scope`. Bubbles now also show over people on every plot in your world, and in a room seen in a corner.
+
+The panel's Say box is gone: the chat window replaces it (`Visit.panel(element, v, { chat: false })` leaves it out,
+for a room with its own; `Visit.chat(v)` makes one on its own).
+
+**The lobby**: lobby chat is new in it (`chat`, `lobby_chat`; `welcome` says `chat: true`). Until a lobby is
+updated (`bin/deploy-lobby`), Say and the linked rooms work, and the lobby's line in the window does not show.
+
+### What an integration does
+
+1. Get visit-client 0.15.0 (`bin/setup` again, download; or this release).
+2. With the panel, nothing more: the chat window comes with it. If your room calls `panel.say()` (a key of yours to
+   start a line), it opens the chat window now; you can drop that key, since Enter does it.
+3. Make sure nothing of yours sits bottom left over the window; if something does, move the window
+   (`--visit-chat-left`, `--visit-chat-bottom`) or yours. Your room's keys leave Enter and `/` alone.
+4. A room that draws its own bubbles (no world): `chat` events now also come for lines in a linked room and the lobby
+   (`scope`); draw over heads only those without one (or `v.chats`, as before).
+
 ## v0.14.1 — 2026-10-26
 
 **Telemetry that says what is Visit's.** In a world, `world.render` draws your whole room (it is your room's own

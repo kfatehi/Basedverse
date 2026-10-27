@@ -39,7 +39,10 @@ take them unless your user asks for something else. The defaults are Visit's own
 
 - **the panel** (`Visit.panel`): the lobby, links and knocks, your door and guests, your visitors and their looks,
   your world's Map, the microphone and who is near, calls (📞 call, Pick up, speaker / handset, Hang up), notes (where
-  a friend's world put your room), the Say box, and ⏱ (how this page is doing);
+  a friend's world put your room), and ⏱ (how this page is doing);
+- **the chat window** (the panel's, `Visit.chat`): bottom left, as in a game. Enter to type, and say a line to
+  everyone who can see you, into a linked friend's room (`/w name`), or to the lobby (`/1`); it fades when nobody
+  has said anything for a while;
 - **the stage** (`Visit.stage`): the room you visit, full-window or in the corner;
 - **the Map** (`Visit.map`, from the panel): your world from above;
 - **in your world** (`visit.world`): chat bubbles over whoever said something, and a 🔊 over whoever you hear
@@ -345,11 +348,13 @@ visit.host({
   reloads), and stops looking at it 30 times a second. While you are away, your guests' worlds keep drawing it
   where your plot was, and walk them into its walls. Leave out what moves or changes (people, screens, signs,
   agents): those go as before. If something marked does change in itself, call `visit.landscapeChanged()`.
-- **Chat**: your user types a line (the panel's say box, or `visit.say(text)`) and everyone in the room they are in
-  sees it over their head for a few seconds; nobody else. With a world (step 9) Visit draws the bubbles in your room
-  too; without one, draw them yourself from `visit.chats` (`Visit.bubble(THREE, text, unit)` makes one). A key of your
-  own to start a line: `panel.say()` focuses the say box; make sure your room's keys ignore a text box (WASD there is
-  typing, not walking).
+- **Chat**: the panel's chat window, bottom left: your user presses Enter, types a line, and Enter says it. Said
+  (the default), everyone who can see them has it over their head for a few seconds, and in their chat; `/w name`
+  says it into a linked friend's room, `/1` to the whole lobby (`visit.say(text, to)` from code). With a world (step
+  9) Visit draws the bubbles in your room too; without one, draw them yourself from `visit.chats`
+  (`Visit.bubble(THREE, text, unit)` makes one). Make sure your room's keys ignore a text box (WASD there is typing,
+  not walking), and leave Enter and `/` to the chat window. Something of yours bottom left: move the window
+  (`--visit-chat-left`, `--visit-chat-bottom` in your CSS).
 - **A phone** (optional): for your user to talk with a friend in another room, wherever each stands.
   `visit.phone(true, { at: { x, y, z } })` puts it in your room: Visit's own phone, its handset at `at` (or
   `model: false`, and draw your own there); `visit.phones` lists
@@ -439,7 +444,7 @@ your user **link** with one (with a message): once they say yes, their room show
 and your user chooses to go there, put it in their world, or unlink. It shows links asked of you with **Link** /
 **Not now** and **★ always** (make them a guest as you say yes), your links, your visitors and who is linked to
 you (with **Kick** / **Unlink**, and **their look** / **your model**), whose look your visitors have by default,
-**Map** (your world, from above: step 9), the microphone (🎙) and who is near, calls, a **Say** box (chat), sets your
+**Map** (your world, from above: step 9), the microphone (🎙) and who is near, calls, the chat window (Enter), sets your
 status and max visitors, and has **Go offline** / **Go online**. A
 star (☆) by each office makes it a **guest**: while your door is open (the panel's "your door"), a guest's link
 is let in at once, without asking your user. An office on an older Visit gets **Knock** instead: let in, your
@@ -569,8 +574,9 @@ marked offline, walked into but not through its walls; start it again, and the p
       (`visit.avatar`), if you like.
 - [ ] Voice: with the microphone on, a visitor near your user hears them, and they the visitor; farther, neither.
 - [ ] A phone, if you have one: a call rings, is picked up, heard on the handset; on speaker, by those near it.
-- [ ] Chat: a line typed (the panel's Say box, or `visit.say`) shows over its speaker's head for everyone in the
-      room; your own keys ignore a text box (typing "w" there does not walk).
+- [ ] Chat: Enter opens the chat window, bottom left; a line said shows over its speaker's head for everyone who
+      can see them, and in their chat; `/w name` reaches a linked friend's room, `/1` the lobby; your own keys
+      ignore a text box (typing "w" there does not walk), and nothing of yours hides the window.
 - [ ] Your landscape (what never changes) marked `userData.visitStatic`; nothing that moves or changes under it,
       or `visit.landscapeChanged()` when it does.
 - [ ] Visiting: the host's room fills the window (`Visit.stage`, or your own view); WASD, Shift and the
@@ -610,7 +616,7 @@ marked offline, walked into but not through its walls; start it again, and the p
 | visitors see their own body from inside | mark each body `userData.visitor = entry.id` (step 5) |
 | visitors drift back as they walk | your `walk.speed` is not the speed your `move` gives `Visit.walk`, or your `move` is not `Visit.walk` (leave `walk` out) |
 | something in your room is missing from a visitor's view of it | it is drawn outside `root`, with a custom shader, as HTML, or in post-processing (step 5) |
-| typing in the Say box walks your user | your room's own keys do not ignore a text box: skip keys whose target is an `INPUT`, `TEXTAREA` or editable element |
+| typing in the chat window walks your user | your room's own keys do not ignore a text box: skip keys whose target is an `INPUT`, `TEXTAREA` or editable element |
 | a visitor does not see a change to something you marked static | the landscape is not looked at for changes: call `visit.landscapeChanged()` after changing it, or do not mark what changes |
 | a friend's room vanishes from your world when they go offline | their room marks no landscape (`userData.visitStatic`), or they shut their door to you or un-starred you (then it is forgotten on purpose) |
 | your visitors stop moving while your tab is in the background | your page's Content-Security-Policy forbids `blob:` workers, so the library's timer is the page's own (slowed in the background): allow `worker-src blob:` |

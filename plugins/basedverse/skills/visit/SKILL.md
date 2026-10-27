@@ -80,7 +80,8 @@ feature in a workroom's code. If the changelog has something newer than the tabl
 | voice (same room, 45 m) | 0.9, 0.10 | step 5 | `visit.setMic(`, `visit.listener(`, the panel's 🎙 |
 | 🔊 over who is speaking | 0.13 | vanilla | `visit.world(` (unless `speaking: false`) |
 | phone | 0.9, 0.13 | step 5 | `visit.phone(` (`model: false`: their own) |
-| chat bubbles | 0.11 | step 5 | `visit.say(`, the panel's Say box, `bubbles` |
+| chat bubbles | 0.11 | step 5 | `visit.say(`, `bubbles` |
+| chat window, scopes (say, a linked room, the lobby) | 0.15 | vanilla | the panel's chat window (`chat: false`: their own), `visit.say(text, to)` |
 | landscapes, offline plots | 0.12 | step 5 | `userData.visitStatic`, `visit.landscapeChanged(` |
 | telemetry (⏱) | 0.14 | troubleshooting | the panel's ⏱, `visit.perf(`: nothing to integrate, a tool for when a room feels slow |
 

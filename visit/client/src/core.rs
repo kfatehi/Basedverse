@@ -188,6 +188,8 @@ pub struct Core {
     page_gone: Instant,
     idle_exit: u64,
     online: bool,
+    /// The lobby relays chat (8.9: its welcome said so): this office's page may say a line to everyone there.
+    lobby_chat: bool,
     /// What outlasts a run, kept in `state_file`: whether the page took this office out of the lobby
     /// (leave_lobby, until join_lobby), its key, its door and its guests.
     saved: Saved,
@@ -252,6 +254,7 @@ impl Core {
             page_gone: Instant::now(),
             idle_exit,
             online: false,
+            lobby_chat: false,
             saved,
             state_file,
             key,
@@ -430,7 +433,7 @@ impl Core {
         self.world_ask = self.world.then(Instant::now);   // the world goes on only if this page asks for it too
         let visits: Vec<Value> = self.visits.values().filter(|v| v.up).map(started).collect();
         self.to_page(json!({
-            "type": "ready", "version": VERSION, "office": self.office, "online": self.online, "away": self.saved.away, "status": self.status,
+            "type": "ready", "version": VERSION, "office": self.office, "online": self.online, "lobby_chat": self.lobby_chat, "away": self.saved.away, "status": self.status,
             "max_visitors": self.max_visitors, "visits": visits, "key": self.key, "door": self.door(), "guests": self.guests(),
             "layout": self.saved.layout_json(), "avatars": self.saved.avatars_json(), "voice_range": VOICE_RANGE, "kept": self.lands.kept_json(),
             "seen": self.seen_in.iter().map(|(k, (name, at))| json!({ "key": k, "name": name, "at": at })).collect::<Vec<_>>(),
@@ -668,14 +671,34 @@ impl Core {
                 self.forget_plot(&key);
             }
             // A line this office's user says (8.9): to everyone in the room they are in, and nobody else.
+            // Where it goes (`to`): none (or "here"), everyone who can see this office's user (the room they are in, and
+            // those who have it in their worlds or corners); { key }, into a linked office's room; "lobby", everyone
+            // in the lobby.
             "say" => {
                 let Some(text) = m.get("text").and_then(Value::as_str).and_then(said) else {
                     return self.page_error("bad_message", &format!("text is 1 to {SAY_LEN} characters"), Some("say"));
                 };
+                let to = m.get("to").filter(|t| !t.is_null() && t.as_str() != Some("here"));
+                let key = to.and_then(|t| t.get("key")).and_then(Value::as_str).filter(|k| state::key_ok(k)).map(str::to_string);
+                if to.is_some() && to.and_then(Value::as_str) != Some("lobby") && key.is_none() {
+                    return self.page_error("bad_message", "to is \"here\", \"lobby\" or { key } of an office linked with this one", Some("say"));
+                }
+                if to.and_then(Value::as_str) == Some("lobby") && !(self.online && self.lobby_chat) {
+                    return self.page_error("not_supported", "this lobby takes no chat (or this office is not in it)", Some("say"));
+                }
+                if let Some(k) = &key {
+                    if !self.visits.values().any(|v| v.up && v.peer.get("key").and_then(Value::as_str) == Some(k.as_str())) {
+                        return self.page_error("no_link", "no link with that office, either way", Some("say"));
+                    }
+                }
                 if !counted(&mut self.says) {
                     return self.page_error("rate_limited", &format!("at most {SAYS} lines every {} s", SAY_WINDOW.as_secs()), Some("say"));
                 }
-                self.say_out(text);
+                match (to, key) {
+                    (None, _) => self.say_out(text),
+                    (_, Some(k)) => { self.to_peer(&k, json!({ "sim_say": text })); }
+                    _ => self.to_lobby(json!({ "type": "chat", "text": text })),
+                }
             }
             // Where everyone in this office's room is (8.7), in metres, as its page has them: its own user (null:
             // elsewhere), its phone, and each visitor in it ([channel, x, y, z]). Who hears whom here goes by it.
@@ -1091,24 +1114,26 @@ impl Core {
         }
     }
 
-    // ---------- chat (8.9): a line said, to everyone in the same room ----------
+    // ---------- chat (8.9): a line said, to everyone who can see its speaker ----------
 
-    /// A line this office's user says: to the room they are in (another's: its owner's visit-client passes it on to
-    /// everyone there; their own: to each visitor in it).
+    /// A line this office's user says, to everyone who can see them: to the room they are in (another's: its owner's
+    /// visit-client passes it on to everyone there; their own: to each visitor in it, and to each office that has it
+    /// in its world or its corner).
     fn say_out(&mut self, text: String) {
         if let Some(v) = self.visits.values().find(|v| v.up && v.role == Role::Visitor && v.inside) {
             let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "say": text })));
             return;
         }
         let line = json!({ "key": self.key, "name": self.office.get("name"), "owner": true, "text": text });
-        for v in self.visits.values().filter(|v| v.up && v.role == Role::Host && v.inside) {
+        for v in self.visits.values().filter(|v| v.up && v.role == Role::Host) {
             let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "said": line })));
         }
     }
 
-    /// A line a visitor in this room said: to this office's page, and to every other visitor in the room.
+    /// A line a visitor in this room said: to this office's page, and to everyone else who can see this room (its other
+    /// visitors, and those who have it in their worlds or corners).
     fn say_in(&mut self, from: u16, line: Value) {
-        for v in self.visits.values().filter(|v| v.up && v.role == Role::Host && v.inside && v.channel != from) {
+        for v in self.visits.values().filter(|v| v.up && v.role == Role::Host && v.channel != from) {
             let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "said": line })));
         }
         let mut chat = line;
@@ -1196,6 +1221,7 @@ impl Core {
                 }
                 self.office = json!({ "id": m.get("id"), "name": m.get("name") });
                 self.online = true;
+                self.lobby_chat = m.get("chat") == Some(&json!(true));
                 if self.links.is_none() {
                     let relays = self.relays.take().unwrap_or_else(|| {
                         let urls: Vec<String> = m.get("relays").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
@@ -1209,7 +1235,7 @@ impl Core {
                 info!(office = %self.office, resumed, "in the lobby");
                 self.publish_link();
                 let (office, knocking) = (self.office.clone(), m.get("knocking").cloned().unwrap_or(json!([])));
-                self.to_page(json!({ "type": "online", "office": office, "knocking": knocking }));
+                self.to_page(json!({ "type": "online", "office": office, "knocking": knocking, "lobby_chat": self.lobby_chat }));
             }
             "lobby" => {
                 self.lobby_view = Some(m.clone());
@@ -1262,6 +1288,15 @@ impl Core {
                     self.knocks.insert(id.to_string(), (m.clone(), Instant::now()));
                 }
                 self.to_page(m);
+            }
+            // A line said to everyone in the lobby (8.9), checked as any line is, to the page.
+            "lobby_chat" => {
+                let from = m.get("from").cloned().unwrap_or(Value::Null);
+                let s = |x: &Value, n: usize| x.as_str().map(|s| s.chars().filter(|c| !c.is_control()).take(n).collect::<String>());
+                if let (Some(text), Some(id)) = (m.get("text").and_then(Value::as_str).and_then(said), s(&from["id"], 40)) {
+                    let key = s(&from["key"], 100).filter(|k| state::key_ok(k));
+                    self.to_page(json!({ "type": "chat", "scope": "lobby", "id": id, "key": key, "name": s(&from["name"], 24).unwrap_or_default(), "text": text }));
+                }
             }
             "knock_cancelled" => {
                 if let Some(id) = m.get("id").and_then(Value::as_str) {
@@ -1574,6 +1609,18 @@ impl Core {
             self.to_page(json!({ "type": "call", "channel": ch, "act": act }));
             return self.tell_near();
         }
+        if let Some(text) = m.get("sim_say").and_then(Value::as_str).and_then(said) {   // a line said into this room from a linked office (8.9)
+            if !counted(&mut v.says) {
+                return;
+            }
+            let (key, name) = (v.peer.get("key").cloned().unwrap_or(Value::Null), v.peer.get("name").cloned().unwrap_or(Value::Null));
+            let line = json!({ "key": key, "name": name, "text": text });
+            // To everyone in this room, but its sayer (in it, or with a link the other way too)
+            for o in self.visits.values().filter(|o| o.up && o.role == Role::Host && o.inside && o.channel != ch && o.peer.get("key") != Some(&key)) {
+                let _ = o.cmd.try_send(LinkCmd::Ctl(json!({ "sim_said": line })));
+            }
+            return self.to_page(json!({ "type": "chat", "scope": "sim", "home": true, "key": key, "name": name, "text": text, "channel": ch }));
+        }
         if let Some(at) = m.get("seen") {   // where the other office has put this one in its world (or nowhere): to the page
             let Some(key) = v.peer.get("key").and_then(Value::as_str).map(str::to_string) else { return };
             let name = v.peer.get("name").cloned().unwrap_or(Value::Null);
@@ -1675,11 +1722,13 @@ impl Core {
                     }
                 } else if let Some(p) = m.get("paused").and_then(Value::as_bool) {
                     self.to_page(json!({ "type": if p { "host_paused" } else { "host_resumed" }, "channel": ch }));
-                } else if let Some(line) = m.get("said").filter(|_| v.inside).and_then(said_from) {   // a line said in the host's room (8.9)
+                } else if let Some(line) = m.get("said").and_then(said_from) {   // a line said in the host's room (8.9)
                     let mut line = line;
                     line["type"] = json!("chat");
                     line["channel"] = json!(ch);
                     self.to_page(line);
+                } else if let Some(line) = m.get("sim_said").filter(|_| v.inside).and_then(said_from) {   // said into it, from a linked office
+                    self.to_page(json!({ "type": "chat", "scope": "sim", "key": line["key"], "name": line["name"], "text": line["text"], "channel": ch }));
                 } else if let Some(near) = m.get("near").filter(|_| v.inside) {   // who is near this office's user in the host's room (8.7)
                     self.to_page(json!({ "type": "voice_near", "channel": ch, "near": near_from(near) }));
                 } else if let Some(reason) = m.get("enter_refused").filter(|_| v.watch && v.inside) {

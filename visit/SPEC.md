@@ -251,7 +251,7 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `avatar_use` | `key`, `use` (`"mine"` \| `"theirs"` \| null: the default) | the same for one office, apart from the default; kept in the state file |
 | `phone` | `on` (bool) | this room has a phone (8.8), or no longer: every link is told |
 | `call` | `channel`, `act` (`"ring"` \| `"answer"` \| `"hangup"`) | a call on that visit (8.8): ring their phone (refused `no_phone` if their room has none), answer it, end it |
-| `say` | `text` (1 to 200 characters) | a line this office's user says (8.9): to everyone in the room they are in, and nobody else. Control characters become spaces; trimmed; at most 5 every 10 s (`rate_limited`) |
+| `say` | `text` (1 to 200 characters), `to`? (none or `"here"`; `{"key"}`; `"lobby"`) | a line this office's user says (8.9). No `to`: to everyone who can see them (the room they are in, and those who see it from outside). `{"key"}`: into the room of an office linked with this one, either way (`no_link` if none). `"lobby"`: to everyone in the lobby (`not_supported` if the lobby does not carry chat). Control characters become spaces; trimmed; at most 5 every 10 s, whatever their `to` (`rate_limited`) |
 | `speaker` | `channel`, `on` (bool) | a call on this office's phone's speaker (8.8), or back to the ear (`no_call` if none is on there) |
 | `voice_where` | `me` [x, y, z] \| null, `phone` [x, y, z] \| null, `visitors` [[`channel`, x, y, z], …] (metres, this room's terms) | where everyone in this office's room is (8.7): its own user (null: not in it), its phone, each visitor in it. Who hears whom in the room goes by it. Sent when it changes, at most 10 a second |
 | `knock` | `to` (office id), `message`? (≤ 280), `link`? (true: a link, 8.5) | ask to visit an office, or to link with it (refused `not_hosting` before `host`) |
@@ -279,7 +279,7 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `avatar` | `channel`, `avatar` {`unit`, `json`} | a visitor's avatar, which this page asked for (host side, 8.6): unpacked and checked as a scene edit is |
 | `phone` | `channel`, `on` | the other office's room has a phone now (8.8), or no longer (also `phone` in `visit_started`) |
 | `call` | `channel`, `act` | a call on that visit (8.8): they ring, answer, or hang up |
-| `chat` | `channel`, `key`, `name`, `text`, and `id` (a visitor's, by its visit there) or `owner` (true: the room's owner) | a line said (8.9): in this office's room by a visitor (that visit's channel, its `id`), or in the room its user is in (that visit's channel: its owner, or another visitor). Never this office's own |
+| `chat` | `channel`, `key`, `name`, `text`, and `id` (a visitor's, by its visit there) or `owner` (true: the room's owner); or `scope` | a line said (8.9): in this office's room by a visitor (that visit's channel, its `id`), or in a room its user is in or sees from outside (that visit's channel: its owner, or another visitor). `scope: "sim"`: said into a room from a linked office, by that office's user (`key`, `name`): into this office's room (`home: true`; `channel`, the link it came by), or into the one its user is in (its `channel`). `scope: "lobby"`: said in the lobby (`id`, the sayer's office id; `key`, its key or null); this office's own too, in the lobby's order. Never this office's own otherwise. `ready` and `online` say whether the lobby carries chat (`lobby_chat`) |
 | `voice_near` | `channel`?, `near`: [{`key`, `name`, `distance` (m), `id`?, `phone`?}] | who is near this office's user (8.7), within `voice_range`: in its own room (no `channel`: as its visit-client has it), or in the room it is in (that visit's `channel`: as its owner's says). `id`: a visitor's, by its visit there; `phone`: a call on that room's speaker. When it changes; distances at most every second. `ready` has `voice_range` (45) |
 | `enter` / `exit` | `channel`, `pose`? {`x`, `y`, `z`, `yaw`} (for `enter`) | a watcher stepped into this room, there (host side: spawn it, as a visitor), or out of it; no `pose`: a link going there, spawned where newcomers go |
 | `enter_refused` | `channel`, `reason` (`"full"`, or `"moved"`: a visit to a room began, and this office stepped out) | stepping into a watched room was refused, or undone: outside it |
@@ -349,7 +349,7 @@ starts a new session (`resumed: false`).
 
 | type | fields | effect |
 |---|---|---|
-| `hello` | `proto`: `"basedverse-lobby/3"`, `name`, `sim`?, `status`?, `max_visitors`? (default 3), `resume`?, `world`? (true: this office takes knocks to watch), `links`? (true: it takes links, 8.5) | join, or resume a dropped session (6.1) |
+| `hello` | `proto`: `"basedverse-lobby/3"`, `name`, `sim`?, `status`?, `max_visitors`? (default 3), `resume`?, `world`? (true: this office takes knocks to watch), `links`? (true: it takes links, 8.5), `chat`? (true: it takes lobby chat, 8.9) | join, or resume a dropped session (6.1) |
 | `link` | `endpoint` (the iroh endpoint id: its public key, as a string), `addr` (an object, ≤ 2 KiB as JSON, passed through untouched: how to reach it); or both null | publish or update how to reach this office; both null: withdraw it (not ready, until published again) |
 | `status` | `status` | as version 1 |
 | `max_visitors` | `n` (0–8) | change it |
@@ -357,13 +357,14 @@ starts a new session (`resumed: false`).
 | `answer` | `knock`, `accept`, `message`? | answer a knock on your door |
 | `end` | `visit`, `reason`? (`"left"`, `"kicked"`, `"link_failed"`) | end a visit you are in, either side |
 | `rename` | `name` | a new name, if it is free (`name_taken`, `name_invalid` otherwise; the office keeps its own) |
+| `chat` | `text` | a line for everyone in the lobby (8.9): to every office in it whose `hello` said `chat`, this one too. Control characters become spaces; trimmed; at most 200 characters; at most 5 every 10 s (`rate_limited`); empty: `bad_message`. Nothing is kept |
 | `bye` | — | leave the lobby now: the session ends at once, not held for resuming (a visit-client stopping) |
 
 ### 6.3 Lobby → visit-client
 
 | type | fields | when |
 |---|---|---|
-| `welcome` | `proto`, `id`, `name`, `relays`: [url], `resume` (32 hex), `resumed` (bool), `visits`: [id], `knocking`: [{`id`, `to`}], `limits` | after a good `hello` |
+| `welcome` | `proto`, `id`, `name`, `relays`: [url], `resume` (32 hex), `resumed` (bool), `visits`: [id], `knocking`: [{`id`, `to`}], `limits`, `chat` (true: this lobby carries chat; an older one says nothing) | after a good `hello` |
 | `lobby` | `offices`: [{`id`, `name`, `status`, `sim`, `max_visitors`, `visitors` (count), `visiting` (the host's office id, or `null`), `ready`, `key` (the endpoint it last published, kept while its link is withdrawn; `null` before it has published one), `watchers` (count), `world` (it takes knocks to watch), `links` (it takes links)}], you included | on any change |
 | `knock` | `id`, `from` {`id`, `name`, `sim`, `key`}, `message`, `expires_in`, `watch`?, `link`? | someone knocked (to watch, with `watch`; to link, with `link`) |
 | `knock_sent` | `id`, `to`, `watch`?, `link`? | your knock reached the door (a knock to link with a door that does not take links is an ordinary knock: no `link`) |
@@ -371,6 +372,7 @@ starts a new session (`resumed: false`).
 | `answered` | `knock`, `accept`, `reason`? (`"declined"`, `"timeout"`, `"gone"`, `"full"`, `"not_ready"`), `message`?, `watch`?, `link`? | your knock's answer |
 | `visit` | `id`, `role`, `peer` {`id`, `name`, `sim`}, `ticket` (32 hex), `peer_link` {`endpoint`, `addr`}, `watch`?, `link`? | a visit (or a watch, or a link: a watch with `link`) was agreed: the visitor dials, the host waits for it (section 7) |
 | `visit_ended` | `id`, `reason` (6.5) | a visit ended |
+| `lobby_chat` | `from` {`id`, `name`, `key`}, `text` | a line said in the lobby (8.9), to an office whose `hello` said `chat` |
 | `error` | `code`, `message`, `ref`? | a refusal (section 11) |
 
 `relays` is the list of iroh relay URLs to use; empty means the visit-client's built-in defaults.
@@ -419,7 +421,8 @@ grace period, section 7.5).
 
 `welcome.limits`: `name` 24, `message` 280, `knocks_per_minute` 6, `knock_ttl` 60, `max_visitors` 8 (the
 highest an office may set), `link_addr` 2048 (bytes of `addr` as JSON), `connections_per_ip` 8,
-`max_watchers` 8, `max_watching` 8, `watch_knocks_per_minute` 30.
+`max_watchers` 8, `max_watching` 8, `watch_knocks_per_minute` 30, `chat` 200 (characters in a line of lobby chat),
+`chats_per_10s` 5.
 
 ## 7. The link: visit-client ↔ visit-client
 
@@ -448,8 +451,10 @@ Messages are JSON, each prefixed by its length (u32 big-endian). In order, relia
 | visitor | `{"point": {"yaw", "pitch"}}` | a point (8.3): passed to the host's page with only those two, clamped, at most 5 a second |
 | either | `{"phone": true}` / `{"phone": false}` | this side's room has a phone, or no longer (8.8): sent on every link, and on each new one while it has |
 | either | `{"call": "ring" \| "answer" \| "hangup"}` | a call (8.8), passed to the page as `call` |
-| visitor | `{"say": "<text>"}` | a line the visitor says in the host's room (8.9): only while in it; checked and rate-limited as the page's is; passed to the host's page as `chat` and on to the room's other visitors |
-| host | `{"said": {"key", "name", "text", "id"? \| "owner"?}}` | a line said in the host's room (8.9), by its owner or one of its visitors (by its visit's id): only to a visitor in it; checked, passed to the page as `chat` |
+| visitor | `{"say": "<text>"}` | a line the visitor says in the host's room (8.9): only while in it; checked and rate-limited as the page's is; passed to the host's page as `chat` and on to everyone else who can see the room (its other visitors, and its watchers) |
+| host | `{"said": {"key", "name", "text", "id"? \| "owner"?}}` | a line said in the host's room (8.9), by its owner or one of its visitors (by its visit's id): to everyone who can see the room (in it, or watching it); checked, passed to the page as `chat` |
+| either | `{"sim_say": "<text>"}` | a line said into the other office's room (8.9), by this office's user, wherever they are; checked and rate-limited as a page's is; passed to that room's page as `chat` (`scope: "sim"`, `home: true`) and on to each visitor in it |
+| host | `{"sim_said": {"key", "name", "text"}}` | a line said into the host's room from a linked office (8.9): to each visitor in it but its sayer; checked, passed to the page as `chat` (`scope: "sim"`) |
 | host | `{"near": [{"key", "name", "distance", "id"?, "phone"?}]}` | who is near the visitor in the host's room (8.7), as the host's visit-client has it: checked, passed to the page as `voice_near` |
 | host | `{"avatar_want": true}` | send this office's avatar (8.6): now, on a stream of its own (7.4), and again whenever its page gives a new one |
 | visitor | `{"landscapes": true}` | its visit-client reads landscapes (8.10): sent each time the link is up, passed to the host's page as `landscapes` |
@@ -755,19 +760,34 @@ carries calls, and the room shows the phone (where it stands, its ringing, picki
 
 ### 8.9 Chat
 
-A line typed shows over its speaker's head, for everyone in the same room, and nobody else: not next door in a
-world, not a room seen from outside it. Nothing to join.
+As in a game's chat, a line goes one of three ways (its scope). Nothing to join.
 
-- **Saying.** A page says its user's line to its own visit-client (`say`, `v.say`); it goes to the room the user is
-  in: another's (to its owner's visit-client) or their own. The room's visit-client gives it to everyone in the
-  room: its own page (`chat`), and each visitor in it (`said`), but the one who said it. A visitor's line names
-  them by their visit's id there; the owner's says so (`owner`). Every visit-client checks it again: plain text
-  (control characters become spaces), at most 200 characters, at most 5 lines every 10 s from each.
-- **Showing.** A line shows over its speaker a few seconds (4 s, and longer the longer it is: at most 12 s), until
-  they say another. Visit draws it in the views it draws (`Visit.bubble`, a card over the head): another's room
-  (over its owner's `visit:me`, over visitors' marked bodies; never one's own, from one's own eyes) and a world
-  (`v.world`: at home over its user and its visitors; on a plot, over its owner, its visitors and its user). A
-  room without a world draws them itself, from `v.chats` and the `chat` event.
+- **Say** (the default): everyone who can see its speaker: the room they are in, and those who see that room from
+  outside it (their worlds, their corners). It shows over the speaker's head, and in everyone's chat. A page says
+  its user's line to its own visit-client (`say`, `v.say(text)`); it goes to the room the user is in: another's (to
+  its owner's visit-client) or their own. The room's visit-client gives it to everyone who can see the room: its
+  own page (`chat`), and each visitor in it or watching it (`said`), but the one who said it. A visitor's line
+  names them by their visit's id there; the owner's says so (`owner`).
+- **Into a linked room** (`v.say(text, { key })`): everyone in the room of an office linked with the speaker's,
+  either way (in a corner, in a world, visiting, visited: `v.chatTargets`), wherever the speaker is. It shows in
+  their chat, not over a head (the speaker is not there). It goes over the link (`sim_say`) to that room's
+  visit-client, which gives it to its page (`chat`, `scope: "sim"`, `home`) and to each visitor in it
+  (`sim_said`; an older Visit ignores it).
+- **Lobby** (`v.say(text, "lobby")`): everyone in the lobby whose Visit takes it, in their chat. The lobby relays
+  it (`chat`, `lobby_chat`) to each office whose `hello` said `chat`, the sayer's too, in one order, and keeps
+  nothing. A lobby that carries it says so in `welcome` (`chat: true`; the page: `v.lobbyChat`).
+- **Checked everywhere.** Every visit-client (and the lobby) checks a line again: plain text (control characters
+  become spaces), at most 200 characters, at most 5 lines every 10 s from each, whatever their scope.
+- **Showing.** A line said shows over its speaker a few seconds (4 s, and longer the longer it is: at most 12 s),
+  until they say another. Visit draws it in the views it draws (`Visit.bubble`, a card over the head): another's
+  room, from in it or outside it (over its owner's `visit:me`, over visitors' marked bodies; never one's own, from
+  one's own eyes) and a world (`v.world`: at home over its user and its visitors; on each plot, over its owner and
+  its visitors; and over its user). A room without a world draws them itself, from `v.chats` and the `chat` event.
+- **The chat window** (`Visit.chat`; the panel's): bottom left, as in a game. Enter (or `/`) to type a line, Enter
+  to say it, Esc to stop; where it goes is before the box (Say, To <name>'s room, Lobby), picked there or with
+  `/s`, `/w <name>`, `/1` (`/l`), `/r` (back to whoever last said a line into a room of yours) and a space, and
+  it stays for the next line. Every line of every scope shows in it, coloured by scope (say white, a room's pink,
+  the lobby's gold). It fades 20 s after the last line, and comes back with the next one, or Enter.
 - **Text is text.** A page shows a line as text (a canvas, `textContent`), never as markup.
 
 ### 8.10 Landscapes
@@ -851,9 +871,14 @@ v.landscapeChanged()        // something marked userData.visitStatic (8.10) chan
 v.perf(on); v.perfReport()  // telemetry (the panel's ⏱; remembered in this browser; ?visit-perf=1): a corner of the page,
                             //   each second, this page's frames and stalls (long tasks) and Visit's own work by part (ms);
                             //   perfReport(): the last two minutes, a row a second. Nothing leaves the page
-v.say(text)                 // a line (8.9), over your user's head for everyone in the room they are in: true if said
-v.chats                     // the lines still showing where you are and in your room: [{ key, name, text, mine, owner, id, channel }]
-                            //   and the "chat" event, each as it is said
+v.say(text, to)             // a line (8.9): true if said. No to: everyone who can see your user (over their head);
+                            //   { key } (or a key): into that linked office's room; "lobby": everyone in the lobby
+v.chatTargets; v.lobbyChat  // whom say(text, { key }) can reach: [{ key, name }]; the lobby carries chat
+v.chats                     // the lines over heads still showing where you are and in your room: [{ key, name, text, mine,
+                            //   owner, id, channel }]
+v.chatLog                   // the last 100 lines of every scope: [{ at, scope ("say", "sim", "lobby"), key, name, text,
+                            //   mine, owner, id, channel, to ({ key, name }: the room a "sim" line went into) }]; and the
+                            //   "chat" event, each as it comes
 v.phone(on, { at, model })  // a phone in your room (8.8), at that spot (your units): Visit's own there (model: false, yours)
 v.phones; v.calls           // those linked to you whose rooms have phones: [{ key, name }]; your calls: [{ key, name,
                             //   state ("calling" | "ringing" | "on"), speaker, speaking }]
@@ -921,11 +946,16 @@ Visit.panel(element, v)                          // an optional ready-made lobby
                                                  //   your links (Go there, Back to my room, Put in my world, Unlink); your visitors
                                                  //   and who is linked to you (Kick, Unlink, their look / your model); visitors
                                                  //   look like (default); your world (Map); voice (🎙, who is near); calls (Pick up,
-                                                 //   speaker / handset, Hang up), 📞 call (those linked with phones); a say box (8.9);
+                                                 //   speaker / handset, Hang up), 📞 call (those linked with phones); the chat window (8.9);
                                                  //   notes a while (where a friend's world put your room, 8.4, once it
                                                  //   settles; a call that ended other than hung up); ⏱ telemetry on or
                                                  //   off; stars, door, status, Go offline / online:
-                                                 //   { element, release(), say() (the say box focused: for a key of yours) }
+                                                 //   { element, chat, release(), say() (the chat window open to type) }
+Visit.panel(element, v, { chat: false })         // the panel without the chat window (yours instead)
+Visit.chat(v, { element, fade })                 // the chat window (8.9) on its own, bottom left (--visit-chat-left,
+                                                 //   --visit-chat-bottom move it): Enter or / to type; /s, /w name, /1, /r;
+                                                 //   fades `fade` ms (20000) after the last line: { element, open(), close(),
+                                                 //   release() }
 Visit.map(v)                                     // an optional ready-made map of your world from above (the panel's Map): drag,
                                                  //   turn or type where friends' rooms sit; pick one: their view of you two;
                                                  //   { element, open(), close(), shown, release() }
@@ -986,7 +1016,7 @@ slowly while its tab is hidden.
 | watches | 8 watchers of a plot, 8 plots watched; 30 knocks to watch a minute; one declined tried again after 20 s |
 | world | a plot not said: what its scene covers, at most 200 units a side; 4 units between plots in a ring; out of a plot 0.3 units past it; stepping in answered within 3 s |
 | layout, seen | 256 each |
-| chat | a line at most 200 characters; 5 lines every 10 s, from a page and from each visitor; shown 4 to 12 s, by its length |
+| chat | a line at most 200 characters; 5 lines every 10 s, from a page and from each visitor, whatever the scope (the lobby counts them too); shown over a head 4 to 12 s, by its length; the chat window keeps 100 lines, and fades 20 s after the last |
 | landscapes | at most 16 MiB gzipped each; kept on disk at most 256 MiB in all (one per office, the oldest go first); 64 plots kept while their offices are away; sent a second after what is static last changed; a visitor's whole room waits at most 400 ms to hear whether it reads them |
 
 ## 11. Errors

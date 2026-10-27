@@ -599,11 +599,50 @@ async def main():
         check("A says a line in B's room: B has it, from A", await b.until("(c => c && c.text)(v.chats.find(c => c.name === 'A'))"), "hello from A")
         check("and B's world draws it over A's body, above its head", await b.until(
             "!!room.world.bubbles && room.world.bubbles.by.size === 1 && [...room.world.bubbles.by.values()][0].sprite.position.y > 1.8"), True)
-        await b.js("(f => { f.querySelector('input').value = 'hi A, from my panel'; f.requestSubmit(); })(document.querySelector('.visit-panel form[data-v=say]'))")
-        check("B says one from its panel's say box: A has it, from the room's owner", await a.until("(c => c && c.owner && c.text)(v.chats.find(c => c.name === 'B'))"), "hi A, from my panel")
+        async def enter(pg):   # the Enter key, as a person presses it
+            for t in ("keyDown", "keyUp"):
+                await pg.call("Input.dispatchKeyEvent", type=t, code="Enter", key="Enter", windowsVirtualKeyCode=13, **({"text": "\r"} if t == "keyDown" else {}))
+        cw = "document.querySelector('.visit-chat')"
+        check("B's panel has the chat window, bottom left, its hint there", await b.js(
+            f"(c => !!c && getComputedStyle(c).position === 'fixed' && c.getBoundingClientRect().left < 40 && innerHeight - c.getBoundingClientRect().bottom < 40)({cw})"), True)
+        await enter(b)
+        check("B presses Enter: the window opens, its box has the keys", await b.until(f"(c => c.classList.contains('typing') && document.activeElement === c.querySelector('input'))({cw})"), True)
+        await b.call("Input.insertText", text="hi A, from my chat")
+        await enter(b)
+        check("B types a line, Enter: A has it, over the room's owner", await a.until("(c => c && c.owner && c.text)(v.chats.find(c => c.name === 'B'))"), "hi A, from my chat")
+        check("and B's window shows it, the box gone again", await b.js(f"(c => [c.classList.contains('typing'), c.querySelector('.log').lastChild.textContent])({cw})"),
+              [False, "[B] says: hi A, from my chat"])
+        check("A's window too", await a.until(f"{cw}.querySelector('.log').lastChild.textContent"), "[B] says: hi A, from my chat")
         check("A's view of B's room draws it over B (B's mark), not A's own line (A's eyes are there)", await a.until(
-            "(b => !!b && b.by.size === 1 && [...b.by.values()][0].text === 'hi A, from my panel')(v._viewer && v._viewer.scene && v._viewer.scene.bubbles)"), True)
+            "(b => !!b && b.by.size === 1 && [...b.by.values()][0].text === 'hi A, from my chat')(v._viewer && v._viewer.scene && v._viewer.scene.bubbles)"), True)
         check("and B's world draws B's own over B's head too", await b.until("room.world.bubbles.by.size === 2"), True)
+        await enter(b)
+        await b.call("Input.insertText", text="/w A ")
+        check("/w A and a space: the box goes to A's room, the command gone", await b.until(
+            f"(c => c.dataset.scope === 'sim' && c.querySelector('select').selectedOptions[0].textContent === \"To A's room:\" && c.querySelector('input').value === '')({cw})"), True)
+        await b.call("Input.insertText", text="into your room")
+        await enter(b)
+        check("said: A has it in its chat, into its room, from B (over nobody's head)", await a.until(
+            "(l => l && l.scope === 'sim' && l.name === 'B' && l.to.key === v.key && l.text)(v.chatLog.at(-1))"), "into your room")
+        check("A's window: [B] to your room; B's: To A's room", (await a.js(f"{cw}.querySelector('.log').lastChild.textContent"), await b.js(f"{cw}.querySelector('.log').lastChild.textContent")),
+              ("[B] to your room: into your room", "To A's room: into your room"))
+        check("the lobby carries chat (its welcome said so)", (await a.js("v.lobbyChat"), await b.js("v.lobbyChat")), (True, True))
+        await enter(b)
+        check("B's box remembers where it last said a line", await b.until(f"{cw}.dataset.scope"), "sim")
+        await b.call("Input.insertText", text="/1 hello lobby")
+        await enter(b)
+        check("/1: a line to the lobby: A has it, and B (from the lobby)", (await a.until(f"(t => t.startsWith('[Lobby]') && t)({cw}.querySelector('.log').lastChild.textContent)"), await b.until(
+            f"(t => t.startsWith('[Lobby]') && t)({cw}.querySelector('.log').lastChild.textContent)")), ("[Lobby] [B]: hello lobby", "[Lobby] [B]: hello lobby"))
+        await enter(b)
+        await b.call("Input.insertText", text="half a thought")
+        await b.key("Escape", "Escape", 27, True)
+        await b.key("Escape", "Escape", 27, False)
+        check("Esc: the box goes, its line unsaid", (await b.until(f"!{cw}.classList.contains('typing')"), await a.js("v.chatLog.some(l => l.text === 'half a thought')")), (True, False))
+        await a.js("window.cw2 = Visit.chat(v, { fade: 300 })")
+        check("a window idle a while fades away", await a.until("cw2.element.classList.contains('idle')"), True)
+        await b.js("v.say('wake up')")
+        check("and comes back with the next line", await a.until("!cw2.element.classList.contains('idle') && cw2.element.querySelector('.log').lastChild.textContent"), "[B] says: wake up")
+        await a.js("cw2.release()")
         await a.shot("a_chat.png")
         await b.shot("b_chat.png")
         check("six lines at once: the sixth not said (5 every 10 s)", await a.js("(r => r[5])(Array.from({ length: 6 }, (_, i) => v.say('n' + i)))"), False)

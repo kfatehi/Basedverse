@@ -60,7 +60,7 @@ pub async fn run(url: String, mut hello: Hello, mut out: mpsc::UnboundedReceiver
                 // `world`: this visit-client takes knocks to watch (../WORLD.md), so others may make them; `links`:
                 // a knock it is let in on may start a link (a watch its page shows in a corner, 8.5).
                 let mut first = json!({ "type": "hello", "proto": PROTO, "name": hello.name, "sim": hello.sim,
-                                        "status": hello.status, "max_visitors": hello.max_visitors, "world": true, "links": true });
+                                        "status": hello.status, "max_visitors": hello.max_visitors, "world": true, "links": true, "chat": true });
                 if let Some(r) = &resume {
                     first["resume"] = json!(r);
                 }

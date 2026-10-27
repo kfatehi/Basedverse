@@ -517,12 +517,37 @@ async def t_link():
         await c_.send(type="bye")
 
 
+async def t_chat():
+    """Lobby chat (Visit 0.15): a line to everyone in the lobby that takes it, the sayer too; plain, capped, rate-limited."""
+    a, b = await join("C A", proto=lobby.PROTO3, chat=True), await join("C B", proto=lobby.PROTO3, chat=True)
+    old = await join("C Old", proto=lobby.PROTO3)
+    check("the welcome says the lobby relays chat", a.welcome.get("chat"), True)
+    await a.send(type="chat", text="  hello\tall \n")
+    la, lb = await a.expect("lobby_chat"), await b.expect("lobby_chat")
+    check("a says a line: b has it, and a too (in order), plain, from a",
+          (lb["text"], lb["from"]["name"], lb["from"]["id"], la["text"]), ("hello all", "C A", a.id, "hello all"))
+    check("an office whose hello did not say chat gets nothing", [m["type"] for m in await old.quiet()], [])
+    await b.send(type="chat", text="é" * 500)
+    check("a long line: cut to 200 characters", len((await a.expect("lobby_chat"))["text"]), 200)
+    await b.quiet()
+    await a.send(type="chat", text=" \n ")
+    check("an empty one: refused", (await a.expect("error"))["code"], "bad_message")
+    for i in range(4):
+        await a.send(type="chat", text="line %d" % i)
+    await a.send(type="chat", text="one too many")
+    got = [m for m in await a.quiet() if m["type"] in ("lobby_chat", "error")]
+    check("five lines in 10 s, the sixth refused", ([m.get("text") for m in got if m["type"] == "lobby_chat"], [m.get("code") for m in got if m["type"] == "error"]),
+          (["line 0", "line 1", "line 2", "line 3"], ["rate_limited"]))
+    for c_ in (a, b, old):
+        await c_.send(type="bye")
+
+
 async def main():
     global URL
     async with serve(lobby.handler, "127.0.0.1", 0, max_size=lobby.LIMITS["frame"], process_request=lobby.health) as server:
         URL = "ws://127.0.0.1:%d" % server.sockets[0].getsockname()[1]
         for t in (t_hello, t_hello_rules_and_separation, t_knock_refusals, t_visit, t_end_and_full, t_resume, t_resume_replays_visits, t_rename,
-                  t_resume_window_and_bye, t_knock_timeout_and_health, t_version_3, t_keys, t_watch, t_link):
+                  t_resume_window_and_bye, t_knock_timeout_and_health, t_version_3, t_keys, t_watch, t_link, t_chat):
             print("\n" + t.__name__[2:])
             try:
                 await t()

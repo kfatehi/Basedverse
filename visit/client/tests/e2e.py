@@ -606,7 +606,7 @@ async def main():
         near = lambda m: sorted((n["name"], n["distance"], "id" in n) for n in m["near"])
         pc, tc = await start_client("C", 7413, url)
         c = await Page(7413, tc).open()
-        await c.expect("ready")
+        kc = (await c.expect("ready"))["key"]
         await c.send(type="host", three="128")
         await c.until(lambda m: m["type"] == "lobby" and any(o["name"] == "B" and o["ready"] for o in m["offices"]))
         await c.send(type="knock", to=ids["B"])
@@ -698,6 +698,26 @@ async def main():
         await asyncio.sleep(0.5)
         check("A, linked to B but outside its room: its line stays in its own (empty) room, B's page has none",
               [t for t in quiet_types(b) if t == "chat"] + [t for t in quiet_types(c) if t == "chat"], [])
+        await b.send(type="say", text="seen from outside")
+        x = await a.until(chat)
+        await c.until(chat)
+        check("B says a line in its room: A, linked and outside it (B's room in A's corner), has it too, over B", pick(x, "channel", "key", "text", "owner", "scope"),
+              {"channel": la["channel"], "key": kb, "text": "seen from outside", "owner": True, "scope": None})
+        await a.send(type="say", text="hello B's room", to={"key": kb})
+        x, y = await b.until(chat), await c.until(chat)
+        check("A, outside, says a line into B's room (to: B's key): B's page has it, from A, into B's own room", pick(x, "scope", "home", "key", "name", "text", "channel"),
+              {"scope": "sim", "home": True, "key": ka, "name": "A", "text": "hello B's room", "channel": lb["channel"]})
+        check("and C, in B's room, by its visit there", pick(y, "scope", "home", "key", "name", "text", "channel"),
+              {"scope": "sim", "home": None, "key": ka, "name": "A", "text": "hello B's room", "channel": vc["channel"]})
+        await asyncio.sleep(0.3)
+        check("A's own line does not come back to it", [t for t in quiet_types(a) if t == "chat"], [])
+        await a.send(type="say", text="x", to={"key": kc})
+        check("into the room of an office A has no link with (C): refused", (await a.until(lambda m: m["type"] == "error"))["code"], "no_link")
+        await a.send(type="say", text="x", to=5)
+        check("a `to` that is no scope: refused", (await a.until(lambda m: m["type"] == "error"))["code"], "bad_message")
+        await b.send(type="say", text="hello lobby", to="lobby")
+        got = [pick(await pg.until(chat), "scope", "name", "text") for pg in (a, b, c)]
+        check("B says a line to the lobby: everyone in it has it (B too, in the lobby's order)", got, [{"scope": "lobby", "name": "B", "text": "hello lobby"}] * 3)
         await b.send(type="voice_where", me=[0, 1.6, 0], phone=[0, 1, 5], visitors=[[vbc["channel"], 2, 0, 5]])
         await b.send(type="speaker", channel=lb["channel"], on=True)
         nc = await c.until(lambda m: m["type"] == "voice_near" and any(n.get("phone") for n in m["near"]))

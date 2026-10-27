@@ -369,6 +369,8 @@ LIMITS2 = {
     "link_addr": 2048,           # bytes of a link's `addr`, as JSON
     "connections_per_ip": 8,
     "resume": 30,                # seconds a dropped session is kept
+    "chat": 200,                 # characters in a line of lobby chat (Visit 0.15)
+    "chats_per_10s": 5,          # lines of lobby chat an office may say in 10 s
 }
 END_REASONS = ("left", "kicked", "link_failed")
 
@@ -387,6 +389,8 @@ class Office2:
         self.key = None              # the endpoint it last published: its key, kept while its link is withdrawn
         self.world = False           # it takes knocks to watch (Visit 0.7 on: its hello said world: true)
         self.links = False           # it takes links: a knock answered with a watch, seen in a corner (Visit 0.8 on)
+        self.chat = False            # it takes lobby chat (Visit 0.15 on: its hello said chat: true)
+        self.said = collections.deque()   # when it said its last lines of lobby chat
         self.visiting = None         # the visit it is on, as a visitor
         self.hosting = set()         # the visits to it, as a host
         self.watching = set()        # the watches it has of others' plots (visits with watch: they see, nothing else)
@@ -635,8 +639,31 @@ def on2_rename(me, m):
     announce2()
 
 
+def on2_chat(me, m):
+    """A line for everyone in the lobby (Visit 0.15, like a game's general channel): to every office of the same
+    lobby that takes them (its hello said chat: true), the one who said it too, so that it shows in order. Plain text:
+    what is not printable becomes a space, trimmed, at most LIMITS2["chat"] characters; LIMITS2["chats_per_10s"] a
+    10 s at most. Nothing is kept."""
+    text = m.get("text")
+    if not isinstance(text, str):
+        return error2(me, "bad_message", "text is a string", "chat")
+    text = "".join(c if c.isprintable() else " " for c in text).strip()[:LIMITS2["chat"]].strip()
+    if not text:
+        return error2(me, "bad_message", "text is 1 to %d characters" % LIMITS2["chat"], "chat")
+    now = time.monotonic()
+    while me.said and now - me.said[0] >= 10:
+        me.said.popleft()
+    if len(me.said) >= LIMITS2["chats_per_10s"]:
+        return error2(me, "rate_limited", "at most %d lines every 10 s" % LIMITS2["chats_per_10s"], "chat")
+    me.said.append(now)
+    line = {"type": "lobby_chat", "from": {"id": me.id, "name": me.name, "key": me.key}, "text": text}
+    for o in OFFICES2.values():
+        if o.chat and o.proto == me.proto:
+            tell2(o, line)
+
+
 HANDLERS2 = {"link": on2_link, "status": on2_status, "max_visitors": on2_max_visitors, "knock": on2_knock,
-             "answer": on2_answer, "end": on2_end, "rename": on2_rename}
+             "answer": on2_answer, "end": on2_end, "rename": on2_rename, "chat": on2_chat}
 
 
 def welcome2(me, resumed):
@@ -648,7 +675,8 @@ def welcome2(me, resumed):
     visits = [v["id"] for v in VISITS2.values() if me.id in (v["host"], v["visitor"])]
     knocking = [{"id": k["id"], "to": k["to"]} for k in KNOCKS2.values() if k["from"] == me.id]
     tell2(me, {"type": "welcome", "proto": me.proto, "id": me.id, "name": me.name, "relays": RELAY_URLS,
-               "resume": me.resume, "resumed": resumed, "visits": visits, "knocking": knocking, "limits": dict(LIMITS2)})
+               "resume": me.resume, "resumed": resumed, "visits": visits, "knocking": knocking, "limits": dict(LIMITS2),
+               "chat": True})
 
 
 def visit_msg(v, me):
@@ -699,6 +727,7 @@ def hello2(ws, m):
     me.sim = {k: str(sim[k])[:40] for k in ("name", "version") if isinstance(sim.get(k), str)}
     me.world = m.get("world") is True
     me.links = m.get("links") is True
+    me.chat = m.get("chat") is True
     OFFICES2[me.id], BY_NAME2[name.casefold()] = me, me.id
     welcome2(me, False)
     announce2()
