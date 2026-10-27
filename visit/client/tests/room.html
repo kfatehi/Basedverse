@@ -113,7 +113,8 @@ async function build(v) {
     if (c.width !== c.clientWidth || c.height !== c.clientHeight) { renderer.setSize(c.clientWidth, c.clientHeight, false); top.aspect = c.clientWidth / c.clientHeight; top.updateProjectionMatrix(); }
     const world = window.room.world;
     if (world) {
-      const k = x => keys.has(x), input = { forward: (k("KeyW") ? 1 : 0) - (k("KeyS") ? 1 : 0), strafe: (k("KeyD") ? 1 : 0) - (k("KeyA") ? 1 : 0), run: k("ShiftLeft") };
+      const k = x => keys.has(x), input = { forward: (k("KeyW") ? 1 : 0) - (k("KeyS") ? 1 : 0), strafe: (k("KeyD") ? 1 : 0) - (k("KeyA") ? 1 : 0),
+        up: (k("Space") ? 1 : 0) - (k("KeyC") ? 1 : 0), run: k("ShiftLeft") };
       me.yaw += ((k("KeyQ") ? 1 : 0) - (k("KeyE") ? 1 : 0)) * 2 * dt;
       if (!world.inside) Object.assign(me, Visit.walk(me, input, dt, { speed: 3, blocked }));   // at home: our own walking, our own walls
       const at = world.frame(dt, me, input);
@@ -145,6 +146,7 @@ async function build(v) {
     // Where a visitor appears; in a world, where it stepped in (`at`), or the nearest free spot to it (a desk may be there).
     spawn: (who, { at } = {}) => { const near = at && freeNear(at.x, at.z), p = near ? { x: near[0], y: 1.6, z: near[1], yaw: at.yaw, pitch: 0 } : { x: 2, y: 1.6, z: 6, yaw: 0, pitch: 0 }; (window.spawns = window.spawns || []).push({ who: who.name, at: at || null, p, t: Math.round(performance.now()) }); return p; },
     // room.lift (the test sets it): a lift under every visitor, that far up from where they came in
+    get fly() { return window.room.fly; },   // room.fly (the test sets it): whether visitors may fly here, read at every move
     move: (pose, input, dt, who) => { window.movedFor = who && who.id; const p = Visit.walk(pose, input, dt, { speed: 2.5, blocked }); return window.room.lift != null ? Object.assign({}, p, { y: 1.6 + window.room.lift }) : p; },
     fov: 70,
     scene: { root: t.scene, three: t.THREE, renderer: t.renderer, near: 0.05, far: 100 },

@@ -237,7 +237,7 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `guest_add` | `key`, `name`? (≤ 24) | a guest: an office's key, as the lobby lists it (6.3) or a visit's peer has it (5.3), and the name it is known by; again for a key already there renames it. At most 256 (`too_many_guests`); not this office's own key |
 | `guest_remove` | `key` | no longer a guest; its watches of this plot end |
 | `world` | `on` (bool) | on: this office watches every guest online whose lobby entry says `world` (8.4), by itself, and keeps doing so (a declined or refused watch is tried again after 20 s); off: its watches end. No page for a minute: off |
-| `enter` | `channel` (a watch's), `pose` {`x`, `y`, `z`, `yaw`} (in the watched room's terms) | step into the room watched (8.4): out of any other room first (a visit there ends); refused by its host when full (`enter_refused`) |
+| `enter` | `channel` (a watch's), `pose` {`x`, `y`, `z`, `yaw`, `air`} (in the watched room's terms; `air`: how far above its floor, flying, 8.2) | step into the room watched (8.4): out of any other room first (a visit there ends); refused by its host when full (`enter_refused`) |
 | `exit` | `channel` | step out of it again: the watch goes on |
 | `place` / `unplace` | `key`, `x`, `z` (within 100 km), `turn` (0–3) / `key` | put a friend's plot in this office's world: its middle there, turned so many quarter turns (8.4); kept in the state file. At most 256 |
 | `seen` | `key`, `at` {`dx`, `dz` (m, within 100 km), `turn` (0–3), `size` ([w, d] m: this plot's)} \| null | where this office's world has that office's plot (8.4): its middle `dx`, `dz` metres from this plot's middle, turned `turn` quarter turns left; null, not in it. Told to that office over any link with it, and again over each new one (kept in memory, not in the state file). At most 256 |
@@ -281,7 +281,7 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `call` | `channel`, `act` | a call on that visit (8.8): they ring, answer, or hang up |
 | `chat` | `channel`, `key`, `name`, `text`, and `id` (a visitor's, by its visit there) or `owner` (true: the room's owner) | a line said (8.9): in this office's room by a visitor (that visit's channel, its `id`), or in the room its user is in (that visit's channel: its owner, or another visitor). Never this office's own |
 | `voice_near` | `channel`?, `near`: [{`key`, `name`, `distance` (m), `id`?, `phone`?}] | who is near this office's user (8.7), within `voice_range`: in its own room (no `channel`: as its visit-client has it), or in the room it is in (that visit's `channel`: as its owner's says). `id`: a visitor's, by its visit there; `phone`: a call on that room's speaker. When it changes; distances at most every second. `ready` has `voice_range` (45) |
-| `enter` / `exit` | `channel`, `pose`? {`x`, `y`, `z`, `yaw`} (for `enter`) | a watcher stepped into this room, there (host side: spawn it, as a visitor), or out of it; no `pose`: a link going there, spawned where newcomers go |
+| `enter` / `exit` | `channel`, `pose`? {`x`, `y`, `z`, `yaw`, `air`} (for `enter`) | a watcher stepped into this room, there (host side: spawn it, as a visitor), or out of it; no `pose`: a link going there, spawned where newcomers go |
 | `enter_refused` | `channel`, `reason` (`"full"`, or `"moved"`: a visit to a room began, and this office stepped out) | stepping into a watched room was refused, or undone: outside it |
 | `online` / `offline` | `office`, `knocking` / `away`? | the lobby session came up (after a drop: the same office if it resumed), with this office's own knocks still waiting ([{`id`, `to`, `link`?}]) / went down: `away: true` when the page took it out (`leave_lobby`), `false` when it is on its way back (`join_lobby`), absent when the lobby is out of reach |
 | `lobby` | `offices`: [{`id`, `name`, `status`, `sim`, `max_visitors`, `visitors`, `visiting`, `ready`, `key`, `watchers`, `world`, `links`}] | every change (6.3) |
@@ -457,7 +457,7 @@ Messages are JSON, each prefixed by its length (u32 big-endian). In order, relia
 | visitor | `{"landscape_want": "<hash>"}` | send that landscape: on a stream of its own (7.4), once a link for a hash |
 | visitor | `{"shared_adds": true}` | its page reads an `add` that names what it already has by uuid only (8.3; Visit 0.7 on): sent each time the link is up, passed to the host's page once as `shared_adds` |
 | host | `{"paused": true}` / `{"paused": false}` | the host's page went away / came back |
-| watcher | `{"enter": {"x", "y", "z", "yaw"} \| null}` / `{"exit": true}` | stepping into the room watched, there (clamped, passed to the host's page as `enter`; null: a link going there, spawned where newcomers go), or out (8.4, 8.5); in, it counts toward `max_visitors` |
+| watcher | `{"enter": {"x", "y", "z", "yaw", "air"} \| null}` / `{"exit": true}` | stepping into the room watched, there (clamped, passed to the host's page as `enter`; null: a link going there, spawned where newcomers go), or out (8.4, 8.5); in, it counts toward `max_visitors` |
 | host | `{"enter_refused": "full"}` | the room is full: the watcher stays outside |
 | either | `{"seen": {"dx", "dz", "turn", "size"} \| null}` | where the sender's world has the receiver's plot (8.4), or not; sent when it changes and each time a link comes up. Passed to the page as `seen` with only those fields |
 | either | `{"bye": "<reason>"}` | ending the visit (also sent to the lobby as `end`) |
@@ -583,6 +583,7 @@ data.
 |---|---|---|
 | `forward` | −1, 0 or 1 | W/↑ is 1, S/↓ is −1 |
 | `strafe` | −1, 0 or 1 | D/→ is 1 (right), A/← is −1 |
+| `up` | −1, 0 or 1 | Space, E or Page Up is 1 (up), C or Page Down is −1 (down): flying, where the room allows it |
 | `run` | boolean | Shift held |
 | `yaw` | radians | where the visitor is looking, left/right, relative to how it was facing when it arrived (positive: turned left) |
 | `pitch` | radians, −1.4 to 1.4 | up (positive) or down |
@@ -592,6 +593,15 @@ data.
 the mouse moves and sends where it is looking; the host applies it as is. Where the visitor stands is the
 host's to decide (`move`), against its own walls and furniture; the visitor's page walks at once by the
 host's `walk` and takes the host's answer (8.1). The host clamps every field to its range.
+
+**Flying is the room's choice.** A room that allows it (`host({ fly })`) lets a visitor's `up` lift it above the
+floor the room's `move` gives, at 4 m a second (or `fly.speed`), never below that floor, never above `fly.max`. A
+room that does not floats a visitor that is in the air (stepping in from a world while flying: the `enter` pose's
+`air`, how far above its own floor its page had it) gently down to its floor, at 1.5 m a second, after hanging there
+until two key deltas have had it at that height (at most a second: its world measures from the first it reads). Walking off the plot, it is home at the
+height it came in at, or lower if it floated down there. Either way the room's
+`move` sees the visitor on its floor and needs no change: Visit keeps how high above it the visitor is, and the
+height it sends (and keeps across a reload) is the floor plus that.
 
 ### 8.3 Points
 
@@ -878,6 +888,8 @@ v.host({
                                                     //   (r125 to r186), its renderer, and visitors' camera range (8.1)
   fov: 70,                                          // visitors' camera's vertical field of view, in degrees
   walk: { speed },                                  // optional: move() walks with Visit.walk at this speed: visitors walk at once
+  fly: true,                                        // optional: visitors may fly here (8.2), or { speed, max } in metres (a second;
+                                                    //   above the floor); without it, one in the air floats gently down. Read at every move
   plot: { center: [x, z], size: [w, d] }, unit: 1,  // this room's land in a world (8.4), in its units (without it: what its scene
                                                     //   covers); unit: metres in one
   preview: { x, y, z, yaw, pitch },                 // optional: where a link sees this room from, before going in (8.5); without
@@ -891,7 +903,8 @@ v.host({
 const world = v.world({ scene, renderer, ground, gap, clipOwn, bubbles, speaking });   // your whole scene and its renderer (host()'s by default);
                    //   bubbles (true): it draws the lines said (8.9) in the room your user is in over their speakers' heads;
                    //   speaking (true): a 🔊 over each one your user hears speaking there (8.7)
-const me = world.frame(dt, { x, y, z, yaw, pitch }, { forward, strafe, run });
+const me = world.frame(dt, { x, y, z, yaw, pitch, air }, { forward, strafe, up, run });   // air: how far above its floor your user
+                   //   is (flying), so a plot it steps into has it that high (8.2); up: as a visitor's input
 world.render(camera);
 world.plots        // [{ key, name, at: { x, z, turn }, rect: [x0, z0, x1, z1], inside, offline }] (offline: a guest's plot
                    //   kept while its office is away, 8.10)

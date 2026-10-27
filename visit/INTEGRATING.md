@@ -46,7 +46,8 @@ take them unless your user asks for something else. The defaults are Visit's own
   speaking, drawn by Visit (`bubbles`, `speaking`);
 - **the phone** (`visit.phone(true, { at })`): Visit's own desk phone on a stand where you put it, ringing, its handset
   lifted on a call, its lamp lit on speaker;
-- your user's **voice** on the panel's 🎙, heard by distance in the same room.
+- your user's **voice** on the panel's 🎙, heard by distance in the same room;
+- **no flying** in your room: a visitor arriving in the air floats gently down to your floor (`fly` lets them fly).
 
 What has no default is your room's own: what your landscape is, where the phone stands, which interactions (cosmetic
 only, step 5), your user's avatar. When your user asks for something else (their own panel, a phone of their own, no
@@ -357,6 +358,10 @@ visit.host({
   says when it rings (ring your phone), and `visit.pickUp(key)`, `visit.hangUp(key)`. The handset is private;
   `visit.speaker(key, true)` puts the call on speaker: everyone near your phone, your visitors too, hears it and
   is heard in it. How it looks and works in your room (lifting the handset, a button for speaker) is yours.
+- **Flying** (optional, your call): `fly: true` in `visit.host` (or `{ speed, max }`, in metres) lets visitors fly in
+  your room: Space, E or Page Up up, C or Page Down down. Your `move` needs no change: it sees them on your floor, and
+  Visit keeps how high above it they are. Without it, one that arrives flying (from a world: pass your user's height
+  above your floor as `air` to `world.frame` while they fly) floats gently down to your floor.
 - **What carries**: objects moving, appearing and going, materials' colours and opacity, canvas textures you
   redraw (`texture.needsUpdate = true`: encoded again in the background and sent at most once a second, so mark one
   changed only when its picture did), the background and the fog. **What does not**: custom shaders (a
@@ -569,6 +574,8 @@ marked offline, walked into but not through its walls; start it again, and the p
       (`visit.avatar`), if you like.
 - [ ] Voice: with the microphone on, a visitor near your user hears them, and they the visitor; farther, neither.
 - [ ] A phone, if you have one: a call rings, is picked up, heard on the handset; on speaker, by those near it.
+- [ ] Flying, if your room allows it: a visitor holding Space rises and stays up; without it, one stepping in from a
+      world in the air floats down to your floor.
 - [ ] Chat: a line typed (the panel's Say box, or `visit.say`) shows over its speaker's head for everyone in the
       room; your own keys ignore a text box (typing "w" there does not walk).
 - [ ] Your landscape (what never changes) marked `userData.visitStatic`; nothing that moves or changes under it,

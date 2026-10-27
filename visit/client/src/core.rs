@@ -1766,7 +1766,8 @@ fn started(v: &Visit) -> Value {
 /// Where a watcher steps into a room, in that room's own terms: x, y, z and yaw, each a number in range.
 fn clamp_pose(m: &Value) -> Value {
     let num = |k: &str| m.get(k).and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0.0, |x| x.clamp(-1e6, 1e6));
-    json!({ "x": num("x"), "y": num("y"), "z": num("z"), "yaw": num("yaw") })
+    let air = m.get("air").and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0.0, |x| x.clamp(0.0, 1e6));
+    json!({ "x": num("x"), "y": num("y"), "z": num("z"), "yaw": num("yaw"), "air": air })
 }
 
 /// A point (8.3): where the visitor looked as it clicked, `yaw` and `pitch` in the same terms as its input, each
@@ -1862,7 +1863,7 @@ fn clamp_input(m: &Value) -> Value {
     let step = |k: &str| m.get(k).and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0, |x| x.round().clamp(-1.0, 1.0) as i64);
     let angle = |k: &str, lim: f64| m.get(k).and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0.0, |x| x.clamp(-lim, lim));
     json!({
-        "forward": step("forward"), "strafe": step("strafe"), "run": m.get("run").and_then(Value::as_bool).unwrap_or(false),
+        "forward": step("forward"), "strafe": step("strafe"), "up": step("up"), "run": m.get("run").and_then(Value::as_bool).unwrap_or(false),
         "yaw": angle("yaw", 1e6), "pitch": angle("pitch", 1.4),
         "t": m.get("t").and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0.0, |x| x.clamp(0.0, 1e12)),
     })
@@ -1913,10 +1914,18 @@ mod tests {
 
     #[test]
     fn inputs_are_clamped() {
-        let i = clamp_input(&json!({ "forward": 5, "strafe": -0.6, "run": "yes", "yaw": 3.0, "pitch": -9 }));
-        assert_eq!(i, json!({ "forward": 1, "strafe": -1, "run": false, "yaw": 3.0, "pitch": -1.4, "t": 0.0 }));
+        let i = clamp_input(&json!({ "forward": 5, "strafe": -0.6, "up": 0.7, "run": "yes", "yaw": 3.0, "pitch": -9 }));
+        assert_eq!(i, json!({ "forward": 1, "strafe": -1, "up": 1, "run": false, "yaw": 3.0, "pitch": -1.4, "t": 0.0 }));
         let j = clamp_input(&json!({ "t": 1234.5 }));
-        assert_eq!(j, json!({ "forward": 0, "strafe": 0, "run": false, "yaw": 0.0, "pitch": 0.0, "t": 1234.5 }));
+        assert_eq!(j, json!({ "forward": 0, "strafe": 0, "up": 0, "run": false, "yaw": 0.0, "pitch": 0.0, "t": 1234.5 }));
+    }
+
+    #[test]
+    fn an_entering_pose_says_how_high_in_the_air() {
+        let p = clamp_pose(&json!({ "x": 1, "y": 2, "z": 3, "yaw": 0.5, "air": 7.5, "fly": true }));
+        assert_eq!(p, json!({ "x": 1.0, "y": 2.0, "z": 3.0, "yaw": 0.5, "air": 7.5 }));
+        assert_eq!(clamp_pose(&json!({ "air": -4 }))["air"], json!(0.0));
+        assert_eq!(clamp_pose(&json!({ "x": 1 }))["air"], json!(0.0));
     }
 
     #[test]

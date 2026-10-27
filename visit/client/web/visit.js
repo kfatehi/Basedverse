@@ -16,6 +16,13 @@
   const VERSION = "0.14.1", PROTO = "basedverse-visit-local/2";
   const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, LOOK = 0.0025;
   const POINT_MS = 200, AIM_MS = 125;   // a visitor's points, at most one this often; what it aims at, looked for this often
+  // Flying (SPEC 8.2): how fast a visitor rises or sinks in a room that lets it fly (v.host fly: true), and how gently
+  // one sinks back to the floor where flying is not allowed, in metres a second; and the keys for up and down.
+  // A visitor arriving in the air hangs there until two key deltas have had it at that height: its world measures its
+  // height from the first it reads (World._frame yBase), and the one sent as it steps in may not be (the next, at
+  // most SCENE_KEY_MS on, is).
+  const FLY_SPEED = 4, FLOAT_DOWN = 1.5, FLOAT_KEYS = 2;
+  const UP_KEYS = ["Space", "KeyE", "PageUp"], DOWN_KEYS = ["KeyC", "PageDown"];
   // What the host hears many times a second: none of it changes what the page shows, so none fires "change".
   const QUIET = new Set(["input", "point", "keyframe", "link_stats", "scene", "scene_lost", "scene_resync"]);
   // A timer from a Worker: a page's own timers slow to once a second (or less) while its tab is in the
@@ -1045,7 +1052,7 @@
         const h = { id: m.id, channel: m.channel, visitor: m.peer || {}, guest: m.guest === true, watch: m.watch === true, link: m.link === true, inside: m.watch !== true || m.inside === true,
           pose: null, yaw0: 0, input: null, inputAt: 0, keyNext: true, fails: 0, sceneSent: false, posed: null, sharedAdds: m.shared_adds === true,
           landscapes: m.landscapes === true, since: performance.now() };
-        if (m.state && m.state.pose && h.inside) { h.pose = m.state.pose; h.yaw0 = m.state.yaw0 || 0; }   // back after this page reloaded
+        if (m.state && m.state.pose && h.inside) { h.pose = m.state.pose; h.yaw0 = m.state.yaw0 || 0; h.air = Math.max(0, Number(m.state.air) || 0); h.airKeys = 0; }   // back after this page reloaded
         this._hosted.set(m.channel, h);
         if (h.inside) this._spawn(h);
         this._avatarWants();
@@ -1588,7 +1595,10 @@
     // THREE namespace it was made with, its renderer and its visitors' camera range. `fov`: that camera's vertical
     // field of view, in degrees. `walk` (optional): { speed }, when `move` walks with Visit.walk at that speed:
     // the visitor's page then walks at once, before the host's answer. Until this is called, this office is not
-    // in the lobby to be visited, and cannot knock: every room takes part with its scene.
+    // in the lobby to be visited, and cannot knock: every room takes part with its scene. `fly` (optional): true, or
+    // { speed, max } in metres (a second; above the floor), when this room lets its visitors fly: their `up` (8.2)
+    // lifts them above the floor its `move` gives. Without it, a visitor that came in high (from a world, in the air)
+    // floats gently down to that floor. It is read at every move, so a room may change it.
     host(hooks) {
       if (!hooks || typeof hooks.spawn !== "function" || typeof hooks.move !== "function") throw new Error("visit.host needs spawn and move functions");
       const sc = hooks.scene;
@@ -1603,6 +1613,7 @@
       if (pl != null && !(isObj(pl) && Array.isArray(pl.center) && Array.isArray(pl.size) && pl.center.length === 2 && pl.size.length === 2
         && [...pl.center, ...pl.size].every(Number.isFinite) && pl.size[0] > 0 && pl.size[1] > 0)) throw new Error("visit.host: plot is { center: [x, z], size: [w, d] }");
       if (hooks.unit != null && !(Number(hooks.unit) > 0)) throw new Error("visit.host: unit is how many metres one of the scene's units is (a number above 0)");
+      if (hooks.fly != null && typeof hooks.fly !== "boolean" && !isObj(hooks.fly)) throw new Error("visit.host: fly is true, false or { speed, max } (metres)");
       // `preview` (optional): { x, y, z, yaw, pitch }, where a link sees this room from before going in (8.5); without
       // it, from above its plot, going round.
       const pv = hooks.preview;
@@ -1633,14 +1644,19 @@
     _spawn(h, at) {
       if (!this._hooks || h.pose) return;
       try { h.pose = Object.assign({}, this._hooks.spawn(h.visitor, at ? { at } : {})); h.yaw0 = h.watch ? 0 : h.pose.yaw || 0; }
-      catch (e) { console.error("visit: spawn threw", e); }
+      catch (e) { console.error("visit: spawn threw", e); return; }
+      // One stepping in from a world in the air (at.air: how far above its own floor its page had it) is that high
+      // above this room's floor: it flies on there, or floats down to it (_step).
+      h.air = at ? Math.max(0, Number(at.air) || 0) : 0;
+      h.pose.y = (Number(h.pose.y) || 0) + h.air;
+      h.airKeys = 0;
     }
 
     _hostEnter(m) {
       const h = this._hosted.get(m.channel);
       if (!h || !h.watch) return;
       Object.assign(h, { inside: true, pose: null, input: null, keyNext: true, fails: 0 });
-      const at = isObj(m.pose) ? { x: Number(m.pose.x) || 0, y: Number(m.pose.y) || 0, z: Number(m.pose.z) || 0, yaw: Number(m.pose.yaw) || 0 } : null;
+      const at = isObj(m.pose) ? { x: Number(m.pose.x) || 0, y: Number(m.pose.y) || 0, z: Number(m.pose.z) || 0, yaw: Number(m.pose.yaw) || 0, air: Math.max(0, Number(m.pose.air) || 0) } : null;
       this._spawn(h, at);
       this._visitorsList();
     }
@@ -1724,7 +1740,7 @@
         const body = sync.entries(moved), all = key || ready.some(h => h.keyNext) ? sync.entries(sync.dynamicRecs()) : null;
         for (const h of ready) {
           const k = key || h.keyNext, p = h.pose, posed = p ? [p.x, p.y, p.z, p.yaw, p.pitch, h.input && h.input.t].join() : "-";
-          if (k || body.n || posed !== h.posed) { this._sendDelta(h, k ? all : body, k, now); h.posed = posed; h.keyNext = false; }
+          if (k || body.n || posed !== h.posed) { this._sendDelta(h, k ? all : body, k, now); h.posed = posed; h.keyNext = false; if (k && p) h.airKeys = (h.airKeys || 0) + 1; }
         }
         for (const h of hs) {   // the whole room to a visitor starting: once its visit-client said it reads landscapes (8.10), or a moment on (an older one never says)
           if (h.sceneSent || (!h.landscapes && sync.statics.length && now - h.since < LAND_WAIT)) continue;
@@ -2127,6 +2143,9 @@
       if (ver === 1 && (!w.watch || w.inside)) {
         this._sceneReconcile(s, dv.getFloat64(12), dv.getFloat32(20), dv.getFloat32(24), dv.getFloat32(28), dv.getFloat32(32), now);
         if (w.watch) s.hostPose = { x: dv.getFloat32(24), y: dv.getFloat32(28), z: dv.getFloat32(32) };
+        // the height its host first had us at, from the first delta itself (where we stepped on, in the air or not):
+        // a slow page draws after several, by when a stair, a lift or a float down has moved us on
+        if (w.watch && s.yBase == null && Number.isFinite(s.hostPose.y)) { s.yBase = s.hostPose.y; s.vis.y = 0; }
       }
       const n = dv.getUint32(44);
       let at = 48;
@@ -2323,16 +2342,32 @@
       const dt = Math.min(0.25, (now - (h.movedAt || now)) / 1000);
       h.movedAt = now;
       const fresh = h.input && now - h.inputAt < STALE_MS;
-      const input = fresh ? h.input : { forward: 0, strafe: 0, run: false, yaw: h.input ? h.input.yaw : 0, pitch: h.input ? h.input.pitch : 0 };
+      const input = fresh ? h.input : { forward: 0, strafe: 0, up: 0, run: false, yaw: h.input ? h.input.yaw : 0, pitch: h.input ? h.input.pitch : 0 };
+      // The room's move sees the visitor on its floor; Visit keeps how far above it the visitor flies (h.air).
+      const air = h.air || 0;
+      let p;
       try {
-        const turned = Object.assign({}, h.pose, { yaw: h.yaw0 + (input.yaw || 0), pitch: input.pitch || 0 });
-        h.pose = Object.assign({}, this._hooks.move(turned, input, dt, { id: h.id, visitor: h.visitor }) || turned);
+        const turned = Object.assign({}, h.pose, { y: (Number(h.pose.y) || 0) - air, yaw: h.yaw0 + (input.yaw || 0), pitch: input.pitch || 0 });
+        p = Object.assign({}, this._hooks.move(turned, input, dt, { id: h.id, visitor: h.visitor }) || turned);
         h.fails = 0;
       } catch (e) { return this._hookFailed(h, "move", e); }
+      h.air = !this._hooks.fly && (h.airKeys || 0) < FLOAT_KEYS ? air : this._air(air, input, dt);
+      p.y = (Number(p.y) || 0) + h.air;
+      h.pose = p;
       if (now - (h.keptAt || 0) >= 200) {   // where the visitor stands, kept by visit-client for a reload of this page
         h.keptAt = now;
-        this._send({ type: "pose", channel: h.channel, state: { pose: h.pose, yaw0: h.yaw0 } });
+        this._send({ type: "pose", channel: h.channel, state: { pose: h.pose, yaw0: h.yaw0, air: h.air || 0 } });
       }
+    }
+
+    // How far above the floor a visitor is after dt (scene units): where this room lets it fly, its `up` lifts or
+    // lowers it (no lower than the floor, no higher than fly.max); elsewhere it floats gently down.
+    _air(air, input, dt) {
+      const f = this._hooks.fly, u = this._unit();
+      if (!f) return Math.max(0, air - FLOAT_DOWN / u * dt);
+      const speed = isObj(f) && Number(f.speed) > 0 ? Number(f.speed) : FLY_SPEED, max = isObj(f) && Number(f.max) >= 0 ? Number(f.max) / u : Infinity;
+      const up = Math.max(-1, Math.min(1, Number(input.up) || 0));
+      return Math.min(max, Math.max(0, air + up * speed / u * dt));
     }
 
     _hookFailed(h, hook, e) {
@@ -2369,7 +2404,7 @@
       element.appendChild(hint);
       const locked = () => !!document.pointerLockElement && (document.pointerLockElement === canvas || document.pointerLockElement === view.gl);
       const ignore = e => e.ctrlKey || e.metaKey || e.altKey || (e.target && (e.target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)));
-      const KEYS = ["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "ShiftLeft", "ShiftRight"];
+      const KEYS = ["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "ShiftLeft", "ShiftRight", ...UP_KEYS, ...DOWN_KEYS];
       const changed = () => { view.changedAt = view.changedAt || performance.now(); this._sendInput(performance.now(), true); };   // at once (at most every 8 ms): no waiting for a tick
       const down = e => {
         if (!this._inRoom() || !view.active || ignore(e) || !KEYS.includes(e.code)) return;
@@ -2502,7 +2537,7 @@
       const k = c => v.keys.has(c);
       this._send({ type: "input", forward: (k("KeyW") || k("ArrowUp") ? 1 : 0) - (k("KeyS") || k("ArrowDown") ? 1 : 0),
         strafe: (k("KeyD") || k("ArrowRight") ? 1 : 0) - (k("KeyA") || k("ArrowLeft") ? 1 : 0),
-        run: k("ShiftLeft") || k("ShiftRight"), yaw: v.yaw, pitch: v.pitch, t: now });
+        up: (UP_KEYS.some(k) ? 1 : 0) - (DOWN_KEYS.some(k) ? 1 : 0), run: k("ShiftLeft") || k("ShiftRight"), yaw: v.yaw, pitch: v.pitch, t: now });
     }
 
     // A delta of the scene of the room visited, or of a plot watched (SPEC 5.4).
@@ -2729,7 +2764,7 @@
   // you, by its walls), drawn there by your page as yourself; walk off it and you are home again.
   //
   //   const world = v.world({ scene, renderer });   // your whole scene, and its renderer (default: host()'s)
-  //   every frame:  const me = world.frame(dt, { x, y, z, yaw, pitch }, { forward, strafe, run });
+  //   every frame:  const me = world.frame(dt, { x, y, z, yaw, pitch, air }, { forward, strafe, up, run });   // air: how high above its floor (flying)
   //                 (where your page has its user, in its room's terms, and what they press; `me` is where they
   //                 are now: at home as you said, or in a plot as its host has them, `me.in` = { key, name })
   //                 world.render(camera);   (instead of renderer.render(scene, camera))
@@ -2920,7 +2955,7 @@
     _frame(dt, me, input) {
       const v = this.v, T = this.T, now = performance.now();
       dt = Math.min(0.1, Math.max(0, Number(dt) || 0));
-      me = { x: Number(me.x) || 0, y: Number(me.y) || 0, z: Number(me.z) || 0, yaw: Number(me.yaw) || 0, pitch: Number(me.pitch) || 0 };
+      me = { x: Number(me.x) || 0, y: Number(me.y) || 0, z: Number(me.z) || 0, yaw: Number(me.yaw) || 0, pitch: Number(me.pitch) || 0, air: Math.max(0, Number(me.air) || 0) };
       this.look = { yaw: me.yaw, pitch: me.pitch };
       if (this.bounce) { const b = this.bounce; this.bounce = null; this.home = b; return Object.assign({}, b, { yaw: me.yaw, pitch: me.pitch, in: null }); }
       const list = this._layout();
@@ -2937,7 +2972,7 @@
         this._enter(x, me, now);
       }
       const w = x.w, s = w.scene, h = this._holder(x), yaw = me.yaw - x.at.turn * Math.PI / 2;
-      const inp = { forward: Math.sign(Number(input.forward) || 0), strafe: Math.sign(Number(input.strafe) || 0), run: !!input.run };
+      const inp = { forward: Math.sign(Number(input.forward) || 0), strafe: Math.sign(Number(input.strafe) || 0), up: Math.sign(Number(input.up) || 0), run: !!input.run };
       if (s.walk && !w.paused) { const q = walk({ x: s.pose.x, z: s.pose.z, yaw }, inp, dt, s.walk); s.pose.x = q.x; s.pose.z = q.z; }
       s.hist.push([now, s.pose.x, s.pose.z]);
       while (s.hist.length > 2 && now - s.hist[0][0] > 2000) s.hist.shift();
@@ -2949,7 +2984,10 @@
       if (hp && (Math.abs(hp.x - pl.center[0]) > pl.size[0] / 2 + margin || Math.abs(hp.z - pl.center[1]) > pl.size[1] / 2 + margin)) {
         this._exit(w);   // its host has us off its plot: home again, walking on from there
         const out = new T.Vector3(hp.x, 0, hp.z).applyMatrix4(h.place.matrix);
-        this.home = { x: out.x, y: this.yHome, z: out.z, yaw: me.yaw, pitch: me.pitch };
+        // home at the height we came with, or lower if its host had us lower (floated down from flying in): never
+        // higher (a room's upstairs is not ours)
+        const rise = s.yBase == null ? 0 : (s.pose.y + s.vis.y - s.yBase) * x.k;
+        this.home = { x: out.x, y: this.yHome + Math.min(0, rise), z: out.z, yaw: me.yaw, pitch: me.pitch };
         this.yHome = null;
         v._home = { x: out.x, y: this.home.y, z: out.z, yaw: me.yaw };
         return Object.assign({}, this.home, { in: null });
@@ -2964,7 +3002,7 @@
 
     _enter(x, me, now) {
       const w = x.w, s = w.scene, h = this._holder(x), p = new this.T.Vector3(me.x, 0, me.z).applyMatrix4(h.inverse), yaw = me.yaw - x.at.turn * Math.PI / 2;
-      this.v._send({ type: "enter", channel: w.channel, pose: { x: p.x, y: me.y / x.k, z: p.z, yaw } });
+      this.v._send({ type: "enter", channel: w.channel, pose: { x: p.x, y: me.y / x.k, z: p.z, yaw, air: me.air / x.k } });
       w.inside = true; this.in = w.channel;
       Object.assign(s, { pose: { x: p.x, y: 0, z: p.z }, yaw0: 0, hist: [], vis: { x: 0, y: 0, z: 0 }, hostPose: null, inAt: now, yBase: null });
       this.yHome = me.y;
@@ -2989,10 +3027,10 @@
     // The input while in a plot, in its terms (its look absolute: it came from a world): on every change (at most
     // every 8 ms) and every 33 ms regardless.
     _input(w, inp, yaw, pitch, now) {
-      const sig = [inp.forward, inp.strafe, inp.run, yaw.toFixed(3), pitch.toFixed(3)].join();
+      const sig = [inp.forward, inp.strafe, inp.up, inp.run, yaw.toFixed(3), pitch.toFixed(3)].join();
       if (now - this.sent.at < (sig !== this.sent.sig ? INPUT_MIN_MS : INPUT_MS)) return;
       this.sent = { at: now, sig };
-      this.v._send({ type: "input", forward: inp.forward, strafe: inp.strafe, run: inp.run, yaw, pitch: Math.max(-1.4, Math.min(1.4, pitch)), t: now });
+      this.v._send({ type: "input", forward: inp.forward, strafe: inp.strafe, up: inp.up, run: inp.run, yaw, pitch: Math.max(-1.4, Math.min(1.4, pitch)), t: now });
     }
 
     // While in a plot: point where you look (SPEC 8.3). Home: out of the plot you are in.
