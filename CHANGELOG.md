@@ -9,6 +9,33 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.12.0 — 2026-10-26
+
+**Landscapes: what never changes in a room is sent once, and kept.** A room marks its ground, walls, trees and
+furniture as landscape (`userData.visitStatic = true`, SPEC 8.10). Visit sends the landscape to each visitor once:
+their visit-client keeps it on disk, by its hash, so a visit, a world's watch, a reload or a reconnect needs only
+the rest. The host's page also stops looking at it 30 times a second. And **a friend's plot stays when they go
+offline**: your world keeps drawing their last landscape where it was, marked offline, and you walk into it (its
+walls stop you; nobody is there to walk you). It goes live again when they come back, and is forgotten if they
+shut their door to you or un-star you.
+
+- visit.js: `userData.visitStatic`, `v.landscapeChanged()`; `world.plots`' `offline`; kept plots drawn and walled in
+  your world (`Visit.map` and the panel say which are offline). Every uuid in a landscape is renamed in order, so
+  the same landscape is the same JSON, and the same hash, at every load.
+- visit-client: the page frame flag bit 5 (this room's landscape); the page messages `plot_keep`, `plot_load`,
+  `plot_forget`; to the page `landscape`, `landscapes`, `plot_forgotten`, and `ready`'s `kept`; the link control
+  messages `landscape`, `landscape_want`, `landscapes`, and stream 3 (a landscape); `--cache-dir` /
+  `VISIT_CACHE_DIR` (default: `landscapes/` beside the state file). A visitor on 0.11 or older gets the whole room,
+  landscape and all, as before.
+
+### What an integration does
+
+1. Get visit-client 0.12.0 (`bin/setup` again, download; or this release).
+2. Mark your landscape: `obj.userData.visitStatic = true` on what never changes (not people, screens, signs or
+   anything a visitor clicks to change). Nothing breaks without it: your room is sent whole, as before.
+3. If your page keeps its own state file setting (`VISIT_STATE_FILE`), landscapes go beside it; else set
+   `VISIT_CACHE_DIR`, or they last for the run only.
+
 ## v0.11.0 — 2026-10-26
 
 **Chat: type a line, and it shows over your head.** Everyone in the room you are in sees it (SPEC 8.9), and

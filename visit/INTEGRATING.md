@@ -316,6 +316,12 @@ visit.host({
   `visit.listener({ x, y, z, yaw })` each frame. Your visitors it takes from where your room has them. A
   page's Content-Security-Policy needs `blob:` for worklets too (as for the ticker's Worker), and the browser
   WebCodecs (Chrome, Edge, Safari, recent Firefox). Headphones keep your user's speakers out of their microphone.
+- **Your landscape** (recommended, the bigger your room the more): mark what never changes, its ground, walls,
+  trees and furniture, with `obj.userData.visitStatic = true` (everything under it goes with it). Visit then sends
+  it to each visitor once, who keeps it (by its hash: the same landscape is never sent twice, across visits and
+  reloads), and stops looking at it 30 times a second. While you are away, your guests' worlds keep drawing it
+  where your plot was, and walk them into its walls. Leave out what moves or changes (people, screens, signs,
+  agents): those go as before. If something marked does change in itself, call `visit.landscapeChanged()`.
 - **Chat**: your user types a line (the panel's say box, or `visit.say(text)`) and everyone in the room they are in
   sees it over their head for a few seconds; nobody else. With a world (step 9) Visit draws the bubbles in your room
   too; without one, draw them yourself from `visit.chats` (`Visit.bubble(THREE, text, unit)` makes one). A key of your

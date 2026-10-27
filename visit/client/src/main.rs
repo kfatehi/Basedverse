@@ -4,6 +4,7 @@
 mod core;
 mod frames;
 mod link;
+mod land;
 mod lobby;
 mod page;
 mod state;
@@ -56,6 +57,10 @@ struct Args {
     /// start joins the lobby, with a new key and no guests.
     #[arg(long, env = "VISIT_STATE_FILE")]
     state_file: Option<PathBuf>,
+    /// A directory where it keeps friends' landscapes (the parts of their rooms that never change: sent once) and
+    /// their plots to draw while they are away; none: beside the state file (landscapes/), or for this run only.
+    #[arg(long, env = "VISIT_CACHE_DIR")]
+    cache_dir: Option<PathBuf>,
 }
 
 /// Compares two secrets in time that does not depend on where they differ.
@@ -161,7 +166,9 @@ async fn run() -> ExitCode {
     });
 
     println!("{}", json!({ "ready": true, "port": a.port, "version": VERSION, "proto": page::PROTO }));
-    let code = core::Core::new(lobby_tx, core_tx, relays, a.max_visitors, a.idle_exit, saved, fresh, a.state_file.clone()).run(core_rx).await;
+    let cache = a.cache_dir.clone().or_else(|| a.state_file.as_deref().map(|f| f.parent().unwrap_or(std::path::Path::new(".")).join("landscapes")));
+    let lands = land::Lands::open(cache);
+    let code = core::Core::new(lobby_tx, core_tx, relays, a.max_visitors, a.idle_exit, saved, fresh, a.state_file.clone(), lands).run(core_rx).await;
     ExitCode::from(code as u8)
 }
 

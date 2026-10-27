@@ -29,6 +29,9 @@ const AUDIO: u8 = 8;
 /// another visitor near them; a call's, from a phone on speaker to those near it, and theirs to the call. Who spoke
 /// (an id, then a name, each a length byte and UTF-8), then the Opus packet.
 const RELAY: u8 = 16;
+/// A landscape (8.10), from the page: its own, gzipped JSON (its channel is ignored). Another office's goes to the
+/// page as text (`landscape`), never dropped as a frame may be.
+const LAND: u8 = 32;
 /// The most one packet of voice takes (20 ms of Opus is some tens of bytes).
 pub const MAX_AUDIO: usize = 1000;
 /// The most an avatar takes gzipped, and unpacked.
@@ -107,6 +110,14 @@ pub fn scene_from_page(b: &[u8]) -> Option<(u16, Bytes)> {
 /// The page's own avatar, gzipped (its channel is ignored), if the frame is one and not too big.
 pub fn avatar_from_page(b: &[u8]) -> Option<Bytes> {
     if b.len() < 11 || b[2] != AVATAR || b.len() - 11 > MAX_AVATAR {
+        return None;
+    }
+    Some(Bytes::copy_from_slice(&b[11..]))
+}
+
+/// The page's own landscape, gzipped, if the frame is one and not too big.
+pub fn land_from_page(b: &[u8]) -> Option<Bytes> {
+    if b.len() < 12 || b[2] != LAND || b.len() - 11 > MAX_SCENE {
         return None;
     }
     Some(Bytes::copy_from_slice(&b[11..]))

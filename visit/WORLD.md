@@ -21,6 +21,9 @@ What we agreed on, and what we did not need to:
 - **You can see where a friend has put you**: each friend's world tells you where your room sits in it (on the
   Map, pick them: their view of the two of you), and nothing else of it. Put each other flush, if you like, and
   walking across is seamless; nobody has to agree to it. (Visit 0.7 to 0.9 had edges, agreed by both: gone.)
+- **A friend away is still there.** A room's landscape (what never changes: SPEC 8.10) is kept by its guests: when
+  its office goes offline, your world keeps drawing it where it was, marked offline, and you can walk into it (not
+  through its walls). If they shut their door to you, or un-star you, it goes.
 - **Someone you are not guests with** can still be in your world for a while: link with them (Visit 0.8, SPEC
   8.5), and once they say yes, their room shows in your corner; **Put in my world** makes it a plot round yours
   until the link ends.

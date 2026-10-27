@@ -147,6 +147,7 @@ visit-client --lobby wss://lobby.example/ --name "Magic Room" --sim my-sim/1.0 \
 | `--origins` | `VISIT_ORIGINS` | none | the page origins allowed to connect (`http://localhost:3000`, comma-separated); none: any page with the token (section 3, point 4) |
 | `--relays` | `VISIT_RELAYS` | the lobby's | the relays for links: `none`, `default` (iroh's own), or URLs, comma-separated |
 | `--state-file` | `VISIT_STATE_FILE` | none | a file where it keeps what outlasts a run: whether the office is away (`leave_lobby`, 5.2), so a restart stays away; its key (section 2), so it is the same office to its guests' hosts; its door and its guests; its world's layout (8.4); whose look its visitors have (8.6). Readable by its owner only (section 3, point 10). None: every start joins the lobby, with a new key and no guests. A launcher SHOULD give one |
+| `--cache-dir` | `VISIT_CACHE_DIR` | beside the state file (`landscapes/`); none without one | where it keeps friends' landscapes (8.10), each by its office's key and hash, at most 256 MiB (the oldest go first), and the plots it keeps to draw while their offices are away; without a directory, for the run only |
 
 A flag wins over its environment variable, and a variable set but blank counts as unset (its default), as a
 `.env` file has it. [`../.env.example`](../.env.example) is the template of them all.
@@ -240,6 +241,9 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `exit` | `channel` | step out of it again: the watch goes on |
 | `place` / `unplace` | `key`, `x`, `z` (within 100 km), `turn` (0–3) / `key` | put a friend's plot in this office's world: its middle there, turned so many quarter turns (8.4); kept in the state file. At most 256 |
 | `seen` | `key`, `at` {`dx`, `dz` (m, within 100 km), `turn` (0–3), `size` ([w, d] m: this plot's)} \| null | where this office's world has that office's plot (8.4): its middle `dx`, `dz` metres from this plot's middle, turned `turn` quarter turns left; null, not in it. Told to that office over any link with it, and again over each new one (kept in memory, not in the state file). At most 256 |
+| `plot_keep` | `key`, `name`, `plot` {`center`, `size`}, `unit` | a guest's plot in this office's world, to keep while its office is away (8.10): drawn from its last landscape. At most 64 |
+| `plot_load` | `key` | that kept plot's landscape, please: sent as `landscape` on channel 0 (`not_found` if none is kept) |
+| `plot_forget` | `key` | let that kept plot and its landscape go |
 | `link_where` | `channel`, `where` (`"world"` \| `"corner"`) | where the page put a link (8.5): kept, and said again in `visit_started` to a page that reloads |
 | `avatar_clear` | — | this office has no avatar (8.6) from now on (its own goes as a binary frame, 5.4) |
 | `avatar_want` | `channel` | ask a visitor for its avatar (host side, 8.6): its visit-client sends it, now and whenever its page gives a new one |
@@ -268,6 +272,9 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `guests` | `door` (`"open"` \| `"closed"`), `guests`: [{`key`, `name`}] | after `door`, `guest_add` or `guest_remove` |
 | `layout` | `layout`: [{`key`, `x`, `z`, `turn`}] | after a change |
 | `seen` | `key`, `name`, `at` (as the page message `seen`'s, their plot's `size`) \| null | where a friend's world has this office's plot (8.4), as they said; null: not in it, or their last link gone. `ready` has every one known: `seen`: [{`key`, `name`, `at`}] |
+| `landscape` | `channel`, `key`, `json` | an office's landscape (8.10), as JSON: the room's on that visit's `channel` (kept here, or asked for and sent once), or a kept plot's (channel 0). Also to a page that comes back, for each visit it is on. `ready` has the kept plots: `kept`: [{`key`, `name`, `plot`, `unit`}] |
+| `landscapes` | `channel` | this visitor reads landscapes (8.10): its whole room goes without its landscape (also `landscapes` in `visit_started`). Host side |
+| `plot_forgotten` | `key` | a kept plot let go: its host ended this office's visit on purpose (`kicked`: its door shut, a guest no longer), declined its watch, or this office took it off its guests |
 | `avatars` | `default`, `by`: [{`key`, `use`}] | whose look visitors have here (also in `ready`), after `avatars` or `avatar_use` |
 | `avatar` | `channel`, `avatar` {`unit`, `json`} | a visitor's avatar, which this page asked for (host side, 8.6): unpacked and checked as a scene edit is |
 | `phone` | `channel`, `on` | the other office's room has a phone now (8.8), or no longer (also `phone` in `visit_started`) |
@@ -301,7 +308,7 @@ Both directions, one scene delta (or, from the host's page, one scene edit) per 
 | bytes | field |
 |---|---|
 | 0–1 | `channel`, u16 big-endian |
-| 2 | flags: bit 0 = a key delta (everything that has moved, 8.1); bit 1 = a scene edit (host page to visit-client only, alone); bit 2 = this office's avatar (8.6: page to visit-client only, alone, its channel 0); bit 3 = a packet of voice (8.7: from the page, its own user's, its channel saying where it may go: 1 the room they are in, 2 their calls, 3 both; to it, another office's, on the visit's channel); bit 4 = someone else's voice passed on (8.7, 8.8: to the page only, on the visit's channel it came by: who spoke, then the packet) |
+| 2 | flags: bit 0 = a key delta (everything that has moved, 8.1); bit 1 = a scene edit (host page to visit-client only, alone); bit 2 = this office's avatar (8.6: page to visit-client only, alone, its channel 0); bit 3 = a packet of voice (8.7: from the page, its own user's, its channel saying where it may go: 1 the room they are in, 2 their calls, 3 both; to it, another office's, on the visit's channel); bit 4 = someone else's voice passed on (8.7, 8.8: to the page only, on the visit's channel it came by: who spoke, then the packet); bit 5 = this room's landscape (8.10: page to visit-client only, alone, its channel 0; gzipped JSON, at most 16 MiB) |
 | 3–10 | timestamp, u64 big-endian, microseconds: the host page's clock when it took the delta (unused for an edit) |
 | 11… | the delta (8.1), or the edit, gzipped JSON |
 
@@ -445,6 +452,9 @@ Messages are JSON, each prefixed by its length (u32 big-endian). In order, relia
 | host | `{"said": {"key", "name", "text", "id"? \| "owner"?}}` | a line said in the host's room (8.9), by its owner or one of its visitors (by its visit's id): only to a visitor in it; checked, passed to the page as `chat` |
 | host | `{"near": [{"key", "name", "distance", "id"?, "phone"?}]}` | who is near the visitor in the host's room (8.7), as the host's visit-client has it: checked, passed to the page as `voice_near` |
 | host | `{"avatar_want": true}` | send this office's avatar (8.6): now, on a stream of its own (7.4), and again whenever its page gives a new one |
+| visitor | `{"landscapes": true}` | its visit-client reads landscapes (8.10): sent each time the link is up, passed to the host's page as `landscapes` |
+| host | `{"landscape": "<hash>"}` | this room's landscape is this one (8.10: blake3 of its gzipped JSON, hex): sent when the link is up and whenever it changes. The visitor's visit-client gives its page the one it keeps of that office by that hash, or asks for it |
+| visitor | `{"landscape_want": "<hash>"}` | send that landscape: on a stream of its own (7.4), once a link for a hash |
 | visitor | `{"shared_adds": true}` | its page reads an `add` that names what it already has by uuid only (8.3; Visit 0.7 on): sent each time the link is up, passed to the host's page once as `shared_adds` |
 | host | `{"paused": true}` / `{"paused": false}` | the host's page went away / came back |
 | watcher | `{"enter": {"x", "y", "z", "yaw"} \| null}` / `{"exit": true}` | stepping into the room watched, there (clamped, passed to the host's page as `enter`; null: a link going there, spawned where newcomers go), or out (8.4, 8.5); in, it counts toward `max_visitors` |
@@ -483,6 +493,12 @@ And visitor to host, once its host asked (`avatar_want`):
 - **2, its avatar** (8.6): its length (u32 big-endian, at most 4 MiB) then the gzipped JSON, the stream then
   finished. The host's visit-client takes at most one every 2 s, unpacks it to at most 16 MiB of one JSON object
   nested at most 256 deep, and passes it to its page as `avatar`. A host on an older Visit never asks.
+
+And host to visitor, once the visitor asked (`landscape_want`):
+
+- **3, its landscape** (8.10): its length (u32 big-endian, at most 16 MiB) then the gzipped JSON, the stream then
+  finished. The visitor's visit-client unpacks it to check it (as an edit), keeps it as it came if its blake3 hash
+  is the one the host named (else drops it), and passes it to its page as `landscape`.
 
 Datagrams (unreliable): the visitor's input (7.3), JSON, so starting with `{`; either side's own user's voice (8.7),
 one byte 0xA0 then one Opus packet (at most 100 a second taken, each at most 1 000 bytes); and someone else's voice
@@ -750,6 +766,31 @@ world, not a room seen from outside it. Nothing to join.
   room without a world draws them itself, from `v.chats` and the `chat` event.
 - **Text is text.** A page shows a line as text (a canvas, `textContent`), never as markup.
 
+### 8.10 Landscapes
+
+The part of a room that never changes (its ground, walls, trees, furniture) is its **landscape**: sent once, kept
+by those who visit, and drawn while its office is away. A room marks it: `userData.visitStatic = true` on an
+object makes it and everything under it landscape (the marker itself stays on the host's page).
+
+- **Apart.** The host's page leaves the landscape out of its scene's rounds (no deltas, no edits: nothing of it is
+  looked at 30 times a second) and out of the whole scene it sends (which says, `landscape.parents`, under which
+  object, by number, each landscape object goes; an edit says so again when they change). It makes the landscape
+  one JSON of its own: three.js's JSON of a group of the static objects in the scene's order, every uuid named
+  anew in order of first appearance (`L1`, `L2`, …), so that the same landscape is the same JSON at every load, and
+  gives it to its visit-client (5.4, bit 5) a second after what is static last changed. Something static that
+  changes in itself, the room says so (`v.landscapeChanged()`).
+- **Sent once.** The visit-client names it by its hash (blake3 of the gzipped JSON) to every visitor (`landscape`),
+  and sends it (stream 3) to one that asks (`landscape_want`): one that does not have it. A visitor's visit-client
+  keeps each office's latest on disk (`--cache-dir`), by that office's key and the hash, and gives it to its page
+  (`landscape`), which puts each object under its parent in the room. A visitor on an older Visit gets the room
+  whole, its landscape in it, and again whenever what is static changes.
+- **Kept while away.** A guest's plot in a world (8.4) is kept with where it was (`plot_keep`): while its office is
+  away (offline, its link lost) the world draws its last landscape there, named "offline", lit softly if it has
+  no lights of its own, and its user walks into it as at home, against its walls (they are walked into, not
+  through) since no host is there to walk them. It goes live again when its office comes back. It is let go when
+  its office says so: it ends the watch itself (`kicked`: its door shut, a guest no longer), declines one, or this
+  office takes it off its guests.
+
 ## 9. The library: `visit.js`
 
 The normative surface; INTEGRATING.md shows it in use. Loaded with
@@ -802,6 +843,7 @@ v.avatar(object, { unit })  // your own body, for rooms that show their visitors
 v.setMic(on); v.mic         // your microphone (8.7): on, those near your user in the same room hear them (remembered)
 v.voices; v.voiceRange      // who your user can hear, near them (as the room's visit-client says): [{ key, name, distance (m), speaking }]; metres (45)
 v.listener({ x, y, z, yaw })   // where your user is in your room, for a room that draws no world (a world says it)
+v.landscapeChanged()        // something marked userData.visitStatic (8.10) changed in itself: its landscape goes again
 v.say(text)                 // a line (8.9), over your user's head for everyone in the room they are in: true if said
 v.chats                     // the lines still showing where you are and in your room: [{ key, name, text, mine, owner, id, channel }]
                             //   and the "chat" event, each as it is said
@@ -843,7 +885,8 @@ const world = v.world({ scene, renderer, ground, gap, clipOwn, bubbles });   // 
                    //   bubbles (true): it draws the lines said (8.9) in the room your user is in over their speakers' heads
 const me = world.frame(dt, { x, y, z, yaw, pitch }, { forward, strafe, run });
 world.render(camera);
-world.plots        // [{ key, name, at: { x, z, turn }, rect: [x0, z0, x1, z1], inside }]
+world.plots        // [{ key, name, at: { x, z, turn }, rect: [x0, z0, x1, z1], inside, offline }] (offline: a guest's plot
+                   //   kept while its office is away, 8.10)
 world.inside; world.point(); world.leave(); world.release()
 v.place(key, { x, z, turn }); v.unplace(key)   // yours alone: each friend in it is told where it is, nothing more
 v.on("seen", ({ key, name, at }) => …)          // a friend's world has your room somewhere new (at), or not (null)
@@ -934,6 +977,7 @@ slowly while its tab is hidden.
 | world | a plot not said: what its scene covers, at most 200 units a side; 4 units between plots in a ring; out of a plot 0.3 units past it; stepping in answered within 3 s |
 | layout, seen | 256 each |
 | chat | a line at most 200 characters; 5 lines every 10 s, from a page and from each visitor; shown 4 to 12 s, by its length |
+| landscapes | at most 16 MiB gzipped each; kept on disk at most 256 MiB in all (one per office, the oldest go first); 64 plots kept while their offices are away; sent a second after what is static last changed; a visitor's whole room waits at most 400 ms to hear whether it reads them |
 
 ## 11. Errors
 

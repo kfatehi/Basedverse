@@ -58,7 +58,7 @@ class Page:
     async def send(self, **m):
         await self.ws.send(json.dumps(m))
 
-    async def expect(self, type_, timeout=10, skip=("lobby", "online", "knock_sent", "link_stats", "shared_adds")):
+    async def expect(self, type_, timeout=10, skip=("lobby", "online", "knock_sent", "link_stats", "shared_adds", "landscapes")):
         """The next message of this type, passing over the kinds in `skip`; any other first is a failure."""
         while True:
             m = await asyncio.wait_for(self.texts.get(), timeout)
@@ -128,7 +128,7 @@ async def main():
         url = "ws://127.0.0.1:%d" % server.sockets[0].getsockname()[1]
         state = os.path.join(TMP, "A.state.json")   # where A keeps whether it is away
         a_flags = ("--origins", "http://room.test", "--state-file", state)
-        (pa, ta), (pb, tb) = await start_client("A", 7411, url, *a_flags), await start_client("B", 7412, url)
+        (pa, ta), (pb, tb) = await start_client("A", 7411, url, *a_flags), await start_client("B", 7412, url, "--cache-dir", os.path.join(TMP, "B.lands"))
 
         print("\npage connection")
         bad = await Page(7411, ta).open(token="0" * 64)
@@ -714,7 +714,7 @@ async def main():
         drain_frames(a); drain_frames(b); drain_frames(c)
         await a.ws.send(voice(2, 9))
         await c.ws.send(voice(1, 10))
-        check("back to B's ear: A to B only; C heard by B, not in the call", await no_voice(a, b, c), [[], [(8, opus(9)), (8, opus(10))], []])
+        check("back to B's ear: A to B only; C heard by B, not in the call", [sorted(x) for x in await no_voice(a, b, c)], [[], sorted([(8, opus(9)), (8, opus(10))]), []])
         await b.send(type="speaker", channel=999, on=True)
         check("a speaker for no call: refused", (await b.until(lambda m: m["type"] == "error"))["code"], "no_call")
         await a.send(type="call", channel=la["channel"], act="hangup")
@@ -741,6 +741,59 @@ async def main():
         await a.send(type="avatars", default="mine")
         z = [await a.until(lambda m: m["type"] == "avatars"), await a.until(lambda m: m["type"] == "avatars")][-1]
         check("and back: B with the default, the default A's models", (z["default"], z["by"]), ("mine", []))
+
+        print("\nlandscapes: what never changes in a room, sent once, kept on disk; and plots kept")
+        land1 = {"metadata": {"version": 4.5, "type": "Object"}, "object": {"uuid": "landscape", "type": "Group", "children": [{"uuid": "L1", "type": "Group", "name": "hill"}]}}
+        land2 = {"metadata": {"version": 4.5, "type": "Object"}, "object": {"uuid": "landscape", "type": "Group", "children": [{"uuid": "L1", "type": "Group", "name": "hills"}]}}
+        packed = lambda j: gzip.compress(json.dumps(j).encode(), mtime=0)
+        sends = lambda: open(os.path.join(TMP, "A.log")).read().count("this room's landscape sent")
+        kept_dir = os.path.join(TMP, "B.lands", ka)
+        kept = lambda: [open(os.path.join(kept_dir, f), "rb").read() for f in os.listdir(kept_dir)] if os.path.isdir(kept_dir) else []
+        started = lambda m: m["type"] == "visit_started"
+        await a.drain()
+        await b.drain()
+        await a.ws.send(struct.pack(">HBQ", 0, 32, 0) + packed(land1))   # A's page: its landscape (flag 32)
+        await asyncio.sleep(0.3)
+        # B's world watching A, guests both ways (no knock of B's page: it has knocked its six a minute).
+        await a.send(type="guest_add", key=kb, name="B")
+        await b.send(type="guest_add", key=ka, name="A")
+        watch_a = lambda m: started(m) and m.get("watch") is True and m["peer"]["key"] == ka
+        await b.send(type="world", on=True)
+        wb = await b.until(watch_a)
+        ln = await b.until(lambda m: m["type"] == "landscape")
+        check("B's world watches A: B's page gets A's landscape, asked for, on that watch's channel, from A", (ln["channel"], ln["key"], ln["json"]), (wb["channel"], ka, land1))
+        check("kept on B's disk, by A's key, as A sent it (by its hash); A sent it once", (kept(), sends()), ([packed(land1)], 1))
+        await b.send(type="world", on=False)
+        await b.until(lambda m: m["type"] == "visit_ended")
+        await b.send(type="world", on=True)
+        wb = await b.until(watch_a)
+        ln = await b.until(lambda m: m["type"] == "landscape")
+        await asyncio.sleep(0.3)
+        check("and again: A's landscape from B's own disk, and A sends nothing", (ln["channel"], ln["json"], sends()), (wb["channel"], land1, 1))
+        await a.ws.send(struct.pack(">HBQ", 0, 32, 0) + packed(land2))
+        ln = await b.until(lambda m: m["type"] == "landscape")
+        check("A's landscape changes while B watches: B asks for the new one, and keeps only it", (ln["json"], sends(), kept()), (land2, 2, [packed(land2)]))
+        plot = {"center": [5, 4], "size": [10, 8]}
+        await b.send(type="plot_keep", key=ka, name="A", plot=plot, unit=1)
+        await b.send(type="plot_keep", key="nope", plot=plot)
+        check("a plot to keep with no office's key: refused", (await b.until(lambda m: m["type"] == "error"))["code"], "bad_message")
+        b = await Page(7412, tb).open()   # B's page again (the old one closed: 4409)
+        rb = await b.expect("ready")
+        check("B's page comes back: A's plot kept, to draw while A is away", rb["kept"], [{"key": ka, "name": "A", "plot": plot, "unit": 1}])
+        ln = await b.until(lambda m: m["type"] == "landscape")
+        check("and the watch's landscape again, from B's disk", (ln["channel"], ln["json"]), (wb["channel"], land2))
+        await b.send(type="plot_load", key=ka)
+        ln = await b.until(lambda m: m["type"] == "landscape" and m["channel"] == 0)
+        check("and the kept plot's, on no visit's channel", (ln["key"], ln["json"]), (ka, land2))
+        await a.send(type="guest_remove", key=kb)   # A's own doing: B's watch ends, kicked
+        gone = await b.until(lambda m: m["type"] in ("plot_forgotten", "visit_ended"))
+        check("A takes B off its guests (its watch kicked): B forgets A's plot first, and its landscape, off its disk too",
+              (gone["type"], gone.get("key"), os.path.isdir(kept_dir)), ("plot_forgotten", ka, False))
+        await b.send(type="world", on=False)
+        await b.send(type="guest_remove", key=ka)
+        await asyncio.sleep(1)
+        await a.drain()
+        await b.drain()
 
         print("\naway: out of the lobby on purpose, and back")
         await a.drain()

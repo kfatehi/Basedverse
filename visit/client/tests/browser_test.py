@@ -16,6 +16,7 @@ import http.server
 import json
 import math
 import os
+import re
 import secrets
 import sys
 import tempfile
@@ -141,8 +142,13 @@ async def main():
         print("\nA's scene, drawn by B's own browser")
         check("B draws A's scene (three.js r128, fetched and checked against its hash)", bool(await b.until("!!(v._viewer && v._viewer.scene) && v.frames > 30", 30)), True)
         n = await a.js("(() => { let n = 0; room.scene.traverse(() => n++); return n; })()")
-        got = await b.until("v._viewer.scene && (() => { let n = 0; v._viewer.scene.root.traverse(() => n++); return n; })()")
-        check("B has every object of A's scene (B's own body is one of them)", got, n)
+        got = await b.until("v._viewer.scene && (n => n === %d && n)((() => { let n = 0; v._viewer.scene.root.traverse(() => n++); return n; })())" % n)
+        check("B has every object of A's scene (B's own body is one of them), its landscape too", got, n)
+        check("A's floor, walls and desk came apart, as A's landscape: read once by B, each where A has it", await b.until(
+            "(l => !!l && !!l.objs && l.objs.length === 6 && l.objs.every(o => o.parent === v._viewer.scene.root))(v._viewer.land)"), True)
+        land_a = await a.until("v._landText")
+        check("A's landscape, as A's page gave it: the 6, every uuid named in order (no three.js uuid left in it)",
+              (len(json.loads(land_a)["object"]["children"]), re.search(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-", land_a) is None) if land_a else None, (6, True))
         check("B's own body is there, not drawn in its own eyes", await b.until("(s => s.own.length === 1 && !s.own[0].visible)(v._viewer.scene)"), True)
         check("A's renderer settings came along (shadows)", await b.js("v._viewer.scene.renderer.shadowMap.enabled"), True)
         check("A's sun aims where A's does (its target, in the scene)", await b.js(
@@ -273,10 +279,14 @@ async def main():
         check("A reloading: B sees its host paused", await b.until("window.sawPause"), True)
         check("A back: B's host resumes, and B gets A's scene again", bool(await b.until(
             "v.visiting && !v.visiting.paused && v._viewer.scene && !!v._viewer.scene.root.getObjectByName('spinner')", 30)), True)
+        check("A reloaded makes the same landscape, to the byte (so it is never sent again)", await a.until("v._landText", 30) == land_a, True)
+        check("and B has it in A's room again", await b.until("(l => !!l && !!l.objs && l.objs.every(o => o.parent === v._viewer.scene.root))(v._viewer.land)"), True)
         check("A kept B where it was", round((await a.until("v.visitors.length && v.visitors[0].pose && v.visitors[0].pose.x")) or 0, 1), round(a2["x"], 1))
         await b.call("Page.reload")
         check("B reloading comes back still in A's room", await b.until("window.v && v.visiting && v.visiting.host.name", 30), "A")
         check("and draws it again", bool(await b.until("!!(v._viewer && v._viewer.scene) && v.frames > 15", 30)), True)
+        check("with A's landscape, given again by B's visit-client (it has it)", await b.until(
+            "(l => !!l && !!l.objs && l.objs.length === 6 && l.objs.every(o => o.parent === v._viewer.scene.root))(v._viewer && v._viewer.land)", 20), True)
 
         print("\nleaving")
         await b.js("document.querySelector('.visit-stage button[data-s=leave]').click()")
@@ -402,6 +412,20 @@ async def main():
                   "B has A at:", await b.js("JSON.stringify(v.visitors.map(x => x.pose))"), "B frames/s:", await b.js("window.renders"))
             print("      B's spawns:", await b.js("JSON.stringify((window.spawns || []).slice(-6))"))
         check("and back: home in A's own room", home, (True, True))
+
+        print("\nB away: its plot kept from its landscape, walked into, not through")
+        await b.js("v.leaveLobby()")
+        check("B goes offline: A's world keeps B's plot where it was, from B's landscape, marked offline", await a.until(
+            "(p => !!p && p.offline && p.at.x === 15)(room.world.plots.find(p => p.name === 'B'))", 20), True)
+        await walk(a, 8.5, 4, -3.14159 / 2, 2.5, "room.me.x > 12")   # out of A's east door, into B's kept plot by its west door
+        check("A walks into B's kept plot by its doorway (at home all the while: nobody to have A there)", await a.js("room.me.x > 11 && room.where === null"), True)
+        await walk(a, await a.js("room.me.x"), 4, 0, 2.5)   # north (-z), at B's north wall
+        z = await a.js("room.me.z")
+        check("and walks north into B's north wall: stopped at it, not through", (0.1 < z < 2.5, z), (True, z))
+        await a.shot("a_kept.png")
+        await a.js("Object.assign(room.me, { x: 5, z: 4 })")   # home
+        await b.js("v.joinLobby()")
+        check("B back: its plot live again", await a.until("(p => !!p && !p.offline)(room.world.plots.find(p => p.name === 'B'))", 45), True)
 
         print("\nthe door shut")
         await walk(a, 8.5, 4, -3.14159 / 2, 1.8, "!!room.where")   # into B's again, to be lifted there

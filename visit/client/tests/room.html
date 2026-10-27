@@ -52,7 +52,9 @@ async function build(v) {
     for (const z of [0, ROOM.d]) { box(hw, 2.5, 0.1, wall, hw / 2, 1.25, z); box(hw, 2.5, 0.1, wall, ROOM.w - hw / 2, 1.25, z); }
     for (const x of [0, ROOM.w]) { box(0.1, 2.5, hd, wall, x, 1.25, hd / 2); box(0.1, 2.5, hd, wall, x, 1.25, ROOM.d - hd / 2); }
   }
-  box(ROOM.desk.w, 0.75, ROOM.desk.d, lambert(0xb98b5e), ROOM.desk.x + ROOM.desk.w / 2, 0.375, ROOM.desk.z + ROOM.desk.d / 2);
+  const desk = box(ROOM.desk.w, 0.75, ROOM.desk.d, lambert(0xb98b5e), ROOM.desk.x + ROOM.desk.w / 2, 0.375, ROOM.desk.z + ROOM.desk.d / 2);
+  // The floor, the walls and the desk never change: its landscape (SPEC 8.10), sent once and kept by visitors.
+  for (const o of scene.children) if (o === floor || o === desk || o.material === wall) o.userData.visitStatic = true;
   scene.add(new THREE.HemisphereLight(0xffffff, 0x8890a0, 0.7));
   const sun = new THREE.DirectionalLight(0xffffff, 0.6);
   sun.position.set(8, 10, 6); sun.target.position.set(5, 0, 4); scene.add(sun.target); sun.castShadow = true; scene.add(sun);

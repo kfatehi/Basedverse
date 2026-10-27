@@ -13,7 +13,7 @@
 // visitor's page walks at once and the host corrects it), and a host renders and encodes nothing for anyone.
 "use strict";
 (function () {
-  const VERSION = "0.11.0", PROTO = "basedverse-visit-local/2";
+  const VERSION = "0.12.0", PROTO = "basedverse-visit-local/2";
   const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, LOOK = 0.0025;
   const POINT_MS = 200, AIM_MS = 125;   // a visitor's points, at most one this often; what it aims at, looked for this often
   // What the host hears many times a second: none of it changes what the page shows, so none fires "change".
@@ -38,7 +38,12 @@
   // draws it with the very three.js release the host runs, fetched from a CDN and checked against the hashes
   // below (Subresource Integrity): nothing else ever runs from it, and what the host sends is only ever read as
   // data (cleanScene). The visitor walks at once, predicted here, and the host's answer corrects it.
-  const KEY = 1, EDIT = 2, AVATAR = 4, AUDIO = 8, RELAY = 16;   // frames' flags: bit 0 a key delta; bit 1 a scene edit, bit 2 this office's avatar (page to visit-client); bit 3 voice (SPEC 5.4)
+  const KEY = 1, EDIT = 2, AVATAR = 4, AUDIO = 8, RELAY = 16, LAND = 32;   // frames' flags: bit 0 a key delta; bit 1 a scene edit, bit 2 this office's avatar (page to visit-client); bit 3 voice; bit 5 this room's landscape (page to visit-client) (SPEC 5.4)
+  // A landscape (SPEC 8.10) goes to visit-client this long after what is static last changed: once, for a room still
+  // loading.
+  const LAND_QUIET = 1000;
+  // A visitor starting gets the whole room once its visit-client says it reads landscapes, or after this long.
+  const LAND_WAIT = 400;
   // Voice (SPEC 8.7): 20 ms of 48 kHz mono a packet, Opus at 24 kbps; played this far behind, to ride out jitter.
   // Heard within v.voiceRange metres (as visit-client says: VOICE_RANGE until it has), fading to nothing there. Who
   // hears whom the room's visit-client decides; a page's voice says where it may go: the room its user is in, their
@@ -291,7 +296,7 @@
   // the host's own, where a sim keeps its state (who a figure is, its handles), and never leaves its page; it is
   // put back as it was the moment the JSON is made.
   const SHARED_DATA = ["visitor", "visitPoint"];
-  function sharedJSON(o) {
+  function sharedJSON(o, meta) {
     const kept = [];
     o.traverse(x => {
       const u = x.userData;
@@ -301,7 +306,30 @@
       kept.push([x, u]);
       x.userData = shared;
     });
-    try { return o.toJSON(); } finally { for (const [x, u] of kept) x.userData = u; }
+    try { return o.toJSON(meta); } finally { for (const [x, u] of kept) x.userData = u; }
+  }
+
+  // Every uuid in a landscape's JSON named anew, in the order each first comes (L1, L2, ...), and every mention of
+  // it with it: three.js makes new uuids at every load, and the same landscape must be the same JSON (its hash).
+  function renumber(json) {
+    const names = new Map(), stack = [json];
+    while (stack.length) {   // depth first, in the JSON's own order
+      const x = stack.pop();
+      if (Array.isArray(x)) { for (let i = x.length - 1; i >= 0; i--) stack.push(x[i]); continue; }
+      if (!isObj(x)) continue;
+      if (typeof x.uuid === "string" && !names.has(x.uuid)) names.set(x.uuid, "L" + (names.size + 1));
+      const vs = Object.values(x);
+      for (let i = vs.length - 1; i >= 0; i--) if (typeof vs[i] === "object") stack.push(vs[i]);
+    }
+    const swap = x => {
+      if (typeof x === "string") return names.has(x) ? names.get(x) : x;
+      if (Array.isArray(x)) return x.map(swap);
+      if (!isObj(x)) return x;
+      const out = {};
+      for (const [k, v] of Object.entries(x)) out[k] = swap(v);
+      return out;
+    };
+    return swap(json);
   }
 
   // The host's side of a scene: what it last sent of each object, material, geometry and texture, so that each
@@ -310,7 +338,9 @@
     constructor(cfg) {
       const t = cfg.three;
       // `shared`: every visitor this round's edit goes to reads an added object that names what it has by uuid.
+      // `statics`: the landscape (8.10), [object, its parent's record] in the scene's order; `landAt`, when it last changed.
       Object.assign(this, { cfg, objs: new Map(), next: 1, mats: new Map(), geos: new Map(), texs: new Map(), dynamic: new Set(), sent: new Set(), shared: false,
+        statics: [], staticSig: null, landDirty: false, landAt: 0,
         keyAt: 0, sceneSig: null, inter: [], interSig: null, tmp: { p: new t.Vector3(), q: new t.Quaternion(), s: new t.Vector3() } });
       this.scan(0);   // where everything is now: what the first whole scene shows
     }
@@ -330,9 +360,10 @@
       const adds = [], removes = [], parents = [], assigns = [], props = [], moved = [], res = new Map(), seen = new Set();
       const usedMats = new Set(), usedGeos = new Set(), usedTexs = new Set();
       root.updateMatrixWorld();
-      const stack = [[root, null, false]];
+      const stack = [[root, null, false]], statics = [];
       while (stack.length) {
         const [o, parent, fresh] = stack.pop();
+        if (o !== root && o.userData && o.userData.visitStatic === true) { statics.push([o, parent]); continue; }   // landscape: sent apart, once (8.10)
         seen.add(o.uuid);
         let r = this.objs.get(o.uuid), inNew = fresh;
         if (fresh || !r) {
@@ -395,6 +426,14 @@
       // The interactions on (8.3): which types a visitor's crosshair shows hot, and with what label.
       const isig = JSON.stringify(this.inter), inter = this.interSig !== null && isig !== this.interSig;
       this.interSig = isig;
+      // The landscape: which objects, under which. Changed, it goes again (_landSend) and visitors put it where it goes.
+      const ssig = statics.map(([o, p]) => o.uuid + ">" + (p ? p.o.uuid : "")).join();
+      let land = null;
+      if (ssig !== this.staticSig) {
+        const was = this.staticSig;
+        Object.assign(this, { staticSig: ssig, statics, landDirty: statics.length > 0 || was !== null, landAt: now });
+        if (was !== null) land = { parents: this.landParents() };
+      }
       if (first) return { edit: null, moved: [] };
       const edit = { type: "edit" };
       if (res.size) edit.res = this._resources([...res.values()]);
@@ -405,13 +444,44 @@
       if (props.length) edit.props = props;
       if (scene) edit.scene = scene;
       if (inter) edit.interactions = this.inter;
+      if (land) edit.landscape = land;
       return { edit: Object.keys(edit).length > 1 ? edit : null, moved };
+    }
+
+    // Where each landscape object goes: its parent's number (0: the scene), in the landscape's order.
+    landParents() { return this.statics.map(([, p]) => p ? p.idx : 0); }
+
+    // What `f` makes of `top` with the landscape under it left out: each static object taken from its parent's
+    // children while it runs (no events, nothing moved), put back after.
+    _without(top, f) {
+      const out = [];
+      for (const [o] of this.statics) {
+        if (o === top || !o.parent) continue;
+        let under = false;
+        for (let p = o.parent; p && !under; p = p.parent) under = p === top;
+        const i = under ? o.parent.children.indexOf(o) : -1;
+        if (i >= 0) { out.push([o.parent, i, o]); o.parent.children.splice(i, 1); }
+      }
+      try { return f(); } finally { for (let k = out.length - 1; k >= 0; k--) { const [p, i, o] = out[k]; p.children.splice(i, 0, o); } }
+    }
+
+    // The landscape (8.10): every static object and what is under it, as three.js's own JSON of a group of them, its
+    // uuids named in order (renumber): the same landscape, the same JSON at every load.
+    landscape() {
+      const meta = { geometries: {}, materials: {}, textures: {}, images: {}, shapes: {}, skeletons: {}, animations: {}, nodes: {} };
+      const children = this.statics.map(([o]) => sharedJSON(o, meta).object), json = { metadata: { version: 4.5, type: "Object", generator: "Visit landscape" } };
+      for (const k of ["geometries", "materials", "textures", "images", "shapes", "skeletons", "animations"]) {
+        const xs = Object.values(meta[k]).map(x => { delete x.metadata; return x; });
+        if (xs.length) json[k] = xs;
+      }
+      json.object = { uuid: "landscape", type: "Group", layers: 1, matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], children };
+      return renumber(json);
     }
 
     // An added object: its JSON (with what it is made of, but, when its visitors read that, the geometries and
     // materials they have: those it names by uuid), each object's number, its lights' targets.
     _added(r) {
-      const json = sharedJSON(r.o), ids = [];
+      const json = this._without(r.o, () => sharedJSON(r.o)), ids = [];
       if (this.shared) {
         for (const k of ["geometries", "materials"]) if (json[k]) json[k] = json[k].filter(x => !this.sent.has(x.uuid));
         // A texture goes with each material (or object) that names it, an image with each texture, a shape with each
@@ -484,18 +554,20 @@
     }
 
     // The whole scene, for a visitor starting (or starting again): three.js's own JSON of it, each object's
-    // number, and what the visitor needs to draw it as the host does and to walk in it.
+    // number, and what the visitor needs to draw it as the host does and to walk in it. Its landscape apart (where it
+    // goes: `landscape`) for a visitor that reads landscapes, else in it.
     snapshot(h, hooks) {
-      const { root, three, renderer } = this.cfg, w = hooks.walk;
+      const { root, three, renderer } = this.cfg, w = hooks.walk, apart = !!h.landscapes && this.statics.length > 0;
       root.updateMatrixWorld();
-      const json = sharedJSON(root);
+      const json = apart ? this._without(root, () => sharedJSON(root)) : sharedJSON(root);
       this.sent = new Set(["geometries", "materials", "textures", "images"].flatMap(k => (json[k] || []).map(x => x.uuid)));
       this.interSig = JSON.stringify(this.inter);
       return { type: "scene", three: String(three.REVISION), json, ids: [...this.objs.values()].map(r => [r.o.uuid, r.idx]), targets: this.targets(root), interactions: this.inter,
         renderer: rendererProps(renderer, three), fov: Number(hooks.fov) || 70, near: Number(this.cfg.near) || 0.1, far: Number(this.cfg.far) || 1000,
         walk: w && Number(w.speed) > 0 ? { speed: Number(w.speed) } : null, yaw0: h.yaw0, pose: h.pose,
         plot: hooks.plot ? { center: hooks.plot.center.map(Number), size: hooks.plot.size.map(Number) } : null, unit: Number(hooks.unit) > 0 ? Number(hooks.unit) : 1,
-        preview: hooks.preview ? ["x", "y", "z", "yaw", "pitch"].reduce((o, k) => Object.assign(o, { [k]: Number(hooks.preview[k]) }), {}) : null };
+        preview: hooks.preview ? ["x", "y", "z", "yaw", "pitch"].reduce((o, k) => Object.assign(o, { [k]: Number(hooks.preview[k]) }), {}) : null,
+        landscape: apart ? { parents: this.landParents() } : null };
     }
   }
 
@@ -524,6 +596,8 @@
       this._voices = new Map();   // their key -> a decoder, its panner, and where its next moment plays
       this._voiceTo = 0;          // where your voice may go: VOICE_ROOM, VOICE_CALLS, both, or nowhere (nothing encoded)
       this._chats = new Map();    // lines said in the rooms you are in or host (8.9), still showing, by who said them
+      this._kept = new Map();     // guests' plots kept while they are away (8.10): key -> { key, name, plot, unit, json, asked, built }
+      this._landText = null;      // this room's landscape, as last given to visit-client
       this._said = [];            // when you last said lines (CHATS every CHAT_WINDOW)
       this._nearHome = [];        // who is near your user in your room, as your visit-client says (voice_near)
       this._nearBy = new Map();   // and in another's room, as its owner's says: channel -> [{ key, name, distance, id, phone }]
@@ -618,6 +692,10 @@
       this._guests(m);
       this.layout = Array.isArray(m.layout) ? m.layout : [];
       this.voiceRange = Number(m.voice_range) > 0 ? Number(m.voice_range) : VOICE_RANGE;
+      this._kept = new Map((Array.isArray(m.kept) ? m.kept : []).filter(k => isObj(k) && typeof k.key === "string" && isObj(k.plot))
+        .map(k => [k.key, { key: k.key, name: String(k.name || ""), plot: k.plot, unit: Number(k.unit) > 0 ? Number(k.unit) : 1, json: null, asked: false, built: null }]));
+      this._landText = null;   // this room's landscape: to visit-client again (it may be a new one)
+      if (this._sync) Object.assign(this._sync, { landDirty: true, landAt: 0 });
       this._nearHome = []; this._nearBy.clear(); this._whereTold.sig = "";
       this.seen = (Array.isArray(m.seen) ? m.seen : []).filter(x => isObj(x) && isObj(x.at)).map(x => ({ key: String(x.key), name: String(x.name || ""), at: x.at }));
       this.knocks = []; this.knocking = [];
@@ -701,7 +779,9 @@
         case "link_stats":
           if (this._viewer && this._viewer.channel === m.channel) { this.stats.rtt = Number(m.rtt_ms); this.stats.path = String(m.path); }
           break;
-        case "keyframe": case "input": case "scene_resync": case "point": case "shared_adds": this._hostMessage(m); break;
+        case "keyframe": case "input": case "scene_resync": case "point": case "shared_adds": case "landscapes": this._hostMessage(m); break;
+        case "landscape": this._landIn(m); break;
+        case "plot_forgotten": this._kept.delete(String(m.key)); if (this._world) this._world._keptForget(String(m.key)); break;
         case "scene": this._sceneEdit(m); break;
         case "scene_lost": { const w = this._viewing(m.channel); if (w) this._sceneResync(w); break; }
         case "error": this._emit("error", { code: m.code, message: m.message, ref: m.ref }); break;
@@ -917,7 +997,8 @@
         // A watcher (../../WORLD.md) sees this room's plot from outside it: sent the scene, never spawned, until it
         // steps in (`enter`).
         const h = { id: m.id, channel: m.channel, visitor: m.peer || {}, guest: m.guest === true, watch: m.watch === true, link: m.link === true, inside: m.watch !== true || m.inside === true,
-          pose: null, yaw0: 0, input: null, inputAt: 0, keyNext: true, fails: 0, sceneSent: false, posed: null, sharedAdds: m.shared_adds === true };
+          pose: null, yaw0: 0, input: null, inputAt: 0, keyNext: true, fails: 0, sceneSent: false, posed: null, sharedAdds: m.shared_adds === true,
+          landscapes: m.landscapes === true, since: performance.now() };
         if (m.state && m.state.pose && h.inside) { h.pose = m.state.pose; h.yaw0 = m.state.yaw0 || 0; }   // back after this page reloaded
         this._hosted.set(m.channel, h);
         if (h.inside) this._spawn(h);
@@ -947,10 +1028,10 @@
       const h = this._hosted.get(m.channel);
       if (h && h.id === m.id) { this._avatarDrop(h); this._hosted.delete(m.channel); }
       const w = this._watches.get(m.channel);
-      if (w && w.id === m.id) { this._sceneDrop(w); this._watches.delete(m.channel); }
+      if (w && w.id === m.id) { this._sceneDrop(w); this._landDrop(w); this._watches.delete(m.channel); }
       const l = this._links.get(m.channel);
-      if (l && l.id === m.id) { this._links.delete(m.channel); this._sceneDrop(l); }
-      if (this.visiting && this.visiting.id === m.id) { this._dropViewer(); this.visiting = null; this._cornerNext(); }
+      if (l && l.id === m.id) { this._links.delete(m.channel); this._sceneDrop(l); this._landDrop(l); }
+      if (this.visiting && this.visiting.id === m.id) { if (this._viewer) this._landDrop(this._viewer); this._dropViewer(); this.visiting = null; this._cornerNext(); }
       this._phoneOn.delete(m.channel);
       for (const c of [...this._calls.values()]) if (c.channel === m.channel) this._callEnd(c.key, "their link went", false);
       this._visitorsList();
@@ -1429,6 +1510,7 @@
       else if (m.type === "keyframe") h.keyNext = true;   // a key delta: where everything that moves is
       else if (m.type === "scene_resync") h.sceneSent = false;
       else if (m.type === "shared_adds") h.sharedAdds = true;   // its page reads an add naming what it has by uuid (8.3)
+      else if (m.type === "landscapes") h.landscapes = true;   // its visit-client reads landscapes (8.10): the room's goes apart
       else if (m.type === "point") this._point(h, m);
     }
 
@@ -1484,6 +1566,8 @@
         sync.shared = ready.every(h => h.sharedAdds);   // one visitor on an older Visit: every add whole, as it reads them
         const { edit, moved } = sync.scan(now);
         if (edit && ready.length) this._sendScene(ready, edit);
+        if (edit && edit.landscape) for (const h of ready) if (!h.landscapes) h.sceneSent = false;   // an older visitor: the whole room again, its landscape in it
+        if (sync.landDirty && now - sync.landAt >= LAND_QUIET) this._landSend(sync);
         const key = now - sync.keyAt >= SCENE_KEY_MS;
         if (key) sync.keyAt = now;
         const body = sync.entries(moved), all = key || ready.some(h => h.keyNext) ? sync.entries(sync.dynamicRecs()) : null;
@@ -1491,9 +1575,35 @@
           const k = key || h.keyNext, p = h.pose, posed = p ? [p.x, p.y, p.z, p.yaw, p.pitch, h.input && h.input.t].join() : "-";
           if (k || body.n || posed !== h.posed) { this._sendDelta(h, k ? all : body, k, now); h.posed = posed; h.keyNext = false; }
         }
-        for (const h of hs) if (!h.sceneSent) { this._sendScene([h], sync.snapshot(h, this._hooks)); h.sceneSent = true; h.keyNext = true; }
+        for (const h of hs) {   // the whole room to a visitor starting: once its visit-client said it reads landscapes (8.10), or a moment on (an older one never says)
+          if (h.sceneSent || (!h.landscapes && sync.statics.length && now - h.since < LAND_WAIT)) continue;
+          this._sendScene([h], sync.snapshot(h, this._hooks)); h.sceneSent = true; h.keyNext = true;
+        }
       } catch (e) { console.error("visit: could not send the scene", e); }
     }
+
+    // This room's landscape (8.10), gzipped, to its visit-client, which offers it to visitors by its hash and sends it
+    // to those that do not have it: when what is static changed (or landscapeChanged()), if it is not the same JSON.
+    _landSend(sync) {
+      sync.landDirty = false;
+      if (!sync.statics.length) return;
+      let text;
+      try { text = JSON.stringify(sync.landscape()); } catch (e) { return console.warn("visit: a landscape that does not turn into JSON", e); }
+      if (text === this._landText) return;
+      this._landText = text;
+      this._sceneOut = (this._sceneOut || Promise.resolve()).then(async () => {
+        const gz = new Uint8Array(await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer());
+        if (gz.byteLength > 16 << 20) return console.warn(`visit: a landscape too big to send (${gz.byteLength} bytes gzipped)`);
+        if (!this._ws || this._ws.readyState !== 1) { this._landText = null; return; }
+        const buf = new Uint8Array(11 + gz.byteLength);
+        buf[2] = LAND;
+        buf.set(gz, 11);
+        this._ws.send(buf);
+      }).catch(e => console.warn("visit: could not send the landscape", e));
+    }
+    // What is static in your room changed in itself (a tree moved, a wall repainted): its landscape goes again. Which
+    // objects are static (userData.visitStatic) Visit sees by itself.
+    landscapeChanged() { this._landText = null; if (this._sync) Object.assign(this._sync, { landDirty: true, landAt: 0 }); }
 
     // A scene edit to these visitors, gzipped, after any before it (SPEC 5.4: flags EDIT).
     _sendScene(hs, edit) {
@@ -1575,7 +1685,7 @@
         offs: [], offset: null, pose: { x: num(pose.x, 0), y: num(pose.y, 1.6), z: num(pose.z, 0) }, yaw0: num(e.yaw0, 0),
         walk: isObj(e.walk) && num(e.walk.speed, 0) > 0 ? { speed: Math.min(50, num(e.walk.speed, 2.5)) } : null,
         hist: [], vis: { x: 0, y: 0, z: 0 }, waitKey: true, own: [], last: 0, gcAt: performance.now(), q: new T.Quaternion(), v: new T.Vector3(), relight: null,
-        interactions: interMap(e.interactions) };
+        interactions: interMap(e.interactions), landParents: isObj(e.landscape) && Array.isArray(e.landscape.parents) ? e.landscape.parents : null };
       this._sceneAdopt(s, root);
       const byUuid = new Map();
       root.traverse(o => byUuid.set(o.uuid, o));
@@ -1599,6 +1709,13 @@
       relight(s.root, ...s.relight);
       this._sceneOwn(s);
       w.scene = s;
+      this._landAttach(w);
+      const key = w.host && w.host.key;
+      if (key && this.isGuest(key)) {   // a guest's plot: kept to draw while they are away (8.10), here and by visit-client
+        const k = this._kept.get(key) || { key, json: null, asked: false, built: null };
+        if (!k.plot || JSON.stringify(k.plot) !== JSON.stringify(s.plot) || k.unit !== s.unit) this._send({ type: "plot_keep", key, name: w.host.name || "", plot: s.plot, unit: s.unit });
+        this._kept.set(key, Object.assign(k, { name: w.host.name || "", plot: s.plot, unit: s.unit }));
+      }
       this._send({ type: "keyframe", channel: w.channel });   // where its moving things are now
       this._changed();
     }
@@ -1628,6 +1745,7 @@
       }
       w.scene = s;
       this._sceneOwn(s);
+      this._landAttach(w);
       this._sceneAttach(w);
       this._send({ type: "keyframe", channel: w.channel });   // where its moving things are now
       const loop = () => {
@@ -1741,7 +1859,57 @@
         if (fog === null) s.root.fog = null;
         else if (isObj(fog) && Number.isFinite(fog.color)) s.root.fog = fog.type === "FogExp2" ? new T.FogExp2(fog.color, Number(fog.density) || 0.00025) : new T.Fog(fog.color, Number(fog.near) || 1, Number(fog.far) || 1000);
       }
+      if (isObj(e.landscape) && Array.isArray(e.landscape.parents)) { s.landParents = e.landscape.parents; this._landAttach(w); }
       this._sceneOwn(s);
+    }
+
+    // A landscape (8.10), from visit-client: a room's (on its visit's channel), kept by visit-client or sent once;
+    // or (channel 0) a guest's plot kept while they are away.
+    _landIn(m) {
+      if (!isObj(m.json)) return;
+      const key = String(m.key || "");
+      if (!m.channel) {
+        const k = this._kept.get(key);
+        if (k) { k.json = m.json; k.built = null; if (this._world) this._world.listAt = -1; }
+        return;
+      }
+      const w = this._viewing(m.channel) || this._links.get(m.channel);
+      if (!w) return;
+      this._landDrop(w);
+      w.land = { key, json: m.json, objs: null, T: null };
+      const k = w.plot && this._kept.get(key);
+      if (k) { k.json = m.json; k.built = null; }
+      this._landAttach(w);
+    }
+    // A room's landscape in its scene: each static object under the one its host has it under (by number; 0, the
+    // scene), read once (as data: cleanScene) with this scene's three.js; one past the host's list taken out.
+    _landAttach(w) {
+      const s = w.scene, l = w.land;
+      if (!s || !l || !l.json || !Array.isArray(s.landParents)) return;
+      if (!l.objs || l.T !== s.T) {
+        if (l.objs) this._landDrop(w, true);
+        let group;
+        try { group = new s.T.ObjectLoader().parse(cleanScene(l.json, Object.assign({}, s.budget))); }
+        catch (e) { console.warn("visit: a landscape that could not be read: the room without it", e); l.json = null; return; }
+        if (s.relight) relight(group, ...s.relight);
+        l.objs = [...group.children]; l.T = s.T;
+      }
+      l.objs.forEach((o, i) => {
+        const at = i < s.landParents.length ? s.byIdx.get(s.landParents[i]) || s.root : null;
+        if (!at) { if (o.parent) o.parent.remove(o); } else if (o.parent !== at) at.add(o);
+      });
+      s.bodiesAt = 0;
+    }
+    // Its landscape out of the scene and let go (`keep`: its JSON kept, to read again).
+    _landDrop(w, keep = false) {
+      const l = w.land;
+      if (!l || !l.objs) { if (!keep) w.land = null; return; }
+      for (const o of l.objs) {
+        if (o.parent) o.parent.remove(o);
+        o.traverse(c => { if (c.geometry) c.geometry.dispose(); for (const m of list(c.material)) { for (const k of MAPS) if (m[k] && m[k].isTexture) m[k].dispose(); m.dispose(); } });
+      }
+      l.objs = null;
+      if (!keep) w.land = null;
     }
 
     // An added object, read with the geometries and materials this scene already has: the host sends each once,
@@ -2391,6 +2559,11 @@
       taken.push([mine.center[0] - mine.size[0] / 2, mine.center[1] - mine.size[1] / 2, mine.center[0] + mine.size[0] / 2, mine.center[1] + mine.size[1] / 2]);
       const xs = [];
       for (const w of v._watches.values()) if (w.scene && w.host.key) xs.push({ key: w.host.key, name: w.host.name || "", w, plot: w.scene.plot, k: w.scene.unit / unit });
+      for (const k of v._kept.values()) {   // a guest's plot while they are away (8.10): its last landscape, where it was
+        if (xs.some(x => x.key === k.key) || !isObj(k.plot) || !v.isGuest(k.key)) continue;
+        if (!k.json) { if (!k.asked) { k.asked = true; v._send({ type: "plot_load", key: k.key }); } continue; }
+        xs.push({ key: k.key, name: k.name, w: null, kept: k, plot: k.plot, k: k.unit / unit });
+      }
       for (const x of xs) {
         const placed = v.layout.find(p => p.key === x.key);
         x.at = placed ? { x: placed.x, z: placed.z, turn: placed.turn | 0 } : null;
@@ -2410,7 +2583,9 @@
         taken.push(x.rect); out.push(x);
       }
       this.list = out; this.listAt = now;
-      this.plots = out.map(x => ({ key: x.key, name: x.name, at: x.at, rect: x.rect, inside: !!(x.w && x.w.inside) }));
+      this.plots = out.map(x => ({ key: x.key, name: x.name, at: x.at, rect: x.rect, inside: !!(x.w && x.w.inside), offline: !!x.kept }));
+      const psig = this.plots.map(p => p.key + (p.offline ? "~" : "")).join();
+      if (psig !== this.plotSig) { this.plotSig = psig; queueMicrotask(() => v._changed()); }   // a plot came, went, or is kept while its office is away
       this._tell(out, mine, unit);
       return out;
     }
@@ -2435,14 +2610,14 @@
 
     // A plot's scene in this world: turned and scaled into place (its middle where the layout says), its fog too.
     _holder(x) {
-      const T = this.T, w = x.w, s = w.scene;
-      let h = this.holders.get(w.channel);
+      const T = this.T, s = x.w ? x.w.scene : this._keptScene(x), id = x.w ? x.w.channel : "kept:" + x.key;
+      let h = this.holders.get(id);
       if (!h || h.s !== s) {
         if (h && h.s.root.parent === h.place) h.place.remove(h.s.root);
         const holder = new T.Scene(), place = new T.Group();
         place.matrixAutoUpdate = false; holder.add(place); place.add(s.root);
         h = { holder, place, s, sig: "", fog: undefined, inverse: new T.Matrix4(), planes: [] };
-        this.holders.set(w.channel, h);
+        this.holders.set(id, h);
       }
       const sig = [x.at.x, x.at.z, x.at.turn, x.k].join();
       if (sig !== h.sig) {
@@ -2460,6 +2635,59 @@
         h.holder.fog = !f ? null : f.isFogExp2 ? new T.FogExp2(f.color.getHex(), f.density / x.k) : new T.Fog(f.color.getHex(), f.near * x.k, f.far * x.k);
       }
       return h;
+    }
+
+    // A guest's plot kept while they are away (8.10), as a scene: its landscape read with this page's three.js (as
+    // data: cleanScene), lit softly if it brought no lights of its own, and over it its name: offline.
+    _keptScene(x) {
+      const k = x.kept, T = this.T;
+      if (k.built && k.built.T === T) return k.built;
+      const root = new T.Group();
+      let land;
+      try { land = new T.ObjectLoader().parse(cleanScene(k.json, { vertices: 0, objects: 0 })); }
+      catch (e) { console.warn("visit: a kept plot that could not be read: drawn empty", e); land = new T.Group(); }
+      root.add(land);
+      let lit = false;
+      land.traverse(o => { if (o.isLight) lit = true; });
+      if (!lit) { root.add(new T.HemisphereLight(0xffffff, 0x445566, 0.6)); const d = new T.DirectionalLight(0xffffff, 0.45); d.position.set(5, 10, 7); root.add(d); }
+      const label = bubble(T, `${k.name || "?"} · offline`, k.unit);
+      label.position.set(k.plot.center[0], 3 / k.unit, k.plot.center[1]);
+      root.add(label);
+      k.built = { T, root, land };
+      return k.built;
+    }
+    _keptForget(key) {
+      const h = this.holders.get("kept:" + key);
+      if (h) {
+        this.holders.delete("kept:" + key);
+        h.s.root.traverse(c => { if (c.geometry) c.geometry.dispose(); for (const m of list(c.material)) { if (m.map) m.map.dispose(); m.dispose(); } });
+      }
+      this.listAt = -1;
+    }
+    // Walked in your world at home, from where you were to where your page has you: a kept plot's walls (its owner
+    // away, nobody to walk you there) walked into, not through, sliding along them as Visit.walk does.
+    _walls(list, to) {
+      const from = this.home;
+      if (!from) return to;
+      for (const x of list) {
+        if (!x.kept || !(within(x.rect, from.x, from.z) || within(x.rect, to.x, to.z))) continue;
+        const h = this._holder(x), T = this.T, u = this.v._unit(), ray = this.wallRay || (this.wallRay = new T.Raycaster()), o = new T.Vector3(), d = new T.Vector3();
+        h.holder.updateMatrixWorld();
+        const blocked = (fx, fz, tx, tz) => {
+          d.set(tx - fx, 0, tz - fz);
+          const len = d.length();
+          if (len < 1e-6) return false;
+          d.normalize();
+          ray.far = len + 0.3 / u;
+          for (const y of [0.4, 1.2]) { ray.set(o.set(fx, (Number(from.y) || 0) + y / u, fz), d); if (ray.intersectObject(h.s.land, true).length) return true; }
+          return false;
+        };
+        if (!blocked(from.x, from.z, to.x, to.z)) continue;
+        if (!blocked(from.x, from.z, to.x, from.z)) to = Object.assign({}, to, { z: from.z });
+        else if (!blocked(from.x, from.z, from.x, to.z)) to = Object.assign({}, to, { x: from.x });
+        else to = Object.assign({}, to, { x: from.x, z: from.z });
+      }
+      return to;
     }
 
     _forget(w) {
@@ -2489,7 +2717,7 @@
         if (this.yHome != null) { me.y = this.yHome; this.yHome = null; }
         this.in = null;
         x = list.find(y => y.w && y.w.scene && !y.w.inside && (this.refused.get(y.w.channel) || 0) <= now && within(y.rect, me.x, me.z));
-        if (!x) { this.home = me; v._home = { x: me.x, y: me.y, z: me.z, yaw: me.yaw }; return Object.assign({}, me, { in: null }); }
+        if (!x) { me = this._walls(list, me); this.home = me; v._home = { x: me.x, y: me.y, z: me.z, yaw: me.yaw }; return Object.assign({}, me, { in: null }); }
         this._enter(x, me, now);
       }
       const w = x.w, s = w.scene, h = this._holder(x), yaw = me.yaw - x.at.turn * Math.PI / 2;
@@ -2578,6 +2806,7 @@
         this.commons.fog = this.scene.fog || null;
         r.render(this.commons, camera);
         for (const x of list) {
+          if (x.kept) { const h = this._holder(x); r.clippingPlanes = h.planes; r.render(h.holder, camera); continue; }   // a guest away: its kept plot
           if (!x.w || !x.w.scene) continue;
           const h = this._holder(x), s = x.w.scene;
           if (s.offset !== null) v._sceneInterp(s, now - s.offset - INTERP_MS);
@@ -2683,7 +2912,7 @@
       // Voice (8.7): those near you in the room you are in; your microphone on or off.
       if (v.state === "online") rows.push(`<div class="row"><span class="grow">${v.voices.length ? "near you: " + v.voices.map(x => `<b class="${x.speaking ? "speaking" : ""}">${x.speaking ? "🔊 " : ""}${esc(x.name)}</b>`).join(", ") : `voice <span class="muted">· nobody near you</span>`}</span>
         <button data-v="mic" class="${v.mic ? "go" : ""}" title="${v.mic ? "those near you hear you (click: microphone off)" : "your microphone: those near you hear you, the nearer the louder (headphones are best)"}">${v.mic ? "🎙 on" : "🎙 off"}</button></div>`);
-      if (v._world && v.state === "online") rows.push(`<div class="row"><span class="grow">your world: ${v._world.plots.length} ${v._world.plots.length === 1 ? "room" : "rooms"} round yours</span><button data-v="map" title="where your friends' rooms sit round yours, from above">Map</button></div>`);
+      if (v._world && v.state === "online") rows.push(`<div class="row"><span class="grow">your world: ${v._world.plots.length} ${v._world.plots.length === 1 ? "room" : "rooms"} round yours${(n => n ? ` (${n} offline)` : "")(v._world.plots.filter(p => p.offline).length)}</span><button data-v="map" title="where your friends' rooms sit round yours, from above">Map</button></div>`);
       if (v.visiting && !v.visiting.link) rows.push(`<div class="row"><span class="grow">in <b>${esc(v.visiting.host.name)}</b>'s room${v.visiting.paused ? " (reloading)" : ""}</span><button data-v="leave">Leave</button></div>`);
       // Your links: in the corner (go there, or into your world), in their room, waiting for the corner, in your world.
       for (const l of v.links) {
@@ -2854,7 +3083,7 @@
       const mp = v._plot(), mine = [mp.center[0] - mp.size[0] / 2, mp.center[1] - mp.size[1] / 2, mp.center[0] + mp.size[0] / 2, mp.center[1] + mp.size[1] / 2];
       const list = w.list.map(x => {
         const at = drag && drag.key === x.key ? drag.at : pending.get(x.key) || x.at;
-        return { key: x.key, name: x.name, at, rect: w._rect({ at, plot: x.plot, k: x.k }), plot: x.plot, k: x.k,
+        return { key: x.key, name: x.name, at, rect: w._rect({ at, plot: x.plot, k: x.k }), plot: x.plot, k: x.k, offline: !!x.kept,
           placed: pending.has(x.key) || v.layout.some(p => p.key === x.key) };
       });
       return { mp, mine, list };
@@ -2921,7 +3150,7 @@
         const [ax, az] = toPx(p.at.x + nx * hw * 0.75, p.at.z + nz * hd * 0.75);
         ctx.fillStyle = "#8b949e"; ctx.beginPath(); ctx.moveTo(ax + nx * 6, az + nz * 6); ctx.lineTo(ax - nx * 3 - nz * 5, az - nz * 3 + nx * 5);
         ctx.lineTo(ax - nx * 3 + nz * 5, az - nz * 3 - nx * 5); ctx.closePath(); ctx.fill();
-        label(p.rect, p.name || "?", p.placed ? "placed" : "in the ring");
+        label(p.rect, p.name || "?", (p.offline ? "offline · " : "") + (p.placed ? "placed" : "in the ring"));
       }
       drawSide(d);
     }

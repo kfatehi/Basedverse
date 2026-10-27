@@ -48,6 +48,8 @@ const STREAM_DELTAS: u8 = 0;
 const STREAM_SCENE: u8 = 1;
 /// A stream the visitor opens, its host having asked: the visitor's avatar (8.6), gzipped JSON.
 const STREAM_AVATAR: u8 = 2;
+/// A host's landscape (../SPEC.md 8.10), on a stream of its own, when the visitor asks for it.
+const STREAM_LAND: u8 = 3;
 /// What a datagram of voice starts with (8.7), and of a visitor's voice a room passes on; an input's is JSON, and
 /// starts with `{`.
 const DATAGRAM_AUDIO: u8 = 0xA0;
@@ -77,6 +79,8 @@ pub enum LinkCmd {
     Scene(Bytes),
     /// This office's avatar, gzipped JSON, for the host (8.6).
     Avatar(Bytes),
+    /// This office's landscape, gzipped JSON, for the visitor who asked for it (8.10).
+    Land(Bytes),
     /// A packet of this office's voice, for the other side, near it (sent as a datagram: late is lost, 8.7).
     Audio(Bytes),
     /// Someone's voice this office passes to the other side (8.7, 8.8).
@@ -450,7 +454,10 @@ async fn run(role: Role, visit: &str, est: Established, cmds: &mut mpsc::Receive
                     let _ = conn.send_datagram(Bytes::from(d));
                 }
                 Some(LinkCmd::Avatar(gz)) => if role == Role::Visitor {
-                    tasks.push(tokio::spawn(write_avatar(conn.clone(), gz, visit.to_string())));
+                    tasks.push(tokio::spawn(write_blob(conn.clone(), STREAM_AVATAR, gz, visit.to_string())));
+                },
+                Some(LinkCmd::Land(gz)) => if role == Role::Host {
+                    tasks.push(tokio::spawn(write_blob(conn.clone(), STREAM_LAND, gz, visit.to_string())));
                 },
                 Some(LinkCmd::Close(why)) => {
                     let _ = frames::write_msg(&mut send, &json!({ "bye": why })).await;
@@ -559,17 +566,33 @@ async fn write_scene(conn: Connection, mut rx: mpsc::UnboundedReceiver<(u64, Byt
     }
 }
 
-/// The visitor's avatar, on a stream of its own (its host asked for it).
-async fn write_avatar(conn: Connection, gz: Bytes, visit: String) {
+/// The visitor's avatar (its host asked for it), or the host's landscape (the visitor asked), on a stream of its own.
+async fn write_blob(conn: Connection, kind: u8, gz: Bytes, visit: String) {
     let sent = async {
         let mut s = conn.open_uni().await?;
-        s.write_all(&[STREAM_AVATAR]).await?;
+        s.write_all(&[kind]).await?;
         frames::write_scene_msg(&mut s, &gz).await?;
         s.finish()?;
         anyhow::Ok(())
     };
     if let Err(e) = sent.await {
-        debug!(%visit, "the avatar did not go: {e:#}");
+        debug!(%visit, kind, "a stream's blob did not go: {e:#}");
+    }
+}
+
+/// The visitor's side: the host's landscape it asked for, checked (gzipped JSON, within a scene's limits) and
+/// passed on still gzipped: kept as it came, by the hash of what it is.
+async fn read_land(mut stream: RecvStream, visit: String, core: mpsc::UnboundedSender<Ev>) {
+    let gz = match tokio::time::timeout(Duration::from_secs(120), frames::read_blob(&mut stream, frames::MAX_SCENE)).await {
+        Ok(Ok(Some(gz))) => gz,
+        Ok(Ok(None)) | Err(_) => return,
+        Ok(Err(e)) => return warn!(%visit, "a landscape that is not what it should be: {e:#}"),
+    };
+    let check = gz.clone();
+    match tokio::task::spawn_blocking(move || frames::unpack_scene(&check)).await {
+        Ok(Ok(_)) => { let _ = core.send(Ev::LinkLand { visit, gz }); }
+        Ok(Err(e)) => warn!(%visit, "a landscape that is not what it should be: {e:#}"),
+        Err(e) => warn!(%visit, "{e}"),
     }
 }
 
@@ -607,7 +630,7 @@ async fn read_avatars(conn: Connection, visit: String, core: mpsc::UnboundedSend
 /// its first byte says which. A newer key delta's stream abandons the older (its reader stopped), so a stalled
 /// one is never waited for.
 async fn read_streams(conn: Connection, visit: String, core: mpsc::UnboundedSender<Ev>) {
-    let (mut deltas, mut scene): (Option<JoinHandle<()>>, Option<JoinHandle<()>>) = (None, None);
+    let (mut deltas, mut scene, mut land): (Option<JoinHandle<()>>, Option<JoinHandle<()>>, Option<JoinHandle<()>>) = (None, None, None);
     while let Ok(mut stream) = conn.accept_uni().await {
         let mut kind = [STREAM_DELTAS];
         if !matches!(tokio::time::timeout(HANDSHAKE, stream.read_exact(&mut kind)).await, Ok(Ok(()))) {
@@ -625,10 +648,15 @@ async fn read_streams(conn: Connection, visit: String, core: mpsc::UnboundedSend
                     old.abort();
                 }
             }
+            STREAM_LAND => {
+                if let Some(old) = land.replace(tokio::spawn(read_land(stream, visit, core))) {
+                    old.abort();
+                }
+            }
             other => debug!(%visit, other, "a stream of a kind this version does not know: ignored"),
         }
     }
-    for t in [deltas, scene].into_iter().flatten() {
+    for t in [deltas, scene, land].into_iter().flatten() {
         t.abort();
     }
 }

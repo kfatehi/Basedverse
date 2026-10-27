@@ -14,6 +14,7 @@ use tracing::{debug, info, trace, warn};
 
 use crate::{
     frames::{self, Frame},
+    land::{self, Kept, Lands},
     link::{LinkCmd, Links, Relays, Role},
     lobby::LobbyOut,
     state::{self, Guest, Place, Saved},
@@ -49,6 +50,8 @@ pub enum Ev {
     SceneResync { visit: String },
     /// A visitor's avatar (8.6): unpacked, checked JSON, for the host's page.
     LinkAvatar { visit: String, json: String },
+    /// A host's landscape this office asked for, gzipped (../SPEC.md 8.10).
+    LinkLand { visit: String, gz: Bytes },
     /// A packet of the other side's voice (8.7).
     LinkAudio { visit: String, data: Bytes },
     /// Someone's voice the other side passed on (8.7, 8.8).
@@ -121,6 +124,11 @@ struct Visit {
     speaker: bool,
     /// Lines said by the visitor in the current window (host side): at most SAYS a SAY_WINDOW.
     says: (Instant, u32),
+    /// Landscapes (8.10). Host side: the visitor reads them (else its page gets the whole room inline), and the
+    /// one last sent it. Visitor side: the host's, by its hash.
+    landscapes: bool,
+    land_sent: Option<String>,
+    land_hash: Option<String>,
 }
 
 /// Where everyone in this office's room is (8.7), in metres, as its page last said: its own user (none while they
@@ -212,6 +220,9 @@ pub struct Core {
     voice: VoiceRoom,
     /// Lines this office's page said in the current window (8.9).
     says: (Instant, u32),
+    /// This office's own landscape (8.10), as its page last gave it: its hash, and it gzipped. And friends' kept.
+    land: Option<(String, Bytes)>,
+    lands: Lands,
     /// Where this office's page has put others in its world (8.4), by key: each told over every link up with it.
     seen_out: HashMap<String, Value>,
     /// Where others have put this office in their worlds, by key: (their name, where), for a page that comes back;
@@ -229,7 +240,7 @@ pub struct Core {
 
 impl Core {
     pub fn new(lobby: mpsc::UnboundedSender<LobbyOut>, me: mpsc::UnboundedSender<Ev>, relays: Option<Relays>, max_visitors: u8, idle_exit: u64,
-               saved: Saved, fresh: bool, state_file: Option<PathBuf>) -> Core {
+               saved: Saved, fresh: bool, state_file: Option<PathBuf>, lands: Lands) -> Core {
         let key = saved.key.public().to_string();
         let core = Core {
             lobby,
@@ -259,6 +270,8 @@ impl Core {
             phone: false,
             voice: VoiceRoom::default(),
             says: (Instant::now(), 0),
+            land: None,
+            lands,
             seen_out: HashMap::new(),
             seen_in: HashMap::new(),
             knocks: BTreeMap::new(),
@@ -383,6 +396,7 @@ impl Core {
                     }
                 }
             }
+            Ev::LinkLand { visit, gz } => self.land_in(&visit, gz),
             Ev::LinkAudio { visit, data } => self.voice_in(&visit, data, false),
             Ev::LinkRelay { visit, data } => self.voice_in(&visit, data, true),
             Ev::LinkAvatar { visit, json } => {
@@ -418,7 +432,7 @@ impl Core {
         self.to_page(json!({
             "type": "ready", "version": VERSION, "office": self.office, "online": self.online, "away": self.saved.away, "status": self.status,
             "max_visitors": self.max_visitors, "visits": visits, "key": self.key, "door": self.door(), "guests": self.guests(),
-            "layout": self.saved.layout_json(), "avatars": self.saved.avatars_json(), "voice_range": VOICE_RANGE,
+            "layout": self.saved.layout_json(), "avatars": self.saved.avatars_json(), "voice_range": VOICE_RANGE, "kept": self.lands.kept_json(),
             "seen": self.seen_in.iter().map(|(k, (name, at))| json!({ "key": k, "name": name, "at": at })).collect::<Vec<_>>(),
         }));
         if let Some(view) = self.lobby_view.clone() {
@@ -432,10 +446,20 @@ impl Core {
             self.to_page(k);
         }
         self.tell_hosted(json!({ "paused": false }));
-        // A visit this page is on: the host's whole scene again (a page that comes back has none), and a key delta.
+        // A visit this page is on: the host's whole scene again (a page that comes back has none), and a key delta;
+        // and its landscape, kept here (8.10).
+        let mut lands = Vec::new();
         for v in self.visits.values().filter(|v| v.up && v.role == Role::Visitor) {
             let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "scene_resync": true })));
             let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "keyframe": true })));
+            if let (Some(h), Some(key)) = (&v.land_hash, v.peer.get("key").and_then(Value::as_str)) {
+                lands.push((v.channel, key.to_string(), h.clone()));
+            }
+        }
+        for (ch, key, h) in lands {
+            if let Some(gz) = self.lands.get(&key, &h) {
+                self.land_to_page(ch, &key, gz);
+            }
         }
     }
 
@@ -495,6 +519,7 @@ impl Core {
                     self.save_state();
                     self.tell_guests();
                     self.end_watchers(|key| key == k);   // no longer a guest: no longer watching
+                    self.forget_plot(&k);   // nor kept in this world while they are away
                 }
                 None => self.page_error("bad_message", "key is the guest's key", Some("guest_remove")),
             },
@@ -623,6 +648,24 @@ impl Core {
                     None => return self.page_error("no_call", "no call on that channel", Some("speaker")),
                 }
                 self.tell_near();
+            }
+            // A friend's plot in this office's world, kept to draw while they are away (8.10): who, where its plot is
+            // (in its terms), its unit. Drawn from its last landscape (`plot_load`: sent as `landscape`, channel 0);
+            // let go (`plot_forget`) as the page says.
+            "plot_keep" => match Kept::from_json(&m) {
+                Some(k) => self.lands.keep_plot(k),
+                None => self.page_error("bad_message", "key, name, plot { center, size }, unit", Some("plot_keep")),
+            },
+            "plot_load" => {
+                let key = m.get("key").and_then(Value::as_str).unwrap_or("").to_string();
+                match self.lands.latest(&key).filter(|_| self.lands.is_kept(&key)) {
+                    Some(gz) => self.land_to_page(0, &key, gz),
+                    None => self.page_error("not_found", "no plot kept for that key", Some("plot_load")),
+                }
+            }
+            "plot_forget" => {
+                let key = m.get("key").and_then(Value::as_str).unwrap_or("").to_string();
+                self.forget_plot(&key);
             }
             // A line this office's user says (8.9): to everyone in the room they are in, and nobody else.
             "say" => {
@@ -762,6 +805,9 @@ impl Core {
 
     /// A delta of this office's scene for one of its visitors, or an edit of it.
     fn page_frame(&mut self, data: &[u8]) {
+        if let Some(gz) = frames::land_from_page(data) {   // this room's landscape: kept, and offered by its hash to every visitor
+            return self.land_set(gz);
+        }
         if let Some((to, audio)) = frames::audio_from_page(data) {   // this office's user's voice: this visit-client decides who hears it
             return self.voice_out(to, audio);
         }
@@ -999,6 +1045,52 @@ impl Core {
         }
     }
 
+    // ---------- landscapes (8.10): what never changes, sent once, kept ----------
+
+    /// This room's landscape, from its page: kept, and offered by its hash to every visit to this room.
+    fn land_set(&mut self, gz: Bytes) {
+        let hash = land::hash(&gz);
+        if self.land.as_ref().is_some_and(|(h, _)| *h == hash) {
+            return;
+        }
+        info!(hash = &hash[..12], len = gz.len(), "this room's landscape");
+        for v in self.visits.values().filter(|v| v.up && v.role == Role::Host) {
+            let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "landscape": hash })));
+        }
+        self.land = Some((hash, gz));
+    }
+
+    /// A host's landscape this office asked for: kept and given to the page if it is the one the host named (by
+    /// its hash), else dropped.
+    fn land_in(&mut self, id: &str, gz: Bytes) {
+        let Some(v) = self.visits.get(id).filter(|v| v.role == Role::Visitor) else { return };
+        let (ch, key, want) = (v.channel, v.peer.get("key").and_then(Value::as_str).unwrap_or("").to_string(), v.land_hash.clone());
+        let hash = land::hash(&gz);
+        if want.as_deref() != Some(hash.as_str()) {
+            return warn!(visit = id, "a landscape other than the one its host named: dropped");
+        }
+        self.lands.put(&key, &hash, &gz);
+        self.land_to_page(ch, &key, gz);
+    }
+
+    /// An office's landscape for the page, unpacked off the async threads (checked JSON), as text: never dropped,
+    /// as a frame may be. On a visit's channel, or 0: a plot kept while its office is away.
+    fn land_to_page(&self, ch: u16, key: &str, gz: Bytes) {
+        let Some(p) = &self.page else { return };
+        let (text, key) = (p.text.clone(), json!(key).to_string());
+        tokio::task::spawn_blocking(move || match frames::unpack_scene(&gz).map(String::from_utf8) {
+            Ok(Ok(json)) => { let _ = text.send(PageOut::Text(format!("{{\"type\":\"landscape\",\"channel\":{ch},\"key\":{key},\"json\":{json}}}"))); }
+            _ => warn!("a landscape kept that is not what it should be"),
+        });
+    }
+
+    /// That office's plot and landscape, let go (the page told when it had the plot).
+    fn forget_plot(&mut self, key: &str) {
+        if self.lands.forget(key) {
+            self.to_page(json!({ "type": "plot_forgotten", "key": key }));
+        }
+    }
+
     // ---------- chat (8.9): a line said, to everyone in the same room ----------
 
     /// A line this office's user says: to the room they are in (another's: its owner's visit-client passes it on to
@@ -1137,6 +1229,7 @@ impl Core {
                     self.watch_pending.remove(&to);
                     if m.get("accept").and_then(Value::as_bool) != Some(true) {
                         if let Some(key) = self.office_key(&to) {
+                            self.forget_plot(&key);   // their door shut to this office, or no longer a guest: not kept
                             self.watch_declined.insert(key, Instant::now());
                         }
                     }
@@ -1270,6 +1363,7 @@ impl Core {
                     last_seq: 0, inputs: (Instant::now(), 0), want_key: false, host_state: None, ctl: (Instant::now(), 0), key_asked: None, resync_asked: None, resync_due: false,
                     points: (Instant::now(), 0), guest, watch, inside: !watch, shared_adds: false, link, in_world: false, avatar_asked: false, peer_phone: false,
                     call_on: false, speaker: false, says: (Instant::now(), 0),
+                    landscapes: false, land_sent: None, land_hash: None,
                 });
             }
             Err(e) => {
@@ -1296,6 +1390,12 @@ impl Core {
             links.forget(id);
         }
         info!(visit = id, reason, "visit ended");
+        // Ended by its host on purpose (its door shut to this office, no longer a guest, kicked): its plot is not kept.
+        if v.role == Role::Visitor && reason == "kicked" {
+            if let Some(key) = v.peer.get("key").and_then(Value::as_str) {
+                self.forget_plot(key);
+            }
+        }
         if v.role == Role::Host && v.inside {
             self.voice.visitors.remove(&v.channel);
             self.tell_near();
@@ -1422,6 +1522,9 @@ impl Core {
         if phone {   // this room has a phone: the other side hears of it, as every link does
             let _ = cmd.try_send(LinkCmd::Ctl(json!({ "phone": true })));
         }
+        if let Some((hash, _)) = self.land.as_ref().filter(|_| role == Role::Host) {   // this room's landscape, by its hash
+            let _ = cmd.try_send(LinkCmd::Ctl(json!({ "landscape": hash })));
+        }
         if let Some(at) = v.peer.get("key").and_then(Value::as_str).and_then(|k| self.seen_out.get(k)) {   // where they are in this world
             let _ = cmd.try_send(LinkCmd::Ctl(json!({ "seen": at })));
         }
@@ -1429,6 +1532,7 @@ impl Core {
         match role {
             Role::Visitor => {
                 let _ = cmd.try_send(LinkCmd::Ctl(json!({ "shared_adds": true })));
+                let _ = cmd.try_send(LinkCmd::Ctl(json!({ "landscapes": true })));
                 if !first {   // back after a blip: where everything is now
                     let _ = cmd.try_send(LinkCmd::Ctl(json!({ "keyframe": true })));
                 }
@@ -1513,7 +1617,20 @@ impl Core {
             }
             // From the visitor.
             Role::Host => {
-                if m.get("shared_adds") == Some(&json!(true)) {
+                if m.get("landscapes") == Some(&json!(true)) {   // the visitor reads landscapes (8.10): its page told, once
+                    if !v.landscapes {
+                        v.landscapes = true;
+                        self.to_page(json!({ "type": "landscapes", "channel": ch }));
+                    }
+                } else if let Some(want) = m.get("landscape_want").and_then(Value::as_str) {   // this room's landscape, once a link
+                    if let Some((hash, gz)) = self.land.as_ref().filter(|(h, _)| h == want) {
+                        if v.land_sent.as_deref() != Some(hash.as_str()) {
+                            info!(visit = %v.id, hash = &hash[..12], "this room's landscape sent");
+                            v.land_sent = Some(hash.clone());
+                            let _ = v.cmd.try_send(LinkCmd::Land(gz.clone()));
+                        }
+                    }
+                } else if m.get("shared_adds") == Some(&json!(true)) {
                     if !v.shared_adds {
                         v.shared_adds = true;
                         self.to_page(json!({ "type": "shared_adds", "channel": ch }));
@@ -1548,6 +1665,13 @@ impl Core {
                     v.avatar_asked = true;
                     if let Some(gz) = self.avatar.clone() {
                         let _ = v.cmd.try_send(LinkCmd::Avatar(gz));
+                    }
+                } else if let Some(h) = m.get("landscape").and_then(Value::as_str).filter(|h| land::hash_ok(h)) {   // the host's landscape (8.10)
+                    let (h, key, cmd) = (h.to_string(), v.peer.get("key").and_then(Value::as_str).unwrap_or("").to_string(), v.cmd.clone());
+                    v.land_hash = Some(h.clone());
+                    match self.lands.get(&key, &h) {
+                        Some(gz) => self.land_to_page(ch, &key, gz),   // kept: nothing to send
+                        None => { let _ = cmd.try_send(LinkCmd::Ctl(json!({ "landscape_want": h }))); }
                     }
                 } else if let Some(p) = m.get("paused").and_then(Value::as_bool) {
                     self.to_page(json!({ "type": if p { "host_paused" } else { "host_resumed" }, "channel": ch }));
@@ -1619,6 +1743,9 @@ fn started(v: &Visit) -> Value {
     }
     if v.shared_adds {
         m["shared_adds"] = json!(true);
+    }
+    if v.landscapes {
+        m["landscapes"] = json!(true);
     }
     if v.peer_phone {
         m["phone"] = json!(true);
