@@ -23,6 +23,7 @@ How this workroom uses basedverse's Visit, and every way it differs from Visit's
 | chat bubbles | vanilla | |
 | chat window (say, whisper, a linked room, the lobby) | vanilla | |
 | landscapes, offline plots | vanilla | (what is marked `visitStatic`, and how) |
+| flying | vanilla | (vanilla: none, arrivals in the air float down; `fly` if visitors may fly here) |
 
 State is one of:
 - **vanilla**: Visit's default. This includes the room's own choices where Visit has none: what its landscape is,

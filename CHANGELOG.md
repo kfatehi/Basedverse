@@ -9,6 +9,30 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.17.0 — 2026-10-26
+
+**Flying, a room's choice** (Keyvan's, #7). A room lets its visitors fly with `fly: true` in `visit.host` (or
+`{ speed, max }`, in metres a second and above the floor); it is off unless the room says so, and read at every move.
+
+- **Keys, as WoW flies:** Space or Page Up up, X or Page Down down: a visitor's input gains `up` (−1, 0, 1).
+- **Your `move` needs no change:** it still sees each visitor on your floor, stairs and lifts included; Visit keeps
+  how high above it they are (4 m a second by default, never below the floor, never above `max`).
+- **No flying here:** a visitor that is in the air (one stepping in from a world while flying: `air` on the `enter`
+  pose) floats gently down to your floor, at 1.5 m a second.
+- **Arriving in the air:** a page flying at home passes its user's height above its floor to `world.frame` (`air`),
+  and a plot it steps into has it that high.
+
+Known: on a slow machine, a visitor floated down in someone's plot can see itself a little above the floor on its
+own screen (everyone else sees it on the floor); its world measures its height in a plot from the first update it
+reads. Left as is until it shows up in use.
+
+### What an integration does
+
+1. Get visit-client 0.17.0 (`bin/setup` again, download; or this release).
+2. Nothing more: without `fly`, nobody flies in your room, and anyone arriving in the air floats down. To let them
+   fly, `fly: true` in `visit.host`. To fly into friends' plots from your own world, pass your user's `air` (and
+   `up`) to `world.frame` while they fly.
+
 ## v0.16.0 — 2026-10-26
 
 **Whispers, and one row a person.**
