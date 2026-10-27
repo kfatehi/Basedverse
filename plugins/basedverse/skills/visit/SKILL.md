@@ -32,6 +32,11 @@ feature in a workroom's code. If the changelog has something newer than the tabl
 - **Vanilla by default.** Take Visit's ready-made pieces (INTEGRATING.md, "The vanilla experience") unless the user
   asks otherwise. Every way the workroom differs from vanilla goes in its `VISIT.md`, in the user's own words, with
   the date.
+- **A deviation replaces or turns off a Visit default**, and nothing else. Examples: the room's own phone
+  (`model: false`), its own 🔊 (`speaking: false`), its own panel instead of `Visit.panel`, a feature switched off.
+  A choice Visit leaves to every room is not a deviation: what its landscape is, where the phone stands, which
+  interactions it has, its avatar, where the panel goes. The feature stays **vanilla**, and the choice goes in the
+  "how" column.
 - **An upgrade keeps their choices.** Re-apply each deviation in `VISIT.md` (for example `model: false` for a phone of
   their own). If a release changes something they deviated from, stop and ask: never silently revert to the default,
   and never silently keep something that no longer fits.
@@ -80,9 +85,14 @@ feature in a workroom's code. If the changelog has something newer than the tabl
 
 ## List
 
-For each feature give one line on what it gives the user, then its state in this workroom: **vanilla**, **their own**
-(as `VISIT.md` says), **off**, or **not yet** (new since the version they have, with that version). End with what is
-new since their version, from the changelog.
+For each feature give one line on what it gives the user, then its state in this workroom:
+- **vanilla**: Visit's default, with the room's own choices where Visit has none, such as which objects are landscape
+  or which interactions it has;
+- **their own**: a Visit default replaced or turned off, as `VISIT.md`'s Deviations say;
+- **off**;
+- **not yet**: new since the version they have, with that version.
+
+End with what is new since their version, from the changelog.
 
 ## Ask
 
