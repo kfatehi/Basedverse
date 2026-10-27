@@ -19,6 +19,12 @@ two hooks, and two pieces everyone drops in unchanged.
   <em>A workroom: the jungle sweatshop. Time since last accident: 26 seconds (death by exhaustion). Rat vs. snake: 14–14.</em>
 </p>
 
+<p align="center">
+  <img alt="Another workroom, in a dark cave: blocky agents at their desks, what each is doing written above it, a kanban board on the wall, a tally of recruits lost, the Visit panel, and you, walking around" src=".github/assets/terrorist-sweatshop.png">
+  <br>
+  <em>Another: the terrorist sweatshop. Recruits lost: 0 (shot by the boss: 0, blew up: 0).</em>
+</p>
+
 | | |
 |---|---|
 | [visit/](visit/) | Visit: **visit-client** (the local client, Rust: all the networking) and **visit.js** (the library for the workroom's page), [the spec](visit/SPEC.md), [the integration guide](visit/INTEGRATING.md) and [bodies, things and positions](visit/MODELS.md), written for the coding agent doing it |
