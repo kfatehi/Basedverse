@@ -244,10 +244,10 @@ async def main():
         await asyncio.sleep(0.3)
         await b.js("v._pointNow()")
         pt = await a.until("window.points.length && window.points[0]")
-        pose = await a.js("({ ...v.visitors[0].pose })")
-        check("B points: A hears it, from where A has B, toward the cube: A's ray hits it",
+        pose = await a.js("({ ...v.visitors[0].pose, eyes: v.visitors[0].eyes })")
+        check("B points: A hears it, from B's eyes where A has B (its feet, and its eyes over them), toward the cube: A's ray hits it",
               (pt["visitor"]["name"], [round(x, 2) for x in pt["from"]], round(sum(x * x for x in pt["dir"]), 3), pt["hit"]),
-              ("B", [round(pose[k], 2) for k in "xyz"], 1.0, "spinner"))
+              ("B", [round(pose["x"], 2), round(pose["y"] + pose["eyes"], 2), round(pose["z"], 2)], 1.0, "spinner"))
         check("and it spins: A's interaction ran, for B", await a.until("window.spins.length === 1 && window.spins[0]"), {"who": "B", "type": "spin"})
         await asyncio.sleep(0.25)   # past the first point's 200 ms: one of the ten may go, and only one
         await b.js("for (let i = 0; i < 10; i++) v._pointNow()")
@@ -388,9 +388,9 @@ async def main():
         check("and back down", await a.until("Math.abs(room.atY) < 0.05"), True)
         await a.key("Space", " ", 32, True)
         await asyncio.sleep(0.6)
-        check("B lets nobody fly: A holding up stays on B's floor", (round(await b.js("v.visitors[0].pose.y"), 2), round(await a.js("room.atY"), 2)), (1.6, 0.0))
+        check("B lets nobody fly: A holding up stays on B's floor", (round(await b.js("v.visitors[0].pose.y"), 2), round(await a.js("room.atY"), 2)), (0.0, 0.0))   # (positions at the feet: 0.19)
         await b.js("room.fly = true")
-        check("B lets visitors fly: A holding up rises, in B's room and in A's world", (await b.until("v.visitors[0].pose.y > 4.6"), await a.until("room.atY > 2.5")), (True, True))
+        check("B lets visitors fly: A holding up rises, in B's room and in A's world", (await b.until("v.visitors[0].pose.y > 3"), await a.until("room.atY > 2.5")), (True, True))
         await a.key("Space", " ", 32, False)
         await asyncio.sleep(0.3)
         high = await b.js("v.visitors[0].pose.y")
@@ -399,7 +399,7 @@ async def main():
         await b.js("room.fly = false")
         await asyncio.sleep(0.4)
         check("B stops flying: A floats down, gently (not at once)", await b.js("v.visitors[0].pose.y") > 2.2, True)
-        check("down to B's floor, in B's room and in A's world", (await b.until("Math.abs(v.visitors[0].pose.y - 1.6) < 0.01", 15), await a.until("Math.abs(room.atY) < 0.05", 15)), (True, True))
+        check("down to B's floor, in B's room and in A's world", (await b.until("Math.abs(v.visitors[0].pose.y) < 0.01", 15), await a.until("Math.abs(room.atY) < 0.05", 15)), (True, True))
         bx = await b.js("v.visitors[0].pose.x")
         await walk(a, await a.js("room.me.x"), await a.js("room.me.z"), 3.14159 / 2, 2.0, "room.where === null")   # turned round: back out west
         check("A walks back off B's plot: home again, and B's visitor gone", (await a.until("room.where === null && room.world.in === null"), await b.until("v.visitors.length === 0")), (True, True))
@@ -409,8 +409,8 @@ async def main():
         await walk(a, r[0] - 1.0, midz, -3.14159 / 2, 1.5, "!!room.where")
         await a.js("room.me.air = 0")
         k = await a.js("room.world._layout().find(p => p.key === %s).k" % json.dumps(await a.js("v.offices.find(o => o.name === 'B').key")))
-        check("A crosses onto B's plot in the air: B has it 4 m above its floor (in B's units)", await b.until("v.visitors.length === 1 && Math.abs(highest - 1.6 - 4 / %f) < 0.05" % k), True)
-        check("and floats it down to its floor, as A's world shows", (await b.until("v.visitors.length === 1 && Math.abs(v.visitors[0].pose.y - 1.6) < 0.01", 15), await a.until("Math.abs(room.atY) < 0.05", 15)), (True, True))
+        check("A crosses onto B's plot in the air: B has it 4 m above its floor (in B's units)", await b.until("v.visitors.length === 1 && Math.abs(highest - 4 / %f) < 0.05" % k), True)
+        check("and floats it down to its floor, as A's world shows", (await b.until("v.visitors.length === 1 && Math.abs(v.visitors[0].pose.y) < 0.01", 15), await a.until("Math.abs(room.atY) < 0.05", 15)), (True, True))
         await b.js("clearInterval(highT)")
         await walk(a, await a.js("room.me.x"), await a.js("room.me.z"), 3.14159 / 2, 2.0, "room.where === null")
         check("and A walks off again, home on the ground (not back up where it crossed)", (await b.until("v.visitors.length === 0"), abs(await a.js("room.me.y")) < 0.05), (True, True))
@@ -579,23 +579,45 @@ async def main():
         await a.until("!!document.querySelector('.visit-panel .knock button[data-v=in]')")
         await a.js("document.querySelector('.visit-panel .knock button[data-v=in]').click()")
         check("B visits A: A shows B as their own model (Visit's default)", await a.until(
-            "v.avatars.default === 'theirs' && v.visitors.length === 1 && !!v.visitors[0].avatar && !!room.scene.getObjectByName('avatar:B') && !room.scene.getObjectByName('body:B')"), True)
+            "v.avatars.default === 'theirs' && v.visitors.length === 1 && v.visitors[0].look === 'theirs' && !!room.scene.getObjectByName('avatar:B') && !room.scene.getObjectByName('body:B')"), True)
         check("read with A's three.js (r128, from B's r160): B's torso and head, its walk and idle", await a.js(
             "(h => [h.avatar.object.getObjectByName('torso').geometry.type, !!h.avatar.object.getObjectByName('head'), !!h.avatar.walk, !!h.avatar.idle])([...v._hosted.values()].find(h => h.avatar))"),
             ["CylinderGeometry", True, True, True])
         check("and B, in A's room, does not see itself", await b.until("(s => !!s && s.own.some(o => o.name === 'avatar:B'))(v._viewer && v._viewer.scene)"), True)
+        check("Visit draws it, not A's room: at B's feet, facing B's way", await a.until(
+            "(o => !!o && o.parent === room.scene && Math.abs(o.position.x - v.visitors[0].pose.x) < 0.01 && Math.abs(o.position.y - v.visitors[0].pose.y) < 0.01 && Math.abs(o.rotation.y - v.visitors[0].pose.yaw) < 0.01)(room.scene.getObjectByName('avatar:B'))"), True)
+        check("B sees from its own model's eyes (its \"eyes\" point, 1.5 m): A says so, and B's camera is there", (
+            await a.until("Math.abs(v.visitors[0].eyes - 1.5) < 0.01 && v.visitors[0].look"),
+            await b.until("(bd => !!bd && bd.look === 'theirs' && Math.abs(bd.eyes - 1.5) < 0.01 && Math.abs(v._viewer.scene.pose.y - 1.5) < 0.05)(v._bodies.get(v._viewer.channel))")), ("theirs", True))
         await a.shot("a_avatar.png")
         await a.js("document.querySelector('.visit-panel button.who').click()")
         await a.js("document.querySelector('.visit-panel .sub button[data-v=look][data-use=mine]').click()")
         check("A opens B's row, our model: B set apart, one of A's own (a box)", await a.until(
-            "v.avatarUse(v.visitors[0].visitor.key) === 'mine' && v.avatars.by.length === 1 && v.visitors[0].avatar === null && !!room.scene.getObjectByName('body:B')"), True)
+            "v.avatarUse(v.visitors[0].visitor.key) === 'mine' && v.avatars.by.length === 1 && v.visitors[0].look === 'mine' && !!room.scene.getObjectByName('body:B')"), True)
+        check("and B sees from A's room's eyes now (1.6 m), as B hears", await b.until("(bd => !!bd && bd.look === 'mine' && Math.abs(bd.eyes - 1.6) < 0.01 && Math.abs(v._viewer.scene.pose.y - 1.6) < 0.05)(v._bodies.get(v._viewer.channel))"), True)
         await a.js("document.querySelector('.visit-panel .sub button[data-v=look][data-use=theirs]').click()")
-        check("their model again: the default, so no longer apart", await a.until("v.avatars.by.length === 0 && !!v.visitors[0].avatar && !!room.scene.getObjectByName('avatar:B')"), True)
+        check("their model again: the default, so no longer apart", await a.until("v.avatars.by.length === 0 && v.visitors[0].look === 'theirs' && !!room.scene.getObjectByName('avatar:B')"), True)
         await a.js("(s => { s.value = 'mine'; s.dispatchEvent(new Event('change', { bubbles: true })); })(document.querySelector('.visit-panel select[data-v=looks]'))")
         check("visitors look like: our model: B a box", await a.until(
-            "v.avatars.default === 'mine' && v.visitors[0].avatar === null && !!room.scene.getObjectByName('body:B') && !room.scene.getObjectByName('avatar:B')"), True)
+            "v.avatars.default === 'mine' && v.visitors[0].look === 'mine' && !!room.scene.getObjectByName('body:B') && !room.scene.getObjectByName('avatar:B')"), True)
         await a.js("(s => { s.value = 'theirs'; s.dispatchEvent(new Event('change', { bubbles: true })); })(document.querySelector('.visit-panel select[data-v=looks]'))")
-        await a.until("v.avatars.default === 'theirs' && !!v.visitors[0].avatar")
+        await a.until("v.avatars.default === 'theirs' && v.visitors[0].look === 'theirs'")
+        print("\nmodels, checked as other rooms will read them (Visit.checkModel, MODELS.md)")
+        check("B's own avatar: fine, its eyes at its eyes point, its clips", await b.js(
+            "(c => [c.ok, c.eyes, c.clips.join()])(Visit.checkModel(v._avatarOwn.object, { three: v._hooks.scene.three }))"), [True, 1.5, "idle,walk"])
+        # MODELS.md's own example body, as written there: it must pass (the doc and the check agree)
+        models = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "MODELS.md")).read()
+        example = next(b_ for b_ in models.split("```js")[1:] if "function myBody" in b_).split("```")[0]
+        example = "\n".join(l for l in example.splitlines() if not l.startswith("visit."))
+        check("MODELS.md's example body passes the check: its feet, its eyes point (1.7 m), its clips", await b.js(
+            "(THREE => { %s; return (c => [c.ok, c.problems.join('; '), c.eyes, c.clips.join()])(Visit.checkModel(myBody(THREE), { three: THREE })); })(v._hooks.scene.three)" % example),
+            [True, "", 1.7, "idle,walk,ride"])
+        check("a model off its feet, set in a room, a clip moving a part it does not have: each said", await b.js("""(T => {
+          const g = new T.Group(), m = new T.Mesh(new T.BoxGeometry(0.5, 1.6, 0.5), new T.MeshBasicMaterial()); m.position.y = 1.5; g.add(m); g.position.x = 3;
+          g.animations = [new T.AnimationClip('walk', 1, [new T.NumberKeyframeTrack('leg0.rotation[x]', [0, 1], [0, 1])])];
+          const c = Visit.checkModel(g, { three: T });
+          return [c.ok, c.problems.some(p => p.startsWith('its feet are not at its origin')), c.problems.some(p => p.includes('"leg0"')), c.problems.some(p => p.startsWith('its own place or turn')), g.position.x];
+        })(v._hooks.scene.three)"""), [False, True, True, True, 3])
 
         print("\nmounts: B rides in A's room, on B's room's own (8.11)")
         check("no mounts of Visit's own: none until B's room gives some, and no row for them in its panel", await b.js(
@@ -736,6 +758,8 @@ async def main():
         await b.call("Input.insertText", text="half a thought")
         await b.key("Escape", "Escape", 27, True)
         await b.key("Escape", "Escape", 27, False)
+        check("the window's 🔔: a sound with each line that comes; a click, none (kept in this browser)", (await b.js(f"{cw}.querySelector('button.sound').textContent"),
+              await b.js(f"({cw}.querySelector('button.sound').click(), {cw}.querySelector('button.sound').textContent)"), await b.js(f"({cw}.querySelector('button.sound').click(), {cw}.querySelector('button.sound').textContent)")), ("🔔", "🔕", "🔔"))
         check("Esc: the box goes, its line unsaid", (await b.until(f"!{cw}.classList.contains('typing')"), await a.js("v.chatLog.some(l => l.text === 'half a thought')")), (True, False))
         await a.js("window.cw2 = Visit.chat(v, { fade: 300 })")
         check("a window idle a while fades away", await a.until("cw2.element.classList.contains('idle')"), True)

@@ -21,7 +21,7 @@ two hooks, and two pieces everyone drops in unchanged.
 
 | | |
 |---|---|
-| [visit/](visit/) | Visit: **visit-client** (the local client, Rust: all the networking) and **visit.js** (the library for the workroom's page), [the spec](visit/SPEC.md), and [the integration guide](visit/INTEGRATING.md), written for the coding agent doing it |
+| [visit/](visit/) | Visit: **visit-client** (the local client, Rust: all the networking) and **visit.js** (the library for the workroom's page), [the spec](visit/SPEC.md), [the integration guide](visit/INTEGRATING.md) and [bodies, things and positions](visit/MODELS.md), written for the coding agent doing it |
 | [lobby/](lobby/) | the lobby server everyone connects to (Python): presence, knocks, introductions. [Its protocol](lobby/PROTOCOL.md), its tests, and its deployment (Caddy for TLS, coturn) |
 | [bin/setup](bin/setup) | sets up Visit for a workroom: the lobby (or deploys your own), your office, visit-client, your `.env` |
 | [bin/deploy-lobby](bin/deploy-lobby) | puts the lobby on a server over ssh, and updates it |

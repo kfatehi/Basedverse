@@ -9,6 +9,61 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.19.0 — 2026-10-27
+
+**One way of placing people, and bodies that show.** A friend's body didn't show in your room, or showed buried,
+because positions meant "eyes" in one place and "feet" in another, and every room had to draw visitors' models
+itself. Now:
+
+- **Positions are feet**, everywhere: your `spawn` and `move` return where a visitor's feet are (0 on a floor at 0),
+  as `world.frame` takes your own user. Eyes are above that, and only the camera is there: their own model's
+  `eyes` point, else your room's `eye` (1.6 m).
+- **Visit draws your visitors' own models**, at their feet, facing their way, playing `idle`, `walk` and `ride`.
+  Your room draws its own figure for a visitor only where `visit.visitors[i].look` is "mine".
+- **A model that can't be shown is said, both ways.** If your visitor gives none (`avatar_none`) or it doesn't
+  read, they show as your model, and both panels say why (`visit.visitors[i].problem`; their `body` event).
+- **`Visit.checkModel`**: your model, checked as other rooms will read it (feet, centre, size, its own place, what
+  its clips move, shaders, size, reading back). `visit.avatar` and `visit.possessions` run it as you give them.
+- **[MODELS.md](visit/MODELS.md)**: how to place people and make bodies and things, for whoever implements a room.
+- **The chat window**: half as big again, and a soft sound with each line that comes (a whisper rises; 🔔 by the
+  box turns it off).
+
+**Physics are your room's.** Visit has none of its own any more. It carries what your room needs to decide, and your
+`spawn` and `move` say where a visitor is, their height included.
+
+- **Gone from Visit:**
+  - floating arrivals down at 1.5 m a second;
+  - flying at 4 m a second, and the `fly` option in `visit.host`;
+  - lifting riders onto their mounts;
+  - moving riders at their mount's pace.
+- **What your room gets instead:**
+  - `input.up` (Space or Page Up, X or Page Down) in `move`;
+  - `at.air` in `spawn`: how high above their own floor one stepping in from a world was;
+  - `who.riding` in `move`: { id, name, fly, speed, lift }.
+  - What happens is yours. INTEGRATING suggests the old behaviour: arrivals come down gently, riders sit their
+    mount's `lift` higher at its pace, and flying mounts fly.
+- **Rooms say a little more:**
+  - `move` may return `air` (how high above the floor) for a mount's fly clip;
+  - `walk: { speed, mounts: true }` tells a rider's page it walks at its mount's pace.
+- **Visit still does the plumbing:** `mounts: false` keeps mounts out; a mount stands under its rider's feet (`eye`
+  below their eyes, then `lift`); flying keys and `air` reach the room.
+- **A visitor's own world has them as high as the room does:** its pose's height, less the room's `eye`. That
+  replaces "where I stepped in, plus how far the room has moved me since", which could leave their screen up in the
+  air when a room brought them down at once.
+
+### What an integration does
+
+1. Get visit-client 0.19.0. Read [MODELS.md](visit/MODELS.md).
+2. **Return feet from `spawn` and `move`**, not eyes: where you returned 1.6 (or your eye height) on the floor,
+   return 0. Say `eye` if your visitors' eyes are not 1.6 m over their feet as your model.
+3. **Stop drawing visitors' own models yourself**: Visit does. Draw your own figure only where `look` is "mine",
+   at `pose` (their feet). `visitors[i].avatar` is null from now on.
+4. Check your user's body: `Visit.checkModel(body, { three: THREE })`, and fix what it says.
+5. If your room relied on Visit for flying or falling, do it in `move` (INTEGRATING step 5 has a sketch): honour
+   `at.air` in `spawn`, bring visitors down or fly them, lift and pace riders. Without it, nobody flies in your room,
+   one arriving in the air stays there until your `move` says otherwise, and riders go at walking pace.
+6. `fly` in `visit.host` is gone: drop it (it does nothing).
+
 ## v0.18.1 — 2026-10-26
 
 **Mounts are your room's, not Visit's.** Visit is the plumbing: it carries what your room makes and puts it under its

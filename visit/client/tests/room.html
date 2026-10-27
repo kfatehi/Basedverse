@@ -101,12 +101,12 @@ async function build(v) {
     for (const x of v.visitors) {
       if (!x.pose) continue;
       here.add(x.id);
-      // A visitor as itself (its own avatar, when this room shows its look: SPEC 8.6), else as one of ours: a box.
+      // A visitor as itself (its own model, when this room shows its look: Visit draws it, SPEC 8.6), else as one of
+      // ours: a box, standing where its feet are.
       let b = bodies.get(x.id);
-      if (b && b !== x.avatar && (x.avatar || b.name.startsWith("avatar:"))) { scene.remove(b); bodies.delete(x.id); b = null; }   // its look changed
-      if (!b && x.avatar) { b = x.avatar; scene.add(b); bodies.set(x.id, b); }
+      if (x.look === "theirs") { if (b) { scene.remove(b); bodies.delete(x.id); } continue; }
       if (!b) { b = new THREE.Mesh(new THREE.BoxGeometry(0.4, 1.7, 0.4), lambert(0x58a6ff)); b.userData.visitor = x.id; b.name = "body:" + x.visitor.name; scene.add(b); bodies.set(x.id, b); }
-      b.position.set(x.pose.x, x.avatar ? 0 : 0.85, x.pose.z); b.rotation.y = x.pose.yaw;
+      b.position.set(x.pose.x, x.pose.y + 0.85, x.pose.z); b.rotation.y = x.pose.yaw;
     }
     for (const [id, b] of bodies) if (!here.has(id)) { scene.remove(b); bodies.delete(id); }
     const c = renderer.domElement;
@@ -144,14 +144,24 @@ async function build(v) {
   const t = await build(v);
   v.host({
     // Where a visitor appears; in a world, where it stepped in (`at`), or the nearest free spot to it (a desk may be there).
-    spawn: (who, { at } = {}) => { const near = at && freeNear(at.x, at.z), p = near ? { x: near[0], y: 1.6, z: near[1], yaw: at.yaw, pitch: 0 } : { x: 2, y: 1.6, z: 6, yaw: 0, pitch: 0 }; (window.spawns = window.spawns || []).push({ who: who.name, at: at || null, p, t: Math.round(performance.now()) }); return p; },
+    spawn: (who, { at } = {}) => { const near = at && freeNear(at.x, at.z), p = near ? { x: near[0], y: Number(at.air) || 0, z: near[1], yaw: at.yaw, pitch: 0 } : { x: 2, y: 0, z: 6, yaw: 0, pitch: 0 }; (window.spawns = window.spawns || []).push({ who: who.name, at: at || null, p, t: Math.round(performance.now()) }); return p; },
     // room.lift (the test sets it): a lift under every visitor, that far up from where they came in
-    get fly() { return window.room.fly; },   // room.fly (the test sets it): whether visitors may fly here, read at every move
+    // This room's physics (Visit has none of its own, SPEC 8.2): visitors walk at 2.5 m a second (riders at their mount's pace),
+    // their feet on the floor at y 0 (room.lift raises it under everyone; a rider sits its mount's lift higher). One above
+    // that floats down at 1.5 m a second, unless it may fly here (room.fly true, or on a mount that flies while room.fly is
+    // not false): then its up lifts or lowers it, 4 m a second. Stepping in from a world in the air, it comes in that high.
     get mounts() { return window.room.mounts; },   // room.mounts (the test sets it): false keeps mounts out (8.11)
-    move: (pose, input, dt, who) => { window.movedFor = who && who.id; window.movedWith = { dt, riding: who && who.riding }; const p = Visit.walk(pose, input, dt, { speed: 2.5, blocked }); return window.room.lift != null ? Object.assign({}, p, { y: 1.6 + window.room.lift }) : p; },
+    move: (pose, input, dt, who) => {
+      window.movedFor = who && who.id; window.movedWith = { dt, riding: who && who.riding };
+      const r = who && who.riding, floor = (window.room.lift || 0) + (r ? r.lift : 0), y0 = Number.isFinite(Number(pose.y)) ? Number(pose.y) : floor;
+      const p = Visit.walk(pose, input, dt, { speed: 2.5 * (r ? r.speed : 1), blocked });
+      const flies = window.room.fly === true || (!!r && r.fly && window.room.fly !== false);
+      const y = flies ? Math.max(floor, y0 + (Number(input.up) || 0) * 4 * dt) : y0 > floor ? Math.max(floor, y0 - 1.5 * dt) : floor;
+      return Object.assign({}, p, { y, air: y - floor });
+    },
     fov: 70,
     scene: { root: t.scene, three: t.THREE, renderer: t.renderer, near: 0.05, far: 100 },
-    walk: { speed: 2.5 },   // as move() walks: the visitor's page walks at once, before the answer
+    walk: { speed: 2.5, mounts: true },   // as move() walks: the visitor's page walks at once, before the answer (a rider at its mount's pace)
     plot: { center: [ROOM.w / 2, ROOM.d / 2], size: [ROOM.w, ROOM.d] },   // its land, in a world: the room's floor
     unit: 1,   // metres
   });
@@ -161,8 +171,9 @@ async function build(v) {
   const T = t.THREE, av = new T.Group();
   const torso = new T.Mesh(new T.CylinderGeometry(0.25, 0.25, 1.2, 12), new T.MeshLambertMaterial({ color: 0xa371f7 }));
   const head = new T.Mesh(new T.SphereGeometry(0.22, 12, 8), new T.MeshLambertMaterial({ color: 0xffd7a8 }));
+  const eyes = new T.Object3D(); eyes.name = "eyes"; eyes.position.set(0, 1.5, -0.1);   // where it sees from (MODELS.md)
   torso.name = "torso"; torso.position.y = 0.6; head.name = "head"; head.position.y = 1.45;
-  av.add(torso, head);
+  av.add(torso, head, eyes);
   av.animations = [new T.AnimationClip("idle", 2, [new T.NumberKeyframeTrack("head.position[y]", [0, 1, 2], [1.45, 1.5, 1.45])]),
                    new T.AnimationClip("walk", 0.6, [new T.NumberKeyframeTrack("torso.rotation[z]", [0, 0.3, 0.6], [-0.1, 0.1, -0.1])])];
   v.avatar(av);

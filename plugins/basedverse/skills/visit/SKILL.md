@@ -19,6 +19,9 @@ Do not work from memory: Visit changes with every release. Read these from the b
   **"The vanilla experience"** is the default for everything.
 - **`CHANGELOG.md`**: every release, newest first, each with **"What an integration does"**. These are the steps for an
   upgrade from one version to the next.
+- **`visit/MODELS.md`**: where people are (their feet) and how a room hands over its user's body and things so that
+  other rooms show them right. Follow it as written for `spawn`, `move`, `visit.avatar` and possessions, and run
+  `Visit.checkModel` on every model.
 - **`visit/SPEC.md`**: the contract (messages, limits, the library's API), for detailed questions.
 
 The feature list is whatever those docs say Visit has. The table under "Where to look" is only a hint for finding a
@@ -85,7 +88,8 @@ feature in a workroom's code. If the changelog has something newer than the tabl
 | one panel row a person (their look, Kick, Unlink in it) | 0.16 | vanilla | the panel; visitors' own look by default (`visit.useAvatars(`) |
 | landscapes, offline plots | 0.12 | step 5 | `userData.visitStatic`, `visit.landscapeChanged(` |
 | mounts (possessions: the room's own; Visit carries them) | 0.18 | vanilla, step 5 | `visit.ride(`, `visit.possessions(`, `mounts:`, `eye:` in `visit.host(` |
-| flying (the room's choice) | 0.17 | step 5 | `fly:` in `visit.host(`; `air` in `world.frame(` |
+| positions at the feet; bodies drawn by Visit; `body` reports (MODELS.md) | 0.19 | step 5, MODELS.md | `spawn(`, `move(` return feet; `look` in `visit.visitors`; `Visit.checkModel(` |
+| physics: falling, flying, riders (the room's own) | 0.17, 0.19 | step 5 | `move(` (`input.up`, `who.riding`), `spawn(` (`at.air`), `eye:`, `walk: { speed, mounts }`; `air` in `world.frame(` |
 | telemetry (⏱) | 0.14 | troubleshooting | the panel's ⏱, `visit.perf(`: nothing to integrate, a tool for when a room feels slow |
 
 ## List

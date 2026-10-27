@@ -13,20 +13,18 @@
 // visitor's page walks at once and the host corrects it), and a host renders and encodes nothing for anyone.
 "use strict";
 (function () {
-  const VERSION = "0.18.1", PROTO = "basedverse-visit-local/2";
+  const VERSION = "0.19.0", PROTO = "basedverse-visit-local/2";
   const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, LOOK = 0.0025;
   const POINT_MS = 200, AIM_MS = 125;   // a visitor's points, at most one this often; what it aims at, looked for this often
-  // Flying (SPEC 8.2): how fast a visitor rises or sinks in a room that lets it fly (v.host fly: true), and how gently
-  // one sinks back to the floor where flying is not allowed, in metres a second; and the keys for up and down.
-  // A visitor arriving in the air hangs there until two key deltas have had it at that height: its world measures its
-  // height from the first it reads (World._frame yBase), and the one sent as it steps in may not be (the next, at
-  // most SCENE_KEY_MS on, is).
-  const FLY_SPEED = 4, FLOAT_DOWN = 1.5, FLOAT_KEYS = 2;
-  const UP_KEYS = ["Space", "PageUp"], DOWN_KEYS = ["KeyX", "PageDown"];   // as WoW flies
+  // A visitor's up and down (SPEC 8.2: its input's `up`), as WoW flies: what they do is the room's (its move).
+  const UP_KEYS = ["Space", "PageUp"], DOWN_KEYS = ["KeyX", "PageDown"];
+  // Positions (SPEC 8.1, MODELS.md): where someone is, is where their feet are, on the ground, in the room's units: a
+  // room's spawn and move say it so, and so does a world's frame. Their eyes are above that: their own model's `eyes`
+  // point where a room shows it (else 92% of its height), else the room's `eye`, EYES metres unless it says. Only a
+  // visitor's camera is at their eyes (what goes over the wire to them is where it is).
   // Possessions (SPEC 8.11): what an office's user owns and brings along, as their own room makes them; for now,
   // mounts. A page gives at most POSSESSIONS (each as big as an avatar may be); MOUNT_KEY gets your user on their
-  // mount and off again (the panel's, once your room gives one). A room's visitor pose is EYES metres above its floor unless the room says (`eye`): a mount
-  // stands on that floor.
+  // mount and off again (the panel's, once your room gives one).
   const POSSESSIONS = 8, MOUNT_KEY = "KeyM", EYES = 1.6;
   // What the host hears many times a second: none of it changes what the page shows, so none fires "change".
   const QUIET = new Set(["input", "point", "keyframe", "link_stats", "scene", "scene_lost", "scene_resync"]);
@@ -619,7 +617,9 @@
       this.interSig = JSON.stringify(this.inter);
       return { type: "scene", three: String(three.REVISION), json, ids: [...this.objs.values()].map(r => [r.o.uuid, r.idx]), targets: this.targets(root), interactions: this.inter,
         renderer: rendererProps(renderer, three), fov: Number(hooks.fov) || 70, near: Number(this.cfg.near) || 0.1, far: Number(this.cfg.far) || 1000,
-        walk: w && Number(w.speed) > 0 ? { speed: Number(w.speed) } : null, yaw0: h.yaw0, pose: h.pose,
+        walk: w && Number(w.speed) > 0 ? { speed: Number(w.speed), mounts: w.mounts === true } : null, yaw0: h.yaw0,
+        pose: h.pose ? Object.assign({}, h.pose, { y: (Number(h.pose.y) || 0) + (h.eyes || 0) }) : h.pose,   // its eyes: where its camera goes
+        eye: h.eyes || (Number(hooks.eye) > 0 ? Number(hooks.eye) : EYES) / (Number(hooks.unit) > 0 ? Number(hooks.unit) : 1),
         plot: hooks.plot ? { center: hooks.plot.center.map(Number), size: hooks.plot.size.map(Number) } : null, unit: Number(hooks.unit) > 0 ? Number(hooks.unit) : 1,
         preview: hooks.preview ? ["x", "y", "z", "yaw", "pitch"].reduce((o, k) => Object.assign(o, { [k]: Number(hooks.preview[k]) }), {}) : null,
         landscape: apart ? { parents: this.landParents() } : null };
@@ -655,6 +655,7 @@
       this._voices = new Map();   // their key -> a decoder, its panner, and where its next moment plays
       this._voiceTo = 0;          // where your voice may go: VOICE_ROOM, VOICE_CALLS, both, or nowhere (nothing encoded)
       this._chats = new Map();    // lines said in the rooms you are in or host (8.9), still showing, by who said them
+      this._bodies = new Map();   // channel -> how the room on it draws your user: { look, eyes, problem } (8.6)
       this.chatLog = [];       // the last CHAT_LOG lines of chat, of every scope (8.9), as "chat" gave them, with `at` (ms)
       this.lobbyChat = false;  // the lobby relays chat (8.9): say(text, "lobby") goes to everyone in it
       this._kept = new Map();     // guests' plots kept while they are away (8.10): key -> { key, name, plot, unit, json, asked, built }
@@ -816,6 +817,8 @@
         case "guests": this._guests(m); break;
         case "avatars": this._avatarsFrom(m); this._avatarWants(); this._visitorsList(); break;
         case "avatar": this._avatarIn(m); break;
+        case "avatar_none": this._avatarNone(m); break;
+        case "body": this._bodyIn(m); break;
         case "possessions": { const h = this._hosted.get(m.channel); if (h) h.possessions = possessionsFrom(m.list); break; }
         case "possession": this._possessionIn(m); break;
         case "phone": if (m.on) this._phoneOn.add(m.channel); else { this._phoneOn.delete(m.channel); const p = this._peerOf(m.channel); if (p && p.key) this._callEnd(p.key, "their phone went", false); } break;
@@ -950,6 +953,7 @@
       if (!object.isObject3D) throw new Error("visit.avatar: a three.js object (or null)");
       const u = Number(unit) > 0 ? Number(unit) : this._unit();
       this._avatarOwn = { object, unit: u };
+      this._modelCheck("your avatar", object, u, "avatar");
       this._avatarSend();
     }
     async _avatarSend() {
@@ -981,8 +985,9 @@
         if (!/^[A-Za-z0-9_.-]{1,40}$/.test(id) || ids.has(id)) throw new Error(`visit.possessions: "${id}" is not an id of its own (1-40 letters, digits, _ . -)`);
         if (!p.object || !p.object.isObject3D) throw new Error(`visit.possessions: ${id} is a three.js object`);
         ids.add(id);
-        return { id, name: String(p.name || id).slice(0, 24), object: p.object, unit: Number(p.unit) > 0 ? Number(p.unit) : this._unit(),
-          mount: p.mount === true, fly: p.fly === true, speed: num(p.speed, 1, 0.25, 5), lift: num(p.lift, 0, 0, 5) };
+        const unit = Number(p.unit) > 0 ? Number(p.unit) : this._unit(), c = this._modelCheck(String(p.name || id), p.object, unit, p.mount === true ? "mount" : "thing");
+        return { id, name: String(p.name || id).slice(0, 24), object: p.object, unit,
+          mount: p.mount === true, fly: p.fly === true, speed: num(p.speed, 1, 0.25, 5), lift: num(p.lift, c && c.seat != null ? c.seat : 0, 0, 5) };   // its "seat" point, unless you say
       });
       this._own = own;
       this._possessionsSend();
@@ -1019,7 +1024,19 @@
     get rideSpeed() { const m = this._mountOf(this.riding); return m ? m.speed : 1; }
     get rideLift() { const m = this._mountOf(this.riding); return m ? m.lift : 0; }
     get rideFly() { const m = this._mountOf(this.riding); return !!(m && m.fly); }
-    _rideWalk(w) { const k = this.rideSpeed; return k === 1 || !w ? w : Object.assign({}, w, { speed: w.speed * k }); }
+    // Walking ahead of the room's answer: at its pace, and at your mount's when it says riders go at theirs (walk.mounts).
+    _rideWalk(w) { const k = this.rideSpeed; return k === 1 || !w || !w.mounts ? w : Object.assign({}, w, { speed: w.speed * k }); }
+
+    // A model of yours, checked as other rooms will read it (checkModel): what is wrong is warned of in the console and
+    // said ("model": { what, problems, notes }); the panel says it too.
+    _modelCheck(what, object, unit, kind) {
+      const T = (this._hooks && this._hooks.scene.three) || (typeof THREE !== "undefined" ? THREE : null);
+      if (!T) return null;
+      const c = checkModel(object, { three: T, unit, kind });
+      if (c.problems.length) console.warn(`visit: ${what}, as other rooms will read it:\n- ` + c.problems.join("\n- "));
+      this._emit("model", { what, problems: c.problems, notes: c.notes });
+      return c;
+    }
 
     useAvatars(use) { this._send({ type: "avatars", default: use === "theirs" ? "theirs" : "mine" }); }
     useAvatar(key, use) { this._send({ type: "avatar_use", key, use: use === "theirs" || use === "mine" ? use : null }); }
@@ -1029,13 +1046,44 @@
       this.avatars = { default: m.default === "theirs" ? "theirs" : "mine",
         by: (Array.isArray(m.by) ? m.by : []).filter(isObj).map(b => ({ key: String(b.key), use: b.use === "theirs" ? "theirs" : "mine" })) };
     }
-    // Host side: ask each visitor whose own look this room shows for its avatar, once a visit.
+    // Host side: ask each visitor whose own look this room shows for its avatar, once a visit; and tell each how it is
+    // drawn here now (its look changed: their model, or ours).
     _avatarWants() {
       for (const h of this._hosted.values()) {
-        if (h.avatarAsked || !h.visitor.key || this.avatarUse(h.visitor.key) !== "theirs") continue;
-        h.avatarAsked = true;
-        this._send({ type: "avatar_want", channel: h.channel });
+        if (!h.avatarAsked && h.visitor.key && this.avatarUse(h.visitor.key) === "theirs") {
+          h.avatarAsked = true;
+          this._send({ type: "avatar_want", channel: h.channel });
+        }
+        this._bodyTell(h);
       }
+    }
+    // This room's eyes over a visitor's feet (scene units): its `eye`, EYES metres unless it says.
+    _eyeRoom() { return (Number(this._hooks && this._hooks.eye) > 0 ? Number(this._hooks.eye) : EYES) / this._unit(); }
+    // How a visitor is drawn here (SPEC 8.1, 8.6), said to its visit-client when it changes: as itself (`look`
+    // "theirs": its own model, which Visit draws, its eyes that model's) or as this room's model ("mine": the room draws
+    // it, its eyes the room's `eye`); and why not as itself, if this room would show it so (`problem`).
+    _bodyTell(h) {
+      const want = !!h.visitor.key && this.avatarUse(h.visitor.key) === "theirs", look = want && h.avatar ? "theirs" : "mine";
+      const problem = want && !h.avatar ? (h.modelProblem || null) : null;
+      h.look = look;
+      h.eyes = look === "theirs" ? h.avatar.eyes || this._eyeRoom() : this._eyeRoom();
+      const sig = [look, h.eyes.toFixed(3), problem].join("|");
+      if (sig === h.bodySaid) return;
+      h.bodySaid = sig;
+      this._bodyPlace(h);
+      this._send({ type: "body", channel: h.channel, look, eyes: h.eyes, problem });
+      this._visitorsList();
+      this._changed();
+    }
+    // A visitor's own model in this room's scene, at its feet, facing its way (as its look says; else none: the room
+    // draws its own).
+    _bodyPlace(h) {
+      const a = h.avatar, hk = this._hooks;
+      if (!a || !hk) return;
+      if (h.look !== "theirs" || !h.pose || !h.inside) { if (a.object.parent) a.object.parent.remove(a.object); return; }
+      if (a.object.parent !== hk.scene.root) hk.scene.root.add(a.object);
+      a.object.position.set(Number(h.pose.x) || 0, Number(h.pose.y) || 0, Number(h.pose.z) || 0);
+      a.object.rotation.set(0, Number(h.pose.yaw) || 0, 0);
     }
     // A visitor's avatar: read with this room's three.js (as data: cleanScene, and a size of its own), scaled to this
     // room's units, marked as its body (userData.visitor), its idle and walk clips ready to play.
@@ -1052,10 +1100,32 @@
         const clip = re => (o.animations || []).find(c => re.test(c.name));
         const mixer = new T.AnimationMixer(o), idle = clip(/idle/i), walk = clip(/walk/i), ride = clip(/ride|sit/i);
         this._avatarDrop(h);
-        h.avatar = { object: body, mixer, idle: idle && mixer.clipAction(idle), walk: walk && mixer.clipAction(walk), ride: ride && mixer.clipAction(ride), playing: null, at: null };
-        this._visitorsList();
-        this._changed();
-      } catch (e) { console.warn(`visit: ${h.visitor.name}'s avatar cannot be read`, e); }
+        h.avatar = { object: body, mixer, idle: idle && mixer.clipAction(idle), walk: walk && mixer.clipAction(walk), ride: ride && mixer.clipAction(ride), playing: null, at: null,
+          eyes: modelEyes(T, body) };
+        h.modelProblem = null;
+      } catch (e) {
+        console.warn(`visit: ${h.visitor.name}'s avatar cannot be read`, e);
+        h.modelProblem = "it could not be read here: " + String(e && e.message || e).slice(0, 160);
+      }
+      this._bodyTell(h);
+    }
+    // Visitor side: how the room we are in (or see) draws us (`body`): our eyes there, for our own world's view of us
+    // (8.4), and whether as ourselves; "body" says it, and why not, to the page and its panel.
+    _bodyIn(m) {
+      const w = this._viewing(m.channel) || this._links.get(m.channel);
+      const body = { look: m.look === "theirs" ? "theirs" : "mine", eyes: Number(m.eyes) > 0 ? Number(m.eyes) : null, problem: typeof m.problem === "string" ? m.problem.slice(0, 200) : null };
+      this._bodies.set(m.channel, body);
+      if (w && w.scene && body.eyes) w.scene.eye = body.eyes;
+      const p = this._peerOf(m.channel) || {};
+      this._emit("body", Object.assign({ channel: m.channel, key: p.key || null, name: p.name || "" }, body));
+      this._changed();
+    }
+    // A visitor's visit-client said it has no avatar to send: its room never gave one (visit.avatar).
+    _avatarNone(m) {
+      const h = this._hosted.get(m.channel);
+      if (!h || h.avatar) return;
+      h.modelProblem = "their room gives no model of its own (visit.avatar)";
+      this._bodyTell(h);
     }
     _avatarDrop(h) {
       const a = h && h.avatar;
@@ -1135,7 +1205,7 @@
         const h = { id: m.id, channel: m.channel, visitor: m.peer || {}, guest: m.guest === true, watch: m.watch === true, link: m.link === true, inside: m.watch !== true || m.inside === true,
           pose: null, yaw0: 0, input: null, inputAt: 0, keyNext: true, fails: 0, sceneSent: false, posed: null, sharedAdds: m.shared_adds === true,
           landscapes: m.landscapes === true, since: performance.now(), possessions: possessionsFrom(m.possessions), models: new Map(), wanted: new Set(), ride: null };
-        if (m.state && m.state.pose && h.inside) { h.pose = m.state.pose; h.yaw0 = m.state.yaw0 || 0; h.air = Math.max(0, Number(m.state.air) || 0); h.lift = Math.max(0, Number(m.state.lift) || 0); h.airKeys = 0; }   // back after this page reloaded
+        if (m.state && m.state.pose && h.inside) { h.pose = m.state.pose; h.yaw0 = m.state.yaw0 || 0; }   // back after this page reloaded
         this._hosted.set(m.channel, h);
         if (h.inside) this._spawn(h);
         this._avatarWants();
@@ -1162,7 +1232,7 @@
     _ended(m) {
       this._nearBy.delete(m.channel);
       const h = this._hosted.get(m.channel);
-      if (h && h.id === m.id) { this._avatarDrop(h); this._rideDrop(h); this._hosted.delete(m.channel); }
+      if (h && h.id === m.id) { this._avatarDrop(h); this._rideDrop(h); this._hosted.delete(m.channel); this._visitorsList(); }
       const w = this._watches.get(m.channel);
       if (w && w.id === m.id) { this._sceneDrop(w); this._landDrop(w); this._watches.delete(m.channel); }
       const l = this._links.get(m.channel);
@@ -1188,7 +1258,7 @@
     _visitorsList() {
       const hs = [...this._hosted.values()];
       this.visitors = hs.filter(h => h.inside).map(h => ({ id: h.id, visitor: h.visitor, guest: h.guest, pose: h.pose, link: h.link,
-        avatar: h.avatar && h.visitor.key && this.avatarUse(h.visitor.key) === "theirs" ? h.avatar.object : null,
+        look: h.look || "mine", eyes: h.eyes || this._eyeRoom(), problem: h.modelProblem || null, avatar: null,
         riding: h.ride ? { id: h.ride.id, name: h.ride.name, fly: h.ride.fly } : null }));
       this.watchers = hs.filter(h => h.watch).map(h => ({ id: h.id, visitor: h.visitor, inside: h.inside, link: h.link }));
       this.links = [...this._links.values()].map(w => ({ id: w.id, host: w.host, where: w.where, inside: w.inside }));
@@ -1731,7 +1801,6 @@
       if (pl != null && !(isObj(pl) && Array.isArray(pl.center) && Array.isArray(pl.size) && pl.center.length === 2 && pl.size.length === 2
         && [...pl.center, ...pl.size].every(Number.isFinite) && pl.size[0] > 0 && pl.size[1] > 0)) throw new Error("visit.host: plot is { center: [x, z], size: [w, d] }");
       if (hooks.unit != null && !(Number(hooks.unit) > 0)) throw new Error("visit.host: unit is how many metres one of the scene's units is (a number above 0)");
-      if (hooks.fly != null && typeof hooks.fly !== "boolean" && !isObj(hooks.fly)) throw new Error("visit.host: fly is true, false or { speed, max } (metres)");
       if (hooks.mounts != null && typeof hooks.mounts !== "boolean") throw new Error("visit.host: mounts is true or false (8.11)");
       if (hooks.eye != null && !(Number(hooks.eye) > 0)) throw new Error("visit.host: eye is how high above its floor a visitor's pose is, in metres (1.6)");
       // `preview` (optional): { x, y, z, yaw, pitch }, where a link sees this room from before going in (8.5); without
@@ -1764,12 +1833,8 @@
     _spawn(h, at) {
       if (!this._hooks || h.pose) return;
       try { h.pose = Object.assign({}, this._hooks.spawn(h.visitor, at ? { at } : {})); h.yaw0 = h.watch ? 0 : h.pose.yaw || 0; }
-      catch (e) { console.error("visit: spawn threw", e); return; }
-      // One stepping in from a world in the air (at.air: how far above its own floor its page had it) is that high
-      // above this room's floor: it flies on there, or floats down to it (_step).
-      h.air = at ? Math.max(0, Number(at.air) || 0) : 0;
-      h.pose.y = (Number(h.pose.y) || 0) + h.air;
-      h.airKeys = 0;
+      catch (e) { console.error("visit: spawn threw", e); }
+      this._bodyTell(h);
     }
 
     _hostEnter(m) {
@@ -1786,6 +1851,7 @@
       if (!h || !h.watch) return;
       this._rideSet(h, null);
       Object.assign(h, { inside: false, pose: null, input: null });
+      this._bodyPlace(h);
       this._visitorsList();
     }
 
@@ -1807,7 +1873,7 @@
       const p = h.pose;
       if (!p || !Number.isFinite(m.yaw) || !Number.isFinite(m.pitch)) return;
       const yaw = h.yaw0 + m.yaw, pitch = Math.max(-1.4, Math.min(1.4, m.pitch)), c = Math.cos(pitch);
-      const from = [Number(p.x) || 0, Number(p.y) || 0, Number(p.z) || 0], dir = [-Math.sin(yaw) * c, Math.sin(pitch), -Math.cos(yaw) * c];
+      const from = [Number(p.x) || 0, (Number(p.y) || 0) + (h.eyes || 0), Number(p.z) || 0], dir = [-Math.sin(yaw) * c, Math.sin(pitch), -Math.cos(yaw) * c];   // from its eyes
       this._emit("point", { id: h.id, visitor: h.visitor, from, dir, yaw, pitch });
       if (this._interactions.size) this._interact(h, from, dir);
     }
@@ -1861,7 +1927,7 @@
         const body = sync.entries(moved), all = key || ready.some(h => h.keyNext) ? sync.entries(sync.dynamicRecs()) : null;
         for (const h of ready) {
           const k = key || h.keyNext, p = h.pose, posed = p ? [p.x, p.y, p.z, p.yaw, p.pitch, h.input && h.input.t].join() : "-";
-          if (k || body.n || posed !== h.posed) { this._sendDelta(h, k ? all : body, k, now); h.posed = posed; h.keyNext = false; if (k && p) h.airKeys = (h.airKeys || 0) + 1; }
+          if (k || body.n || posed !== h.posed) { this._sendDelta(h, k ? all : body, k, now); h.posed = posed; h.keyNext = false; }
         }
         for (const h of hs) {   // the whole room to a visitor starting: once its visit-client said it reads landscapes (8.10), or a moment on (an older one never says)
           if (h.sceneSent || (!h.landscapes && sync.statics.length && now - h.since < LAND_WAIT)) continue;
@@ -1927,7 +1993,7 @@
       dv.setUint8(11, h.pose ? 1 : 2);
       dv.setFloat64(12, h.input ? Number(h.input.t) || 0 : 0);
       dv.setFloat32(20, h.input ? now - h.inputAt : 0);
-      [p.x, p.y, p.z, p.yaw, p.pitch].forEach((x, i) => dv.setFloat32(24 + 4 * i, Number(x) || 0));
+      [p.x, (Number(p.y) || 0) + (h.pose ? h.eyes || 0 : 0), p.z, p.yaw, p.pitch].forEach((x, i) => dv.setFloat32(24 + 4 * i, Number(x) || 0));   // its eyes: where its camera is
       dv.setUint32(44, body.n);
       buf.set(body.bytes, 48);
       this._ws.send(buf);
@@ -1977,7 +2043,8 @@
       const pose = isObj(e.pose) ? e.pose : {}, num = (x, d) => Number.isFinite(Number(x)) ? Number(x) : d;
       const s = { T, loader, budget, root, ownId, byIdx: new Map(), idxOf: new Map(), geos: new Map(), mats: new Map(), texs: new Map(), samples: new Map(),
         offs: [], offset: null, pose: { x: num(pose.x, 0), y: num(pose.y, 1.6), z: num(pose.z, 0) }, yaw0: num(e.yaw0, 0),
-        walk: isObj(e.walk) && num(e.walk.speed, 0) > 0 ? { speed: Math.min(50, num(e.walk.speed, 2.5)) } : null,
+        walk: isObj(e.walk) && num(e.walk.speed, 0) > 0 ? { speed: Math.min(50, num(e.walk.speed, 2.5)), mounts: e.walk.mounts === true } : null,
+        eye: num(e.eye, 0) > 0 ? num(e.eye, 0) : null,   // our eyes over our feet there (its units; `body` says again): an older host's, unsaid
         hist: [], vis: { x: 0, y: 0, z: 0 }, waitKey: true, own: [], last: 0, gcAt: performance.now(), q: new T.Quaternion(), v: new T.Vector3(), relight: null,
         interactions: interMap(e.interactions), landParents: isObj(e.landscape) && Array.isArray(e.landscape.parents) ? e.landscape.parents : null };
       this._sceneAdopt(s, root);
@@ -2264,9 +2331,6 @@
       if (ver === 1 && (!w.watch || w.inside)) {
         this._sceneReconcile(s, dv.getFloat64(12), dv.getFloat32(20), dv.getFloat32(24), dv.getFloat32(28), dv.getFloat32(32), now);
         if (w.watch) s.hostPose = { x: dv.getFloat32(24), y: dv.getFloat32(28), z: dv.getFloat32(32) };
-        // the height its host first had us at, from the first delta itself (where we stepped on, in the air or not):
-        // a slow page draws after several, by when a stair, a lift or a float down has moved us on
-        if (w.watch && s.yBase == null && Number.isFinite(s.hostPose.y)) { s.yBase = s.hostPose.y; s.vis.y = 0; }
       }
       const n = dv.getUint32(44);
       let at = 48;
@@ -2450,7 +2514,7 @@
       if (now - (this._avatarAt || 0) >= 33) {   // visitors' own avatars, walking or idle, 30 times a second
         const dt = Math.min(0.25, (now - (this._avatarAt || now)) / 1000);
         this._avatarAt = now;
-        for (const h of this._hosted.values()) if (h.inside && h.avatar && this.avatarUse(h.visitor.key) === "theirs") this._avatarStep(h, dt);
+        for (const h of this._hosted.values()) if (h.inside && h.avatar && h.look === "theirs") this._avatarStep(h, dt);
         for (const h of this._hosted.values()) if (h.inside && h.ride) this._rideStep(h, dt);   // and their mounts
       }
       if (now - (this._sceneAt || 0) >= SCENE_MS - 2) { this._sceneAt = now; this._sceneTick(now); }
@@ -2466,47 +2530,24 @@
       h.movedAt = now;
       const fresh = h.input && now - h.inputAt < STALE_MS;
       const input = fresh ? h.input : { forward: 0, strafe: 0, up: 0, run: false, yaw: h.input ? h.input.yaw : 0, pitch: h.input ? h.input.pitch : 0, riding: h.input ? h.input.riding : null };
-      // What it rides here (8.11), as this room allows: its mount under it, at its pace, its rider lifted.
+      // What it rides here (8.11), as this room lets in: its mount under it. How it goes (its pace, how high, whether
+      // it flies) is the room's move's to say: Visit tells it (`who.riding`), and does nothing of its own.
       const ride = this._rideOf(h, input);
       if ((ride && ride.id) !== (h.ride && h.ride.id)) this._rideSet(h, ride);
-      // The room's move sees the visitor on its floor; Visit keeps how far above it the visitor flies (h.air), and
-      // sits on its mount (h.lift).
-      const u = this._unit(), air = h.air || 0, k = h.ride ? h.ride.speed : 1;
       let p;
       try {
-        const turned = Object.assign({}, h.pose, { y: (Number(h.pose.y) || 0) - air - (h.lift || 0), yaw: h.yaw0 + (input.yaw || 0), pitch: input.pitch || 0 });
-        const who = { id: h.id, visitor: h.visitor, riding: h.ride ? { id: h.ride.id, name: h.ride.name, fly: h.ride.fly, speed: k } : null };
-        p = Object.assign({}, this._hooks.move(turned, input, dt * k, who) || turned);   // a mount's pace: k times as far
+        const turned = Object.assign({}, h.pose, { yaw: h.yaw0 + (input.yaw || 0), pitch: input.pitch || 0 });
+        const r = h.ride, who = { id: h.id, visitor: h.visitor, riding: r ? { id: r.id, name: r.name, fly: r.fly, speed: r.speed, lift: r.lift } : null };
+        p = Object.assign({}, this._hooks.move(turned, input, dt, who) || turned);
         h.fails = 0;
       } catch (e) { return this._hookFailed(h, "move", e); }
-      const fly = this._flies(h), floor = Number(p.y) || 0;
-      h.air = !fly && (h.airKeys || 0) < FLOAT_KEYS ? air : this._air(air, input, dt, fly);
-      h.lift = h.ride ? h.ride.lift / u : 0;
-      p.y = floor + h.air + h.lift;
       h.pose = p;
-      if (h.ride) this._ridePlace(h, floor);
+      this._bodyPlace(h);
+      if (h.ride) this._ridePlace(h);
       if (now - (h.keptAt || 0) >= 200) {   // where the visitor stands, kept by visit-client for a reload of this page
         h.keptAt = now;
-        this._send({ type: "pose", channel: h.channel, state: { pose: h.pose, yaw0: h.yaw0, air: h.air || 0, lift: h.lift || 0 } });
+        this._send({ type: "pose", channel: h.channel, state: { pose: h.pose, yaw0: h.yaw0 } });
       }
-    }
-
-    // Whether a visitor may fly here (8.2, 8.11), and how fast and high: the room's `fly` (true, or { speed, max };
-    // false: nobody, not even on a mount that flies); a room that says nothing lets a mount that flies, fly.
-    _flies(h) {
-      const f = this._hooks.fly;
-      if (f === false) return null;
-      return f || (h.ride && h.ride.fly ? true : null);
-    }
-
-    // How far above the floor a visitor is after dt (scene units): where it may fly (`f`, _flies), its `up` lifts or
-    // lowers it (no lower than the floor, no higher than f.max); elsewhere it floats gently down.
-    _air(air, input, dt, f) {
-      const u = this._unit();
-      if (!f) return Math.max(0, air - FLOAT_DOWN / u * dt);
-      const speed = isObj(f) && Number(f.speed) > 0 ? Number(f.speed) : FLY_SPEED, max = isObj(f) && Number(f.max) >= 0 ? Number(f.max) / u : Infinity;
-      const up = Math.max(-1, Math.min(1, Number(input.up) || 0));
-      return Math.min(max, Math.max(0, air + up * speed / u * dt));
     }
 
     // ---------- possessions here (8.11): visitors' mounts ----------
@@ -2540,14 +2581,13 @@
       Object.assign(r, { object: m.object, mixer: m.mixer, clips: m.clips });
       r.object.name = "mount:" + (h.visitor.name || ""); r.object.userData.visitRider = h.id;
       hk.scene.root.add(r.object);
-      if (h.pose) this._ridePlace(h, (Number(h.pose.y) || 0) - (h.air || 0) - (h.lift || 0));
+      if (h.pose) this._ridePlace(h);
     }
-    // On the floor under its rider (the visitor's pose is `eye` above it), or in the air with it, facing its way.
-    _ridePlace(h, floor) {
+    // Under its rider: their feet (their pose) its `lift` up from where it stands, facing their way.
+    _ridePlace(h) {
       const o = h.ride && h.ride.object, p = h.pose;
       if (!o || !p) return;
-      const eye = (Number(this._hooks.eye) > 0 ? Number(this._hooks.eye) : EYES) / this._unit();
-      o.position.set(p.x, floor - eye + (h.air || 0), p.z);
+      o.position.set(p.x, (Number(p.y) || 0) - h.ride.lift / this._unit(), p.z);
       o.rotation.set(0, Number(p.yaw) || 0, 0);
     }
     // Its moves as it goes, 30 times a second: in the air (a mount that flies), walking, or still.
@@ -2556,7 +2596,7 @@
       if (!r || !r.object || !p) return;
       const u = this._unit(), mps = r.at ? Math.hypot(p.x - r.at.x, p.z - r.at.z) / Math.max(dt, 1e-3) * u : 0;
       r.at = { x: p.x, z: p.z };
-      rideAnimate(r, r.fly && (h.air || 0) > 0.05 / u ? "fly" : mps > 0.3 ? "walk" : "idle", mps, dt);
+      rideAnimate(r, r.fly && Number(p.air) > 0.05 / u ? "fly" : mps > 0.3 ? "walk" : "idle", mps, dt);   // in the air: as its room's move says (pose.air)
     }
     // One of a visitor's possessions' models, which this page asked for: read as an avatar is (as data, scaled to
     // this room's units), its clips ready; ridden at once if its visitor is on it.
@@ -2819,6 +2859,86 @@
     const want = how === "fly" ? c.fly || c.walk || c.idle : how === "walk" ? (mps > 4 && c.run) || c.walk || c.idle : c.idle;
     if (want !== r.playing) { if (r.playing) r.playing.fadeOut(0.2); if (want) want.reset().fadeIn(0.2).play(); r.playing = want; }
     r.mixer.update(dt);
+  }
+  // A model as other rooms will read it (MODELS.md): your avatar, or a possession. Its feet at its origin, centred, a
+  // size that fits its unit, its own place and turn zero, what each clip moves there to move, its named points, what
+  // three.js carries, and that it reads back. { ok, problems: [...], notes: [...], height (m), eyes (m), seat (m), clips }.
+  // `three`: your THREE; `unit`: metres in one of its units; `kind`: "avatar" or "mount".
+  function checkModel(object, { three, unit = 1, kind = "avatar" } = {}) {
+    const T = three || (typeof THREE !== "undefined" ? THREE : null), problems = [], notes = [], out = { ok: false, problems, notes, height: 0, eyes: null, seat: null, clips: [] };
+    if (!object || !object.isObject3D) { problems.push("it is not a three.js object (an Object3D)"); return out; }
+    if (!T) { problems.push("checkModel needs your three.js: { three: THREE }"); return out; }
+    const u = Number(unit) > 0 ? Number(unit) : 1, m = x => (x * u).toFixed(2) + " m";
+    if (object.parent) notes.push("it is in a scene now: give a model of its own (a fresh one, or a clone), not one standing in your room");
+    if (object.position.lengthSq() > 1e-6 || Math.abs(object.rotation.x) + Math.abs(object.rotation.y) + Math.abs(object.rotation.z) > 1e-6)
+      problems.push(`its own place or turn is not zero (at ${object.position.toArray().map(x => x.toFixed(2)).join(", ")}): it goes with it to every room, and puts it off its feet`);
+    const place = [object.position.clone(), object.quaternion.clone()], parent = object.parent;
+    if (parent) parent.remove(object);   // measured on its own, at its origin
+    object.position.set(0, 0, 0); object.rotation.set(0, 0, 0); object.updateMatrixWorld(true);
+    try {
+      const box = new T.Box3().setFromObject(object);
+      if (box.isEmpty()) problems.push("it draws nothing (no meshes)");
+      else {
+        const h = box.max.y - box.min.y, w = Math.max(box.max.x - box.min.x, box.max.z - box.min.z), cx = (box.min.x + box.max.x) / 2, cz = (box.min.z + box.max.z) / 2;
+        out.height = Number((h * u).toFixed(3));
+        if (Math.abs(box.min.y) * u > Math.max(0.05, 0.05 * h * u)) problems.push(`its feet are not at its origin: its lowest point is at y = ${m(box.min.y)} (the ground under its feet goes at y = 0)`);
+        if (Math.hypot(cx, cz) > Math.max(0.1 / u, 0.25 * w)) problems.push(`it is not centred on its origin: its middle is at x ${m(cx)}, z ${m(cz)}`);
+        if (kind === "avatar" && (h * u < 0.3 || h * u > 4)) problems.push(`it is ${m(h)} tall: is its unit right? (metres in one of its units: ${u})`);
+        if (kind === "mount" && (h * u < 0.1 || h * u > 10)) problems.push(`it is ${m(h)} tall: is its unit right? (metres in one of its units: ${u})`);
+      }
+      const at = name => { const o = object.getObjectByName(name); return o ? new T.Vector3().setFromMatrixPosition(o.matrixWorld) : null; };
+      const eyes = at("eyes"), seat = at("seat");
+      if (kind === "avatar") {
+        out.eyes = Number(((eyes ? eyes.y : 0.92 * (box.isEmpty() ? 0 : box.max.y)) * u).toFixed(3));
+        if (!eyes) notes.push(`no "eyes" point: its eyes taken as 92% of its height (${out.eyes} m)`);
+        else if (eyes.z > 0.05 / u) problems.push(`its "eyes" point is behind its middle (z ${m(eyes.z)}): does it face -z?`);
+      }
+      if (kind === "mount") {
+        if (seat) out.seat = Number((seat.y * u).toFixed(3));
+        else notes.push('no "seat" point: its rider sits `lift` metres up (0 unless you say)');
+      }
+      // Its clips: what each moves must be a part it has, by name (else it moves nothing, anywhere).
+      const clips = object.animations || [], want = kind === "mount" ? ["idle", "walk"] : ["idle", "walk"];
+      out.clips = clips.map(c => c.name);
+      for (const n of want) if (!clips.some(c => new RegExp(n, "i").test(c.name))) notes.push(`no "${n}" clip: it ${n === "idle" ? "stands still" : "glides"} when ${n === "idle" ? "still" : "moving"}`);
+      const parts = new Set(); object.traverse(o => { if (o.name) parts.add(o.name); parts.add(o.uuid); });
+      for (const c of clips) for (const t of c.tracks || []) {
+        let node = null;
+        try { node = T.PropertyBinding.parseTrackName(t.name).nodeName; } catch (e) { problems.push(`clip "${c.name}" has a track three.js cannot read: "${t.name}"`); continue; }
+        if (node && !parts.has(node) && node !== ".bones") problems.push(`clip "${c.name}" moves "${node}", which the model has no part named`);
+      }
+      // What carries, and how much.
+      let vertices = 0, objects = 0;
+      object.traverse(o => {
+        objects++;
+        if (o.geometry && o.geometry.attributes && o.geometry.attributes.position) vertices += o.geometry.attributes.position.count;
+        for (const mt of list(o.material)) if (mt && (mt.isShaderMaterial || mt.isRawShaderMaterial)) problems.push(`"${o.name || o.type}" has a shader material: shaders do not carry (use three.js's own materials)`);
+        if (o.isSkinnedMesh) notes.push(`"${o.name || "a mesh"}" is skinned (bones): it reads less surely in rooms on other three.js releases than parts moved by clips`);
+      });
+      if (vertices > AVATAR_VERTICES || objects > AVATAR_OBJECTS) problems.push(`it is too big: ${vertices} vertices and ${objects} objects (at most ${AVATAR_VERTICES} and ${AVATAR_OBJECTS})`);
+      // It reads back, as a room reads it.
+      try {
+        const text = JSON.stringify({ unit: u, json: sharedJSON(object) });
+        if (text.length > 4 * MAX_AVATAR) problems.push(`it is too big to send: ${(text.length / 1048576).toFixed(1)} MB of JSON`);
+        const back = new T.ObjectLoader().parse(cleanScene(JSON.parse(text).json, { vertices: 0, objects: 0 }));
+        if ((back.animations || []).length !== clips.length) problems.push(`its clips do not come back with it (${clips.length} given, ${(back.animations || []).length} read)`);
+      } catch (e) { problems.push("it does not read back: " + String(e && e.message || e).slice(0, 160)); }
+    } finally {
+      object.position.copy(place[0]); object.quaternion.copy(place[1]); object.updateMatrixWorld(true);
+      if (parent) parent.add(object);
+    }
+    out.ok = !problems.length;
+    return out;
+  }
+
+  // Where a model's eyes are over its feet (as drawn, its scale applied; it at its origin): its `eyes` point (an object
+  // so named), else 92% of its height (MODELS.md).
+  function modelEyes(T, o) {
+    o.updateMatrixWorld(true);
+    const e = o.getObjectByName("eyes");
+    if (e) return Math.max(0.05, new T.Vector3().setFromMatrixPosition(e.matrixWorld).y - o.getWorldPosition(new T.Vector3()).y);
+    const box = new T.Box3().setFromObject(o);
+    return box.isEmpty() ? null : Math.max(0.05, 0.92 * box.max.y - o.getWorldPosition(new T.Vector3()).y);
   }
   // A list of possessions as a visitor's visit-client gives it (8.11), read again: [{ id, name, mount, fly, speed, lift }].
   function possessionsFrom(l) {
@@ -3216,32 +3336,36 @@
       const fade = Math.exp(-dt / 0.1); s.vis.x *= fade; s.vis.y *= fade; s.vis.z *= fade;
       this._input(w, inp, yaw, me.pitch, now);
       const hp = s.hostPose, pl = s.plot, margin = 0.3 / x.k;
-      if (hp && s.yBase == null) { s.yBase = s.pose.y; s.vis.y = 0; }   // the height its host first had us at: where we stepped on
       if (!hp && now - s.inAt > ENTER_WAIT) { this._refused(w, "no answer"); return this._frame(0, me, {}); }   // its host never had us: back out
       if (hp && (Math.abs(hp.x - pl.center[0]) > pl.size[0] / 2 + margin || Math.abs(hp.z - pl.center[1]) > pl.size[1] / 2 + margin)) {
         this._exit(w);   // its host has us off its plot: home again, walking on from there
         const out = new T.Vector3(hp.x, 0, hp.z).applyMatrix4(h.place.matrix);
-        // home at the height we came with, or lower if its host had us lower (floated down from flying in): never
-        // higher (a room's upstairs is not ours)
-        const rise = s.yBase == null ? 0 : (s.pose.y + s.vis.y - s.yBase) * x.k;
-        this.home = { x: out.x, y: this.yHome + Math.min(0, rise), z: out.z, yaw: me.yaw, pitch: me.pitch };
+        // home at the height we came with, or lower if its host had us lower (come down from flying in): never higher
+        // (a room's upstairs is not ours)
+        this.home = { x: out.x, y: Math.min(this.yHome, this._feet(x, s, h)), z: out.z, yaw: me.yaw, pitch: me.pitch };
         this.yHome = null;
         v._home = { x: out.x, y: this.home.y, z: out.z, yaw: me.yaw };
         return Object.assign({}, this.home, { in: null });
       }
       const at = new T.Vector3(s.pose.x + s.vis.x, 0, s.pose.z + s.vis.z).applyMatrix4(h.place.matrix);
-      // Up or down as its host has us (a stair, a lift), from where we stepped on, in this world's units; the height
-      // we came with stays ours, so a page that keeps the y it is given rises no further.
-      const rise = s.yBase == null ? 0 : (s.pose.y + s.vis.y - s.yBase) * x.k;
-      v._home = { x: at.x, y: this.yHome + rise, z: at.z, yaw: me.yaw };   // in a plot: heard from there, in this world
-      return { x: at.x, y: this.yHome + rise, z: at.z, yaw: me.yaw, pitch: me.pitch, in: { key: x.key, name: x.name } };
+      // As high as its host has us (a stair, a lift, flying, coming down), until it first says: where we stepped on.
+      const y = hp ? this._feet(x, s, h) : this.yHome;
+      v._home = { x: at.x, y, z: at.z, yaw: me.yaw };   // in a plot: heard from there, in this world
+      return { x: at.x, y, z: at.z, yaw: me.yaw, pitch: me.pitch, in: { key: x.key, name: x.name } };
+    }
+
+    // Our feet in a plot, in this world's terms: where its host has our eyes, less how far above its floor it keeps
+    // eyes (its `eye`; an older host's, 1.6 m), through where this world puts its plot.
+    _feet(x, s, h) {
+      const b = this.v._bodies.get(x.w.channel), eye = b && b.eyes ? b.eyes : s.eye != null ? s.eye : EYES / (s.unit || 1);
+      return new this.T.Vector3(s.pose.x, s.pose.y + s.vis.y - eye, s.pose.z).applyMatrix4(h.place.matrix).y;
     }
 
     _enter(x, me, now) {
       const w = x.w, s = w.scene, h = this._holder(x), p = new this.T.Vector3(me.x, 0, me.z).applyMatrix4(h.inverse), yaw = me.yaw - x.at.turn * Math.PI / 2;
       this.v._send({ type: "enter", channel: w.channel, pose: { x: p.x, y: me.y / x.k, z: p.z, yaw, air: me.air / x.k } });
       w.inside = true; this.in = w.channel;
-      Object.assign(s, { pose: { x: p.x, y: 0, z: p.z }, yaw0: 0, hist: [], vis: { x: 0, y: 0, z: 0 }, hostPose: null, inAt: now, yBase: null });
+      Object.assign(s, { pose: { x: p.x, y: 0, z: p.z }, yaw0: 0, hist: [], vis: { x: 0, y: 0, z: 0 }, hostPose: null, inAt: now });
       this.yHome = me.y;
       this.v._changed();
     }
@@ -3336,7 +3460,7 @@
       const v = this.v, b = this.bubbles, u = v._unit(), hk = v._hooks, me = this.me, x = this.in != null && list.find(p => p.w && p.w.channel === this.in);
       const mine = () => me ? { x: me.x, y: (Number(me.y) || 0) + 2.4 / u, z: me.z } : null;
       if (!this.homeBodies || this.homeBodies.root !== hk.scene.root) this.homeBodies = { root: hk.scene.root, bodiesAt: 0 };   // your scene's bodies, looked for once a second
-      const over = (h, up, gap) => b.over(v._body(this.homeBodies, h.id), up, gap) || (h.pose ? { x: h.pose.x, y: (Number(h.pose.y) || 0) + gap * 2, z: h.pose.z } : null);
+      const over = (h, up, gap) => b.over(v._body(this.homeBodies, h.id), up, gap) || (h.pose ? { x: h.pose.x, y: (Number(h.pose.y) || 0) + (h.eyes || 0) + gap * 2, z: h.pose.z } : null);
       let items = v._chatsIn("home", c => {
         if (c.mine) return mine();
         const h = v._hosted.get(c.channel);
@@ -3462,7 +3586,11 @@
       }, 1500));
     };
     const onCall = e => { if (e.state === "ended" && e.why && e.why !== "hung up") note(`📞 ${e.name}: ${e.why}`); };
-    v.on("seen", onSeen); v.on("call", onCall);
+    // Models (8.6): yours, as other rooms will read it, and how you look in the room you are in, once each.
+    const modelSaid = new Set();
+    const onModel = e => { if (e.problems.length && !modelSaid.has(e.what + e.problems[0])) { modelSaid.add(e.what + e.problems[0]); note(`${e.what}: ${e.problems[0]}${e.problems.length > 1 ? ` (and ${e.problems.length - 1} more: see the console)` : ""}`); } };
+    const onBody = e => { if (e.problem && !modelSaid.has(e.channel + e.problem)) { modelSaid.add(e.channel + e.problem); note(`In ${e.name || "their"} room you look like their model: yours can't be shown (${e.problem})`); } };
+    v.on("seen", onSeen); v.on("call", onCall); v.on("model", onModel); v.on("body", onBody);
     function draw() {
       if (root.contains(document.activeElement) && document.activeElement.tagName === "INPUT") return;   // never under a typing hand
       const me = v.office, rows = [];
@@ -3529,6 +3657,12 @@
         }
         if (p.plot) seen.push("their room is in your world");
         for (const x of p.watches) seen.push(x.link ? "they see your room" : "your room is in their world");
+        // How each of you is drawn where the other is (8.6): their model here, and yours there.
+        const here = p.visit && v.visitors.find(x => x.id === p.visit.id);
+        if (here && here.problem) seen.push(`their model can't be shown here: ${here.problem}`);
+        const inThere = [...v._links.values(), ...v._watches.values()].find(w => w.inside && (w.host.key === p.key || w.host.id === p.id));
+        const there = (inThere && v._bodies.get(inThere.channel)) || (p.there && v._viewer && v._bodies.get(v._viewer.channel));
+        if (there) seen.push(there.look === "theirs" ? "there, you look like your own model" : `there, you look like their model${there.problem ? ` (yours can't be shown: ${there.problem})` : ""}`);
         if (p.key) {
           const u = v.avatarUse(p.key);
           btns.push(`<span class="seg" title="how ${esc(p.name)} looks in your room">${[["theirs", "their model"], ["mine", "our model"]].map(([w, t]) =>
@@ -3629,7 +3763,7 @@
     const speaking = setInterval(() => { if (v.mic || v.voices.length || v._calls.size) draw(); }, 250);   // who is near, and speaking
     draw();
     return { element: root, chat: cw,
-      release() { clearInterval(timer); clearInterval(speaking); v.off("change", draw); v.off("seen", onSeen); v.off("call", onCall); for (const t of seenWait.values()) clearTimeout(t); if (cw) cw.release(); removeEventListener("keydown", mountKey); root.remove(); },
+      release() { clearInterval(timer); clearInterval(speaking); v.off("change", draw); v.off("seen", onSeen); v.off("call", onCall); v.off("model", onModel); v.off("body", onBody); for (const t of seenWait.values()) clearTimeout(t); if (cw) cw.release(); removeEventListener("keydown", mountKey); root.remove(); },
       say() { if (cw) cw.open(); } };   // the chat window, open to type a line (as Enter does)
   }
 
@@ -3641,7 +3775,7 @@
   // for the next line. The window fades `fade` ms after the last line, and comes back with the next one, or Enter.
   // `element`: where it goes (the page). Its place: --visit-chat-left, --visit-chat-bottom.
   const CHAT_CSS = `
-.visit-chat { position: fixed; left: var(--visit-chat-left, 16px); bottom: var(--visit-chat-bottom, 16px); z-index: 19; width: min(440px, calc(100vw - 32px)); font: 13px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif; color: #fff; transition: opacity .8s; }
+.visit-chat { position: fixed; left: var(--visit-chat-left, 16px); bottom: var(--visit-chat-bottom, 16px); z-index: 19; width: min(660px, calc(100vw - 32px)); font: 19.5px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif; color: #fff; transition: opacity .8s; }
 .visit-chat.idle { opacity: 0; pointer-events: none; }
 .visit-chat .log { max-height: 11em; overflow-y: auto; padding: 4px 8px; border-radius: 6px; text-shadow: 0 1px 2px #000, 0 0 4px #000; scrollbar-width: none; overflow-wrap: anywhere; }
 .visit-chat .log:empty { display: none; }
@@ -3654,18 +3788,42 @@
 .visit-chat.typing form { display: flex; }
 .visit-chat select { font: inherit; color: inherit; background: none; border: 0; padding: 0; max-width: 45%; cursor: pointer; }
 .visit-chat option { color: #e6edf3; background: #161b22; }
-.visit-chat input { flex: 1; min-width: 0; font: inherit; color: inherit; background: none; border: 0; outline: none; }`;
+.visit-chat input { flex: 1; min-width: 0; font: inherit; color: inherit; background: none; border: 0; outline: none; }
+.visit-chat button.sound { font: inherit; color: inherit; background: none; border: 0; padding: 0 2px; cursor: pointer; opacity: .8; }`;
 
-  function chat(v, { element = document.body, fade = CHAT_FADE } = {}) {
+  // A soft sound for a line that comes (not your own): a whisper rises, a lobby line is lower, the rest one note. Made
+  // with Web Audio (a page's sound waits for a key or a click: browsers allow none before).
+  let chatAudio = null;
+  function chatSound(scope) {
+    try {
+      const ctx = chatAudio || (chatAudio = new (window.AudioContext || window.webkitAudioContext)());
+      if (ctx.state === "suspended") ctx.resume();
+      const notes = scope === "whisper" ? [660, 880] : scope === "lobby" ? [392] : [523];
+      notes.forEach((f, i) => {
+        const o = ctx.createOscillator(), g = ctx.createGain(), at = ctx.currentTime + i * 0.09;
+        o.type = "sine"; o.frequency.value = f;
+        g.gain.setValueAtTime(0.0001, at); g.gain.exponentialRampToValueAtTime(0.08, at + 0.015); g.gain.exponentialRampToValueAtTime(0.0001, at + 0.22);
+        o.connect(g).connect(ctx.destination); o.start(at); o.stop(at + 0.25);
+      });
+    } catch (e) { /* no sound here */ }
+  }
+
+  function chat(v, { element = document.body, fade = CHAT_FADE, sound = true } = {}) {
     if (!document.getElementById("visit-chat-css")) {
       const st = document.createElement("style"); st.id = "visit-chat-css"; st.textContent = CHAT_CSS; document.head.appendChild(st);
     }
     const root = document.createElement("div");
     root.className = "visit-chat";
     root.dataset.scope = "say";
-    root.innerHTML = `<div class="log" aria-live="polite"></div><form><select title="where your line goes"></select><input maxlength="${CHAT_LEN}" autocomplete="off" spellcheck="false"></form>`;
+    root.innerHTML = `<div class="log" aria-live="polite"></div><form><select title="where your line goes"></select><input maxlength="${CHAT_LEN}" autocomplete="off" spellcheck="false"><button type="button" class="sound"></button></form>`;
     element.appendChild(root);
-    const log = root.querySelector(".log"), form = root.querySelector("form"), pick = form.querySelector("select"), input = form.querySelector("input");
+    const log = root.querySelector(".log"), form = root.querySelector("form"), pick = form.querySelector("select"), input = form.querySelector("input"), bell = form.querySelector("button.sound");
+    // A sound with each line that comes, unless this browser was told not to (the 🔔 by the box).
+    let quiet = !sound;
+    try { if (localStorage.getItem("visit:chat-quiet") === "1") quiet = true; } catch (e) { /* not kept */ }
+    const bellSay = () => { bell.textContent = quiet ? "🔕" : "🔔"; bell.title = quiet ? "no sound with a line (click: a sound)" : "a sound with each line (click: none)"; };
+    bellSay();
+    bell.addEventListener("click", () => { quiet = !quiet; try { localStorage.setItem("visit:chat-quiet", quiet ? "1" : "0"); } catch (e) { /* not kept */ } bellSay(); input.focus(); });
     let to = { scope: "say" }, choices = [], typing = false, last = null, fadeTimer = null;
     const label = t => t.scope === "lobby" ? "Lobby" : t.scope === "whisper" ? `Tell ${t.name}` : t.scope === "sim" ? `To ${t.name}'s room` : "Say";
     const same = (a, b) => a.scope === b.scope && (a.key || a.id || null) === (b.key || b.id || null);
@@ -3762,12 +3920,14 @@
     };
     const onChat = l => {
       add(l);
+      if (!quiet && !l.mine && l.scope !== "note") chatSound(l.scope);
       if (l.scope === "whisper" && !l.mine && l.id) last = { scope: "whisper", id: l.id, key: l.key || null, name: l.name };
     };
     const onError = e => { if (e && ["say", "whisper", "chat"].includes(e.ref)) note(String(e.message || e.code)); };
     addEventListener("keydown", key);
     v.on("chat", onChat); v.on("error", onError);
-    for (const l of v.chatLog) onChat(l);
+    for (const l of v.chatLog) add(l);
+    for (const l of v.chatLog) if (l.scope === "whisper" && !l.mine && l.id) last = { scope: "whisper", id: l.id, key: l.key || null, name: l.name };
     note("Enter to chat · /s say · /w whisper · /r reply · /room name · /1 lobby");
     return {
       element: root, open, close,
@@ -4102,6 +4262,7 @@
     },
     walk,
     bubble,
+    checkModel,
     panel,
     chat,
     stage,

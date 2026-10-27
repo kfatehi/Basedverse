@@ -24,7 +24,7 @@ How this workroom uses basedverse's Visit, and every way it differs from Visit's
 | chat window (say, whisper, a linked room, the lobby) | vanilla | |
 | landscapes, offline plots | vanilla | (what is marked `visitStatic`, and how) |
 | mounts | vanilla | (what they are is the room's: its possessions; riders drawn at their pose's height) |
-| flying | vanilla | (vanilla: none, arrivals in the air float down; `fly` if visitors may fly here) |
+| physics (falling, flying, riders) | own | (the room's `spawn` and `move`: Visit has none; say what they do) |
 
 State is one of:
 - **vanilla**: Visit's default. This includes the room's own choices where Visit has none: what its landscape is,

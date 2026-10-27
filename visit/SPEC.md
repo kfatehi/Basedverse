@@ -462,7 +462,8 @@ Messages are JSON, each prefixed by its length (u32 big-endian). In order, relia
 | either | `{"sim_say": "<text>"}` | a line said into the other office's room (8.9), by this office's user, wherever they are; checked and rate-limited as a page's is; passed to that room's page as `chat` (`scope: "sim"`, `home: true`) and on to each visitor in it |
 | host | `{"sim_said": {"key", "name", "text"}}` | a line said into the host's room from a linked office (8.9): to each visitor in it but its sayer; checked, passed to the page as `chat` (`scope: "sim"`) |
 | host | `{"near": [{"key", "name", "distance", "id"?, "phone"?}]}` | who is near the visitor in the host's room (8.7), as the host's visit-client has it: checked, passed to the page as `voice_near` |
-| host | `{"avatar_want": true}` | send this office's avatar (8.6): now, on a stream of its own (7.4), and again whenever its page gives a new one |
+| host | `{"avatar_want": true}` | send this office's avatar (8.6): now, on a stream of its own (7.4), and again whenever its page gives a new one. Its page has given none: `{"avatar_none": true}` back (passed to the host's page as `avatar_none`) |
+| host | `{"body": {"look", "eyes", "problem"}}` | how the host's room draws the visitor (8.6): `look` "theirs" (its own model) or "mine" (the room's), `eyes` over its feet (the room's units), and why not its own, if the room would show it (`problem`, at most 200 characters). Sent as it changes; checked, passed to the page as `body` |
 | visitor | `{"possessions": [{"id", "name", "mount", "fly", "speed", "lift"}]}` | what the visitor owns (8.11): sent each time the link is up and whenever its page says; checked, passed to the host's page as `possessions` |
 | host | `{"possession_want": "<id>"}` | send this possession's model (8.11): now, on a stream of its own (7.4), and again whenever its page gives a new one |
 | visitor | `{"landscapes": true}` | its visit-client reads landscapes (8.10): sent each time the link is up, passed to the host's page as `landscapes` |
@@ -535,6 +536,12 @@ redialled: the lobby ends its visit, and a visitor refused at the handshake ends
 
 ### 8.1 Scenes
 
+**Positions are feet** (Visit 0.19; [MODELS.md](MODELS.md)). Where someone is, is the point on the ground under
+their feet, in the room's units: what a host's `spawn` and `move` return, and what a world's `frame` takes. Their
+eyes are above that (their own model's `eyes`, else the room's `eye`, 1.6 m unless it says), and only their camera
+is there: a host sends each visitor where its eyes are (its deltas' pose, its scene's `pose`), and starts its
+clicks' rays there.
+
 A host sends its **scene**, and the visitor's page draws the room itself: walking and looking are as quick as
 in its own room, the host renders and encodes nothing for anyone, and what crosses the link is the scene as
 data.
@@ -602,7 +609,7 @@ data.
 |---|---|---|
 | `forward` | −1, 0 or 1 | W/↑ is 1, S/↓ is −1 |
 | `strafe` | −1, 0 or 1 | D/→ is 1 (right), A/← is −1 |
-| `up` | −1, 0 or 1 | Space or Page Up is 1 (up), X or Page Down is −1 (down), as in WoW: flying, where the room allows it |
+| `up` | −1, 0 or 1 | Space or Page Up is 1 (up), X or Page Down is −1 (down), as in WoW: what it does is the room's (its `move`) |
 | `run` | boolean | Shift held |
 | `riding` | string or null | the mount the visitor rides (8.11): one of its possessions' ids; the host decides |
 | `yaw` | radians | where the visitor is looking, left/right, relative to how it was facing when it arrived (positive: turned left) |
@@ -614,14 +621,13 @@ the mouse moves and sends where it is looking; the host applies it as is. Where 
 host's to decide (`move`), against its own walls and furniture; the visitor's page walks at once by the
 host's `walk` and takes the host's answer (8.1). The host clamps every field to its range.
 
-**Flying is the room's choice.** A room that allows it (`host({ fly })`) lets a visitor's `up` lift it above the
-floor the room's `move` gives, at 4 m a second (or `fly.speed`), never below that floor, never above `fly.max`. A
-room that does not floats a visitor that is in the air (stepping in from a world while flying: the `enter` pose's
-`air`, how far above its own floor its page had it) gently down to its floor, at 1.5 m a second, after hanging there
-until two key deltas have had it at that height (at most a second: its world measures from the first it reads). Walking off the plot, it is home at the
-height it came in at, or lower if it floated down there. Either way the room's
-`move` sees the visitor on its floor and needs no change: Visit keeps how high above it the visitor is, and the
-height it sends (and keeps across a reload) is the floor plus that.
+**Physics are the room's.** Visit has none of its own: it carries what the room needs to decide, and the room's
+`spawn` and `move` say where a visitor is, its height included. A visitor's `up` (−1, 0, 1) reaches `move`, which
+flies it, or not. One stepping in from a world in the air says how high above its own floor it was (the `enter`
+pose's `air`, passed to `spawn` as `at.air`), and the room puts it where it will: that high, to fall or float down,
+or on the floor at once. `move` may say how high above its floor it has the visitor (`air` in the pose it returns),
+for a mount's `fly` clip (8.11). The visitor's own world has it as high as the room does: its feet there. Walking off the plot, it is home at the height it came in at, or
+lower if the room had it lower.
 
 ### 8.3 Points
 
@@ -713,11 +719,12 @@ sees it in a corner first, and chooses.
 
 ### 8.6 Avatars
 
-A room draws its visitors itself (8.1): as its own models, or, with avatars (Visit 0.9), as each visitor's own body:
-their own, by default (Visit 0.16; before, the room's models).
+A visitor is shown in a room as its own body (its own model: the default since 0.16), or as the room's own model.
+How to make one, and every point it is measured by: [MODELS.md](MODELS.md).
 
-- **Your own** (`v.avatar(object, { unit })`): a three.js object, its origin at its feet, facing −z, in its
-  scene's units (`unit` metres each), with clips named `idle` and `walk` in its `animations` if it has them. The
+- **Your own** (`v.avatar(object, { unit })`): a three.js object of its own, its origin at its feet, facing −z,
+  in metres (or `unit` metres each), an `eyes` point if you like (else 92% of its height), clips named `idle`,
+  `walk` and `ride` in its `animations` if it has them. Checked as it is given (`Visit.checkModel`). The
   page gives it to its visit-client as a binary frame (5.4: its JSON, `{ unit, json }`, `json` its `toJSON()`
   with only what Visit reads of `userData`, gzipped, at most 4 MiB), which keeps it in memory, for the hosts
   that ask.
@@ -726,11 +733,19 @@ their own, by default (Visit 0.16; before, the room's models).
   (`avatar_use`, by key; the panel: that person's row). A state file from before 0.16 said `"mine"` whether chosen
   or not: read as `"theirs"`, until the user chooses (`set`).
 - **Asking.** A host's page asks a visitor for its avatar (`avatar_want`) when it would show it; the visitor's
-  visit-client sends it (7.4: stream 2), now and whenever its page gives a new one. A page reads it with its own
-  three.js, as data (`cleanScene`, at most 300 000 vertices and 2 000 objects), scales it to its units, marks it as
-  the visitor's body (`userData.visitor`), and plays its `walk` while the visitor moves and its `idle` while it
-  stands. `v.visitors[i].avatar` is it while the room shows that visitor's own look, null otherwise: the room
-  draws it (in its scene, it goes to every visitor; the visitor's own eyes do not see it).
+  visit-client sends it (7.4: stream 2), now and whenever its page gives a new one, or says it has none
+  (`avatar_none`).
+- **Visit draws it** (0.19). The host's page reads it with its own three.js, as data (`cleanScene`, at most
+  300 000 vertices and 2 000 objects), scales it to its units, marks it as the visitor's body
+  (`userData.visitor`), puts it in the room's scene at the visitor's feet, facing its way, and plays its `walk`
+  while it moves, its `idle` while it stands, its `ride` on a mount. In the scene, it goes to every visitor; the
+  visitor's own eyes do not see it. The room draws its own model for a visitor only where `v.visitors[i].look` is
+  "mine".
+- **Its eyes** are its `eyes` point (else 92% of its height) while the room shows it, else the room's `eye`: the
+  host tells the visitor (`body`), and places its camera there.
+- **Said, not swallowed.** A model the room would show and cannot (none given, or it does not read) is shown as
+  the room's model, and both sides say why: the host's `v.visitors[i].problem` and panel, the visitor's `body`
+  event and panel.
 
 ### 8.7 Voice
 
@@ -867,13 +882,11 @@ names, paces), puts it under its rider in the room they are in, and leaves the d
   mount, and the room does not keep mounts out (`mounts: false`). Then:
   - the mount is in the room's scene, under the visitor (`mount:<name>`, its `userData.visitRider` the visit's
     id: the visitor does not see it from its own eyes, nor click it; in its world, it sees it under itself),
-    standing on the floor the room's `move` gives (the pose is `eye` metres above it: 1.6 unless the room says),
-    facing the visitor's way, animated as it goes (in the air, walking or running, still);
-  - the visitor is lifted onto it (`lift`), as it flies (`air`, 8.2): the room's `move` sees it on its floor;
-  - the room's `move` is given time at the mount's pace (`dt` × `speed`), and `who.riding` ({ id, name, fly,
-    speed });
-  - a mount that flies flies (`up`, 8.2) unless the room says no flying (`fly: false`); a room that lets
-    everyone fly (`fly: true`) lets riders too; one that flies off a flying mount, or gets off, floats down.
+    under the rider's feet (their pose is their eyes, `eye` metres above their feet: 1.6 unless the room says),
+    `lift` below them, facing the visitor's way, animated as it goes (in the air, walking or running, still);
+  - the room's `move` is told (`who.riding`: { id, name, fly, speed, lift }) and does the rest, as its physics
+    have it: lifting the rider onto it (`lift`), at its pace (`speed` times walking), flying it (`fly`, `up`), or
+    none of that. Visit does none of it.
   - Its entry in `v.visitors` says it (`riding`: { id, name, fly }); a visitor's own avatar (8.6) plays its
     `ride` (or `sit`) clip, if it has one.
 - **At home** your world (8.4) draws your mount under your user's feet (`me.y`; facing `me.facing`, else where
@@ -913,9 +926,10 @@ v.knocks       // knocks on your door: [{ id, from: { id, name, sim, key }, mess
 v.knocking     // your knocks still waiting: [{ id, to, link }]
 v.visiting     // the room in your stage: { id, host: { id, name, sim }, paused, link, inside } or null (a link's: in
                //   the corner until you go there, inside: true)
-v.visitors     // your visitors as a host: [{ id, visitor: { id, name, sim, key }, guest, pose, link, avatar, riding }]: avatar,
-               //   its own body (8.6) while your room shows its own look, else null; riding: the mount it rides here
-               //   (8.11), { id, name, fly }, or null
+v.visitors     // your visitors as a host: [{ id, visitor: { id, name, sim, key }, guest, pose, link, look, eyes, problem,
+               //   riding }]: pose, their feet (8.1); look, "theirs" (Visit draws their own model) or "mine" (draw yours);
+               //   eyes over their feet (your units); problem, why not their own, if you would show it; riding, the mount
+               //   they ride here (8.11), { id, name, fly }, or null
 v.links        // your links (8.5): [{ id, host, where ("corner" | "aside" | "world"), inside }]
 v.avatars      // whose look your visitors have in your room (8.6): { default: "mine" | "theirs", by: [{ key, use }] }
 
@@ -929,7 +943,9 @@ v.stepIn(id); v.stepOut(id) // a link (by visit id; the corner's by default): go
 v.toWorld(id)      // a link's room as a plot in your world (v.world first), while the link lasts
 v.unlink(id)       // end a link
 v.watching(officeId)        // whether a plot of theirs is in your world (a guest's, or a link put there)
-v.avatar(object, { unit })  // your own body, for rooms that show their visitors' own looks (8.6); null: none
+v.avatar(object, { unit })  // your own body, for rooms that show their visitors' own looks (8.6, MODELS.md); null: none
+                            //   "model" event: { what, problems, notes }, as it is checked; "body": how the room you are in
+                            //   draws you, { channel, key, name, look, eyes, problem }
 v.possessions([{ id, name, object, unit, mount, fly, speed, lift }])   // what your user owns (8.11), as your room makes them
 v.mounts                    // what they can ride: [{ id, name, fly, speed, lift }] (none until your room gives some)
 v.ride(id); v.riding; v.mount   // get on a mount (null: off); what they ride; the one M (the panel's) gets them on
@@ -970,17 +986,19 @@ v.addGuest(key, name); v.removeGuest(key); v.isGuest(key)   // a key from v.offi
 // lobby to be visited, and cannot knock: every room takes part with its scene.
 v.host({
   spawn(visitor, { at }) { return pose; },    // where a new visitor appears (at: where a world's watcher stepped in, if one did)
-  move(pose, input, dt, { id, visitor }) { return pose; },   // where it may go: the library has already set pose.yaw and
-                                              //   pose.pitch; id is the visit's, visitor { id, name, sim }
+  move(pose, input, dt, { id, visitor, riding }) { return pose; },   // where it goes, its height too (the room's physics, 8.2):
+                                              //   the library has already set pose.yaw and pose.pitch; id is the visit's,
+                                              //   visitor { id, name, sim }; input.up: up or down; riding (8.11): { id, name,
+                                              //   fly, speed, lift } or null; the pose returned may say `air` (how high above
+                                              //   the floor), for a mount's fly clip
   scene: { root, three, renderer, near, far },      // the room's three.js scene (or the part to share), the THREE it was made with
                                                     //   (r125 to r186), its renderer, and visitors' camera range (8.1)
   fov: 70,                                          // visitors' camera's vertical field of view, in degrees
-  walk: { speed },                                  // optional: move() walks with Visit.walk at this speed: visitors walk at once
-  fly: true,                                        // optional: visitors may fly here (8.2), or { speed, max } in metres (a second;
-                                                    //   above the floor); without it, one in the air floats gently down. Read at every move
+  walk: { speed, mounts },                          // optional: move() walks with Visit.walk at this speed: visitors walk at once;
+                                                    //   mounts: true, riders at their mount's pace times it
   mounts: false,                                    // optional: keep visitors' mounts out (8.11); without it, they ride
-  eye: 1.6,                                         // optional: how high above its floor a visitor's pose is, in metres (8.11:
-                                                    //   where a mount stands)
+  eye: 1.6,                                         // optional: how high a visitor's eyes are over its feet when you draw it as
+                                                    //   your own model, in metres (8.1): where its camera goes
   plot: { center: [x, z], size: [w, d] }, unit: 1,  // this room's land in a world (8.4), in its units (without it: what its scene
                                                     //   covers); unit: metres in one
   preview: { x, y, z, yaw, pitch },                 // optional: where a link sees this room from, before going in (8.5); without
@@ -989,7 +1007,7 @@ v.host({
 
 // a world (8.4): after host(). Every frame, where your page has its user (in its room's terms) and what they press;
 // what comes back is where they are now: at home as given, or in a plot as its host has them (in: { key, name }), its
-// y the one given plus however far that host has since moved them up or down (a stair, a lift: its move() sets pose.y).
+// y their feet as that host has them (a stair, a lift, flying), never higher than they came when they walk off.
 // Then world.render(camera), in place of renderer.render(scene, camera).
 const world = v.world({ scene, renderer, ground, gap, clipOwn, bubbles, speaking });   // your whole scene and its renderer (host()'s by default);
                    //   bubbles (true): it draws the lines said (8.9) in the room your user is in over their speakers' heads;
@@ -1019,6 +1037,8 @@ const view = v.view(element);   // { release(), setActive(on), active, canvas }:
 
 // helpers
 Visit.walk(pose, input, dt, { speed, blocked })   // first-person walking with wall sliding, for move()
+Visit.checkModel(object, { three, unit, kind })  // a model as other rooms will read it (MODELS.md): { ok, problems, notes, height,
+                                                 //   eyes, seat, clips }; kind "avatar" (default) or "mount"
 Visit.bubble(THREE, text, unit)                  // a line's bubble (8.9), a sprite whose bottom sits where you put it (unit: metres
                                                  //   a unit), for a room that draws its own
 Visit.panel(element, v)                          // an optional ready-made lobby panel: one row a person (everyone in the lobby,

@@ -629,6 +629,12 @@ async def main():
         await b.send(type="answer", knock=(await b.until(lambda m: m["type"] == "knock"))["id"], accept=True)
         vbc = await b.until(lambda m: m["type"] == "visit_started")
         vc = await c.until(lambda m: m["type"] == "visit_started")
+        await b.send(type="avatar_want", channel=vbc["channel"])
+        check("B asks C for its avatar, and C's page never gave one: B's page hears so (not silence)", (await b.until(lambda m: m["type"] == "avatar_none"))["channel"], vbc["channel"])
+        await b.send(type="body", channel=vbc["channel"], look="mine", eyes=1.7, problem="their room gives no model of its own\u0007")
+        bd = await c.until(lambda m: m["type"] == "body")
+        check("B tells C how its room draws C (its model, its eyes, why not C's own): C's page hears it, checked", {k: bd.get(k) for k in ("channel", "look", "eyes", "problem")},
+              {"channel": vc["channel"], "look": "mine", "eyes": 1.7, "problem": "their room gives no model of its own"})
         await b.send(type="voice_where", me=[0, 1.6, 0], phone=None, visitors=[[vb["channel"], 10, 0, 0], [vbc["channel"], 20, 0, 0], ["evil"], [9, 1e9, 0, 0]])
         nb = await b.until(lambda m: m["type"] == "voice_near")
         check("B's page says where everyone in its room is: B's visit-client tells it who is near B (A 10 m off, C 20 m)", near(nb), [("A", 10, True), ("C", 20, True)])

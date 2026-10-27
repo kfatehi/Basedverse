@@ -770,6 +770,16 @@ impl Core {
                     None => self.page_error("no_such_visit", "no visit to you on that channel", Some("avatar_want")),
                 }
             }
+            // How this room draws a visitor (host side, 8.6): as itself or as this room's model, its eyes over its feet
+            // (scene units), and why not as itself, if it would be. To the visitor, which shows it in its own world.
+            "body" => {
+                let ch = m.get("channel").and_then(Value::as_u64).unwrap_or(0) as u16;
+                let body = body_from(&m);
+                match self.visits.values().find(|v| v.channel == ch && v.role == Role::Host && v.up) {
+                    Some(v) => { let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "body": body }))); }
+                    None => self.page_error("no_such_visit", "no visit to you on that channel", Some("body")),
+                }
+            }
             "avatars" => match state::use_from(m.get("default")) {
                 Some(theirs) => {
                     self.saved.avatars_theirs = theirs;
@@ -1731,7 +1741,9 @@ impl Core {
             }
             // From the visitor.
             Role::Host => {
-                if let Some(list) = m.get("possessions") {   // what the visitor owns (8.11): checked, kept, to the page
+                if m.get("avatar_none") == Some(&json!(true)) {   // asked for its avatar, the visitor has none (8.6)
+                    self.to_page(json!({ "type": "avatar_none", "channel": ch }));
+                } else if let Some(list) = m.get("possessions") {   // what the visitor owns (8.11): checked, kept, to the page
                     if let Some(list) = possessions_from(Some(list)) {
                         v.peer_possessions = json!(list);
                         self.to_page(json!({ "type": "possessions", "channel": ch, "list": list }));
@@ -1789,9 +1801,15 @@ impl Core {
                     }
                 } else if m.get("avatar_want").is_some() {   // the host's page would draw this office as itself (8.6)
                     v.avatar_asked = true;
-                    if let Some(gz) = self.avatar.clone() {
-                        let _ = v.cmd.try_send(LinkCmd::Avatar(gz));
+                    match self.avatar.clone() {
+                        Some(gz) => { let _ = v.cmd.try_send(LinkCmd::Avatar(gz)); }
+                        None => { let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "avatar_none": true }))); }   // (it goes once one is given)
                     }
+                } else if let Some(b) = m.get("body") {   // how the host's room draws this office's user there (8.6)
+                    let mut b = body_from(b);
+                    b["type"] = json!("body");
+                    b["channel"] = json!(ch);
+                    self.to_page(b);
                 } else if let Some(h) = m.get("landscape").and_then(Value::as_str).filter(|h| land::hash_ok(h)) {   // the host's landscape (8.10)
                     let (h, key, cmd) = (h.to_string(), v.peer.get("key").and_then(Value::as_str).unwrap_or("").to_string(), v.cmd.clone());
                     v.land_hash = Some(h.clone());
@@ -1990,7 +2008,15 @@ fn revision(r: &str) -> bool {
 
 /// An input with every field in its range (../SPEC.md section 8.2). `t` (the visitor page's clock when it
 /// sent it, ms) passes through as a number, for the host to echo in its deltas.
-/// The most possessions an office says it has (8.11), besides Visit's own.
+/// How a room draws a visitor (8.6), checked: `look` "theirs" or "mine", `eyes` (scene units, 0 to 1000) or null,
+/// `problem` (at most 200 characters, no control characters) or null.
+fn body_from(m: &Value) -> Value {
+    let eyes = m.get("eyes").and_then(Value::as_f64).filter(|x| x.is_finite() && *x > 0.0).map(|x| x.min(1000.0));
+    let problem = m.get("problem").and_then(Value::as_str).map(|s| s.chars().filter(|c| !c.is_control()).take(200).collect::<String>());
+    json!({ "look": if m.get("look").and_then(Value::as_str) == Some("theirs") { "theirs" } else { "mine" }, "eyes": eyes, "problem": problem })
+}
+
+/// The most possessions an office says it has (8.11).
 const MAX_POSSESSIONS: usize = 8;
 
 /// A list of possessions (8.11) as a page or a visitor says it, checked: at most MAX_POSSESSIONS, each { id (unique),
@@ -2079,6 +2105,14 @@ mod tests {
         for bad in [json!("a b"), json!("visit:horse"), json!(5), json!("x".repeat(41))] {
             assert_eq!(clamp_input(&json!({ "riding": bad }))["riding"], Value::Null);
         }
+    }
+
+    #[test]
+    fn bodies_are_checked() {
+        assert_eq!(body_from(&json!({ "look": "theirs", "eyes": 1.5, "problem": null })), json!({ "look": "theirs", "eyes": 1.5, "problem": null }));
+        assert_eq!(body_from(&json!({ "look": "x", "eyes": -2, "problem": "a\u{7}b".repeat(300) }))["look"], json!("mine"));
+        assert_eq!(body_from(&json!({ "eyes": "high" }))["eyes"], Value::Null);
+        assert_eq!(body_from(&json!({ "problem": "x".repeat(300) }))["problem"].as_str().unwrap().len(), 200);
     }
 
     #[test]

@@ -53,7 +53,8 @@ take them unless your user asks for something else. The defaults are Visit's own
 - **the phone** (`visit.phone(true, { at })`): Visit's own desk phone on a stand where you put it, ringing, its handset
   lifted on a call, its lamp lit on speaker;
 - your user's **voice** on the panel's 🎙, heard by distance in the same room;
-- **no flying** in your room: a visitor arriving in the air floats gently down to your floor (`fly` lets them fly).
+- **your physics**: Visit has none. Who flies, how one arriving in the air comes down, how riders go: your room's
+  `spawn` and `move` decide (step 5 suggests some);
 
 What has no default is your room's own: what your landscape is, where the phone stands, which interactions (cosmetic
 only, step 5), your user's avatar. When your user asks for something else (their own panel, a phone of their own, no
@@ -360,10 +361,17 @@ visit.host({
   (`Visit.bubble(THREE, text, unit)` makes one). Make sure your room's keys ignore a text box (WASD there is typing,
   not walking), and leave Enter and `/` to the chat window. Something of yours bottom left: move the window
   (`--visit-chat-left`, `--visit-chat-bottom` in your CSS).
-- **Mounts**: nothing to do for your visitors: one riding into your room has its mount in your scene, under
-  it, and is lifted onto it. Draw your visitors at their pose's height (`pose.y`, less their eyes), as a flying
-  one needs too, and say where your pose is (`eye`, metres above your floor) if not 1.6. To keep mounts out,
-  `mounts: false`; to keep anyone from flying, flying mounts too, `fly: false`. For your own user at home, with a
+- **Positions and bodies** ([MODELS.md](MODELS.md): read it first, and follow it). Where someone is, is where
+  their **feet** are: your `spawn` and `move` return that, never their eyes. Give your user's body with
+  `visit.avatar(model)`: a model of its own, its feet at its origin, facing −z, in metres, with an `eyes` point and
+  `idle`, `walk`, `ride` clips; check it with `Visit.checkModel`. Visit draws your visitors' own models at their
+  feet: draw your own figure for a visitor only where `visit.visitors[i].look` is "mine".
+- **Mounts**: one riding into your room has its mount in your scene, under its feet. Your `move` hears what it
+  rides (`who.riding`: { id, name, fly, speed, lift }) and does as your room's physics would: we suggest lifting the
+  rider onto it (their eyes `lift` higher), walking them at its pace (`speed` times yours; say `walk: { speed,
+  mounts: true }` so their page walks with you), and flying one that flies on their `up`. Draw your visitors at
+  their pose's height (`pose.y`, less their eyes), and say where your pose is (`eye`, metres above their feet) if not
+  1.6. To keep mounts out, `mounts: false`. For your own user at home, with a
   world: Visit draws their mount under their feet (pass `facing` to `world.frame` if they face another way than they
   look); lift them onto it (`visit.rideLift`) and walk them at its pace (`visit.rideSpeed`). Your user's own mounts:
   `visit.possessions([{ id, name, object, mount: true, fly, speed, lift }])`, with `idle`, `walk`, `run`, `fly`
@@ -375,10 +383,13 @@ visit.host({
   says when it rings (ring your phone), and `visit.pickUp(key)`, `visit.hangUp(key)`. The handset is private;
   `visit.speaker(key, true)` puts the call on speaker: everyone near your phone, your visitors too, hears it and
   is heard in it. How it looks and works in your room (lifting the handset, a button for speaker) is yours.
-- **Flying** (optional, your call): `fly: true` in `visit.host` (or `{ speed, max }`, in metres) lets visitors fly in
-  your room: Space or Page Up up, X or Page Down down (as in WoW). Your `move` needs no change: it sees them on your floor, and
-  Visit keeps how high above it they are. Without it, one that arrives flying (from a world: pass your user's height
-  above your floor as `air` to `world.frame` while they fly) floats gently down to your floor.
+- **Falling and flying** (your physics: Visit does none): a visitor's `up` (Space or Page Up up, X or Page Down
+  down, as in WoW) reaches your `move` in `input.up`; one stepping in from a world in the air comes with how high it
+  was (`at.air` in `spawn`). What happens is yours. We suggest: `spawn` it that high, and in `move` bring it down
+  gently (some 1.5 m a second) to your floor, unless your room lets it fly (then `up` lifts or lowers it, some 4 m a
+  second); say how high above the floor (`air` in the pose you return), so a mount that flies plays its fly clip.
+  To fly into friends' plots from your own world, pass your user's height above your floor as `air` to
+  `world.frame`, and `up`.
 - **What carries**: objects moving, appearing and going, materials' colours and opacity, canvas textures you
   redraw (`texture.needsUpdate = true`: encoded again in the background and sent at most once a second, so mark one
   changed only when its picture did), the background and the fog. **What does not**: custom shaders (a
@@ -593,10 +604,10 @@ marked offline, walked into but not through its walls; start it again, and the p
       (`visit.avatar`), if you like.
 - [ ] Voice: with the microphone on, a visitor near your user hears them, and they the visitor; farther, neither.
 - [ ] A phone, if you have one: a call rings, is picked up, heard on the handset; on speaker, by those near it.
-- [ ] Flying, if your room allows it: a visitor holding Space rises and stays up; without it, one stepping in from a
-      world in the air floats down to your floor.
-- [ ] Mounts: a visitor pressing M rides into your room on theirs, under them, lifted onto it, at its pace; on one
-      that flies, Space lifts them (unless `fly: false`); your user's own (if you give any), at home, under their feet.
+- [ ] Your physics: one stepping in from a world in the air comes down as your room has it (or flies, if it lets
+      them); their own world shows them where your room has them.
+- [ ] Mounts: a visitor pressing M rides into your room on theirs, under them; your `move` lifts them, paces them and
+      flies them as your room has it; your user's own (if you give any), at home, under their feet.
 - [ ] Chat: Enter opens the chat window, bottom left; a line said shows over its speaker's head for everyone who
       can see them, and in their chat; `/w name` whispers, `/room name` reaches a linked friend's room, `/1` the lobby; your own keys
       ignore a text box (typing "w" there does not walk), and nothing of yours hides the window.
