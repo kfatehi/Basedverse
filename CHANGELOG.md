@@ -9,6 +9,35 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.18.0 — 2026-10-26
+
+**Mounts: possessions you bring along.** What an office's user owns now goes with them to the rooms they visit.
+For now that is mounts, on the ground or in the air.
+
+- **Visit's own, for everyone:** a horse (twice walking pace) and a flying carpet (it flies, twice walking pace).
+  Every Visit draws them itself, so nothing is sent.
+- **Your own:** `v.possessions([{ id, name, object, mount, fly, speed, lift }])`. Your visit-client keeps them,
+  tells every room you visit what you own, and sends a model only when a room asks.
+- **Riding:** M, or the panel's "your mount" row (`v.ride(id)`; `v.riding`). Wherever you are, the room you are in
+  draws your mount under you, lifts you onto it, moves you at its pace, and animates it: walking, running, flying,
+  still. A flying mount flies with Space and X, as in WoW.
+- **The room decides:** `mounts: false` keeps mounts out (a rider gets off at the door). `fly: false` keeps anyone
+  from flying, flying mounts too. A room that says nothing lets its visitors ride, and fly a mount that flies.
+- **At home:** your world draws your mount under your feet, so your visitors see it. Your room lifts you onto it
+  and walks you at its pace (`v.rideLift`, `v.rideSpeed`, `v.rideFly`).
+- **Animation by clip names:** a mount's `idle`, `walk`, `run` and `fly`; a rider's avatar's `ride` (or `sit`).
+
+Also: an end-to-end check of 0.17's `air` on the `enter` pose, which the PR left as it was.
+
+### What an integration does
+
+1. Get visit-client 0.18.0 (`bin/setup` again, download; or this release).
+2. Draw your visitors at their pose's height (`pose.y`, less their eyes), so riders sit on their mounts (and flyers
+   fly). If your visitor pose is not 1.6 m above your floor, say where it is (`eye` in `visit.host`).
+3. With a world: lift your own user onto their mount at home (`visit.rideLift`) and walk them at its pace
+   (`visit.rideSpeed`); pass `facing` to `world.frame` if they face another way than they look.
+4. To keep mounts out of your room, `mounts: false` (a deviation from vanilla: note it in VISIT.md).
+
 ## v0.17.0 — 2026-10-26
 
 **Flying, a room's choice** (Keyvan's, #7). A room lets its visitors fly with `fly: true` in `visit.host` (or

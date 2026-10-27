@@ -50,6 +50,11 @@ const STREAM_SCENE: u8 = 1;
 const STREAM_AVATAR: u8 = 2;
 /// A host's landscape (../SPEC.md 8.10), on a stream of its own, when the visitor asks for it.
 const STREAM_LAND: u8 = 3;
+/// A stream the visitor opens, its host having asked: one of its possessions' models (8.11): its id (a length byte,
+/// then the id), then gzipped JSON.
+const STREAM_POSSESSION: u8 = 4;
+/// The least time between two possessions' models a host takes from one visitor.
+const POSSESSION_EVERY: Duration = Duration::from_millis(500);
 /// What a datagram of voice starts with (8.7), and of a visitor's voice a room passes on; an input's is JSON, and
 /// starts with `{`.
 const DATAGRAM_AUDIO: u8 = 0xA0;
@@ -81,6 +86,8 @@ pub enum LinkCmd {
     Avatar(Bytes),
     /// This office's landscape, gzipped JSON, for the visitor who asked for it (8.10).
     Land(Bytes),
+    /// One of this office's possessions' models (its id), gzipped JSON, for the host who asked for it (8.11).
+    Possession(String, Bytes),
     /// A packet of this office's voice, for the other side, near it (sent as a datagram: late is lost, 8.7).
     Audio(Bytes),
     /// Someone's voice this office passes to the other side (8.7, 8.8).
@@ -459,6 +466,9 @@ async fn run(role: Role, visit: &str, est: Established, cmds: &mut mpsc::Receive
                 Some(LinkCmd::Land(gz)) => if role == Role::Host {
                     tasks.push(tokio::spawn(write_blob(conn.clone(), STREAM_LAND, gz, visit.to_string())));
                 },
+                Some(LinkCmd::Possession(id, gz)) => if role == Role::Visitor {
+                    tasks.push(tokio::spawn(write_possession(conn.clone(), id, gz, visit.to_string())));
+                },
                 Some(LinkCmd::Close(why)) => {
                     let _ = frames::write_msg(&mut send, &json!({ "bye": why })).await;
                     let _ = send.finish();
@@ -580,6 +590,21 @@ async fn write_blob(conn: Connection, kind: u8, gz: Bytes, visit: String) {
     }
 }
 
+/// One of the visitor's possessions' models (its host asked for it), on a stream of its own: its id first.
+async fn write_possession(conn: Connection, id: String, gz: Bytes, visit: String) {
+    let sent = async {
+        let mut s = conn.open_uni().await?;
+        s.write_all(&[STREAM_POSSESSION, id.len() as u8]).await?;
+        s.write_all(id.as_bytes()).await?;
+        frames::write_scene_msg(&mut s, &gz).await?;
+        s.finish()?;
+        anyhow::Ok(())
+    };
+    if let Err(e) = sent.await {
+        debug!(%visit, "a possession did not go: {e:#}");
+    }
+}
+
 /// The visitor's side: the host's landscape it asked for, checked (gzipped JSON, within a scene's limits) and
 /// passed on still gzipped: kept as it came, by the hash of what it is.
 async fn read_land(mut stream: RecvStream, visit: String, core: mpsc::UnboundedSender<Ev>) {
@@ -596,13 +621,26 @@ async fn read_land(mut stream: RecvStream, visit: String, core: mpsc::UnboundedS
     }
 }
 
-/// The host's side: the visitor's avatar, each time it sends one (at most every AVATAR_EVERY), unpacked and
-/// checked as a scene edit is, then passed to the page; any other stream is ignored.
+/// The host's side: the visitor's avatar, each time it sends one (at most every AVATAR_EVERY), and its possessions'
+/// models (8.11, at most every POSSESSION_EVERY), unpacked and checked as a scene edit is, then passed to the page;
+/// any other stream is ignored.
 async fn read_avatars(conn: Connection, visit: String, core: mpsc::UnboundedSender<Ev>) {
-    let mut last: Option<Instant> = None;
+    let (mut last, mut last_possession): (Option<Instant>, Option<Instant>) = (None, None);
     while let Ok(mut stream) = conn.accept_uni().await {
         let mut kind = [0u8];
-        if !matches!(tokio::time::timeout(HANDSHAKE, stream.read_exact(&mut kind)).await, Ok(Ok(()))) || kind[0] != STREAM_AVATAR {
+        if !matches!(tokio::time::timeout(HANDSHAKE, stream.read_exact(&mut kind)).await, Ok(Ok(()))) {
+            continue;
+        }
+        if kind[0] == STREAM_POSSESSION {
+            if last_possession.is_some_and(|t| t.elapsed() < POSSESSION_EVERY) {
+                debug!(%visit, "a possession sooner than the last allows: ignored");
+                continue;
+            }
+            last_possession = Some(Instant::now());
+            tokio::spawn(read_possession(stream, visit.clone(), core.clone()));
+            continue;
+        }
+        if kind[0] != STREAM_AVATAR {
             continue;
         }
         if last.is_some_and(|t| t.elapsed() < AVATAR_EVERY) {
@@ -624,6 +662,38 @@ async fn read_avatars(conn: Connection, visit: String, core: mpsc::UnboundedSend
             Err(e) => warn!(%visit, "{e}"),
         }
     }
+}
+
+/// One of a visitor's possessions' models: its id (checked as the visitor's list's are), then the model, unpacked
+/// and checked as an avatar is.
+async fn read_possession(mut stream: RecvStream, visit: String, core: mpsc::UnboundedSender<Ev>) {
+    let read = async {
+        let mut n = [0u8];
+        stream.read_exact(&mut n).await?;
+        let mut id = vec![0u8; n[0] as usize];
+        stream.read_exact(&mut id).await?;
+        let id = String::from_utf8(id).ok().filter(|id| possession_id_ok(id)).ok_or_else(|| anyhow::anyhow!("not a possession's id"))?;
+        let gz = frames::read_blob(&mut stream, frames::MAX_AVATAR).await?.ok_or_else(|| anyhow::anyhow!("no model"))?;
+        anyhow::Ok((id, gz))
+    };
+    let (id, gz) = match tokio::time::timeout(Duration::from_secs(60), read).await {
+        Ok(Ok(x)) => x,
+        Ok(Err(e)) => return warn!(%visit, "a possession that is not what it should be: {e:#}"),
+        Err(_) => return,
+    };
+    match tokio::task::spawn_blocking(move || frames::unpack_json(&gz, frames::MAX_AVATAR_JSON)).await {
+        Ok(Ok(json)) => match String::from_utf8(json) {
+            Ok(json) => { let _ = core.send(Ev::LinkPossession { visit, id, json }); }
+            Err(_) => warn!(%visit, "a possession that is not UTF-8"),
+        },
+        Ok(Err(e)) => warn!(%visit, "a possession that is not what it should be: {e:#}"),
+        Err(e) => warn!(%visit, "{e}"),
+    }
+}
+
+/// A possession's id (8.11): 1 to 40 letters, digits, `_`, `.` or `-` (Visit's own are `visit:` and a name).
+pub fn possession_id_ok(id: &str) -> bool {
+    (1..=40).contains(&id.len()) && id.chars().all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c))
 }
 
 /// The visitor's side: each stream the host opens is a key delta and those after it, or its scene's edits;

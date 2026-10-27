@@ -43,6 +43,8 @@ take them unless your user asks for something else. The defaults are Visit's own
 - **the chat window** (the panel's, `Visit.chat`): bottom left, as in a game. Enter to type, and say a line to
   everyone who can see you, whisper to one person (`/w name`), say it into a linked friend's room (`/room name`), or
   to the lobby (`/1`); it fades when nobody has said anything for a while;
+- **mounts** (`visit.ride`, M, the panel's "your mount"): Visit's own horse and flying carpet for everyone, and
+  your user's own (`visit.possessions`); the room they ride into draws the mount under them;
 - **the stage** (`Visit.stage`): the room you visit, full-window or in the corner;
 - **the Map** (`Visit.map`, from the panel): your world from above;
 - **in your world** (`visit.world`): chat bubbles over whoever said something, and a 🔊 over whoever you hear
@@ -357,6 +359,14 @@ visit.host({
   (`Visit.bubble(THREE, text, unit)` makes one). Make sure your room's keys ignore a text box (WASD there is typing,
   not walking), and leave Enter and `/` to the chat window. Something of yours bottom left: move the window
   (`--visit-chat-left`, `--visit-chat-bottom` in your CSS).
+- **Mounts**: nothing to do for your visitors: one riding into your room has its mount in your scene, under
+  it, and is lifted onto it. Draw your visitors at their pose's height (`pose.y`, less their eyes), as a flying
+  one needs too, and say where your pose is (`eye`, metres above your floor) if not 1.6. To keep mounts out,
+  `mounts: false`; to keep anyone from flying, flying mounts too, `fly: false`. For your own user at home, with a
+  world: Visit draws their mount under their feet (pass `facing` to `world.frame` if they face another way than they
+  look); lift them onto it (`visit.rideLift`) and walk them at its pace (`visit.rideSpeed`). Your user's own mounts:
+  `visit.possessions([{ id, name, object, mount: true, fly, speed, lift }])`, with `idle`, `walk`, `run`, `fly`
+  clips if you have them, and a `ride` (or `sit`) clip in their avatar.
 - **A phone** (optional): for your user to talk with a friend in another room, wherever each stands.
   `visit.phone(true, { at: { x, y, z } })` puts it in your room: Visit's own phone, its handset at `at` (or
   `model: false`, and draw your own there); `visit.phones` lists
@@ -584,6 +594,8 @@ marked offline, walked into but not through its walls; start it again, and the p
 - [ ] A phone, if you have one: a call rings, is picked up, heard on the handset; on speaker, by those near it.
 - [ ] Flying, if your room allows it: a visitor holding Space rises and stays up; without it, one stepping in from a
       world in the air floats down to your floor.
+- [ ] Mounts: a visitor pressing M rides into your room on a horse, under it, lifted onto it, at twice the pace; on
+      the flying carpet, Space lifts them (unless `fly: false`); your user's own, at home, under their feet.
 - [ ] Chat: Enter opens the chat window, bottom left; a line said shows over its speaker's head for everyone who
       can see them, and in their chat; `/w name` whispers, `/room name` reaches a linked friend's room, `/1` the lobby; your own keys
       ignore a text box (typing "w" there does not walk), and nothing of yours hides the window.

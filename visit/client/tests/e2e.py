@@ -444,7 +444,7 @@ async def main():
         check("watching, not in: A's input and points go nowhere", [t for t in quiet_types(b) if t in ("input", "point")], [])
         await a.send(type="enter", channel=cha_w, pose={"x": 1.5, "y": 0, "z": 7.9, "yaw": 0.5, "evil": "no"})
         e = await b.expect("enter", skip=("lobby", "link_stats", "visit_started"))
-        check("A steps onto B's plot: B's page hears where, in its own terms, and nothing else", (e["channel"], e["pose"]), (chb_w, {"x": 1.5, "y": 0.0, "z": 7.9, "yaw": 0.5}))
+        check("A steps onto B's plot: B's page hears where, in its own terms, and nothing else", (e["channel"], e["pose"]), (chb_w, {"x": 1.5, "y": 0.0, "z": 7.9, "yaw": 0.5, "air": 0.0}))   # (air: how far above its floor, flying, 0.17)
         await a.send(type="input", forward=1, strafe=0, run=False, yaw=0.25, pitch=0, t=2)
         i = await b.expect("input", skip=("lobby", "link_stats"))
         check("in: A's input reaches B's page, on the watch's channel", (i["channel"], i["forward"], i["yaw"]), (chb_w, 1, 0.25))
@@ -589,6 +589,22 @@ async def main():
         await a.ws.send(struct.pack(">HBQ", 0, 4, 0) + gzip.compress(json.dumps(av).encode()))
         got = await b.until(lambda m: m["type"] == "avatar")
         check("A's page gives a new one: it goes to B at once, B having asked", got["avatar"]["json"]["object"]["name"], "me again")
+
+        print("\npossessions: what a visitor owns, told to the room it visits; a model sent when the room asks; what it rides, in its input")
+        pz = {"unit": 1, "json": {"metadata": {"version": 4.5}, "object": {"type": "Group", "uuid": "dr-1", "name": "dragon"}}}
+        await a.send(type="possessions", list=[{"id": "dragon", "name": "Smaug", "mount": True, "fly": True, "speed": 3, "lift": 1.2}, {"id": "cat", "name": "Tom"}])
+        await a.ws.send(struct.pack(">HBQ", 0, 64, 0) + gzip.compress(json.dumps(pz).encode()))   # slot 0: the dragon's model
+        got = await b.until(lambda m: m["type"] == "possessions")
+        check("A's page says what A owns: B's page hears it, on A's channel, checked", (got["channel"], got["list"]),
+              (vb["channel"], [{"id": "dragon", "name": "Smaug", "mount": True, "fly": True, "speed": 3.0, "lift": 1.2}, {"id": "cat", "name": "Tom", "mount": False, "fly": False, "speed": 1.0, "lift": 0.0}]))
+        await b.send(type="possession_want", channel=vb["channel"], id="dragon")
+        got = await b.until(lambda m: m["type"] == "possession")
+        check("B asks for the dragon: A's visit-client sends the model A's page gave, whole", (got["channel"], got["id"], got["possession"]), (vb["channel"], "dragon", pz))
+        await a.send(type="input", forward=1, strafe=0, run=False, riding="dragon", yaw=0, pitch=0, t=5)
+        got = await b.until(lambda m: m["type"] == "input")
+        check("A rides it: its input says so", got["riding"], "dragon")
+        await a.send(type="possessions", list=[{"id": "visit:horse"}])
+        check("Visit's own are not a page's to say", (await a.until(lambda m: m["type"] == "error"))["ref"], "possessions")
 
         print("\nvoice: the room's visit-client decides who hears whom, by where its page has everyone (C visits B too)")
         voice = lambda to, n: struct.pack(">HBQ", to, 8, 0) + bytes([0xFC, n]) + b"opus"   # a stand-in Opus packet, to the room (1) or calls (2)

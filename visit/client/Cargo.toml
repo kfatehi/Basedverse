@@ -1,6 +1,6 @@
 [package]
 name = "visit-client"
-version = "0.17.0"
+version = "0.18.0"
 edition = "2021"
 license = "MIT"
 description = "Visit's local client: the lobby session, the links to other workrooms, and the page connection on 127.0.0.1 (../SPEC.md)"

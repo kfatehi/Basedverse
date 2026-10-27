@@ -247,6 +247,8 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `link_where` | `channel`, `where` (`"world"` \| `"corner"`) | where the page put a link (8.5): kept, and said again in `visit_started` to a page that reloads |
 | `avatar_clear` | — | this office has no avatar (8.6) from now on (its own goes as a binary frame, 5.4) |
 | `avatar_want` | `channel` | ask a visitor for its avatar (host side, 8.6): its visit-client sends it, now and whenever its page gives a new one |
+| `possessions` | `list`: [{`id`, `name`, `mount`, `fly`, `speed`, `lift`}] | what this office's user owns (8.11), besides Visit's own: at most 8, ids 1 to 40 letters, digits, `_` `.` `-` (`visit:` is Visit's), each once; `speed` 0.25 to 5 (times walking pace), `lift` 0 to 5 m. Every host this office visits is told (now, and at each link). Each model goes as a binary frame (5.4, bit 6, its slot in this list as its channel) |
+| `possession_want` | `channel`, `id` | ask a visitor for one of its possessions' models (host side, 8.11): its visit-client sends it, now and whenever its page gives a new one |
 | `avatars` | `default` (`"mine"` \| `"theirs"`) | whose look visitors have in this room by default: this room's models, or their own avatars (`"theirs"` until this office's user chooses; the state file says it was chosen: `set`); kept in the state file |
 | `avatar_use` | `key`, `use` (`"mine"` \| `"theirs"` \| null: the default) | the same for one office, apart from the default; kept in the state file |
 | `phone` | `on` (bool) | this room has a phone (8.8), or no longer: every link is told |
@@ -277,6 +279,8 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `plot_forgotten` | `key` | a kept plot let go: its host ended this office's visit on purpose (`kicked`: its door shut, a guest no longer), declined its watch, or this office took it off its guests |
 | `avatars` | `default`, `by`: [{`key`, `use`}] | whose look visitors have here (also in `ready`), after `avatars` or `avatar_use` |
 | `avatar` | `channel`, `avatar` {`unit`, `json`} | a visitor's avatar, which this page asked for (host side, 8.6): unpacked and checked as a scene edit is |
+| `possessions` | `channel`, `list` | what a visitor owns (host side, 8.11), as its visit-client said it, checked again; also in `visit_started` (`possessions`), for a page that reloads |
+| `possession` | `channel`, `id`, `possession` {`unit`, `json`} | one of a visitor's possessions' models, which this page asked for (host side, 8.11): checked as an avatar is |
 | `phone` | `channel`, `on` | the other office's room has a phone now (8.8), or no longer (also `phone` in `visit_started`) |
 | `call` | `channel`, `act` | a call on that visit (8.8): they ring, answer, or hang up |
 | `chat` | `channel`, `key`, `name`, `text`, and `id` (a visitor's, by its visit there) or `owner` (true: the room's owner); or `scope` | a line said (8.9): in this office's room by a visitor (that visit's channel, its `id`), or in a room its user is in or sees from outside (that visit's channel: its owner, or another visitor). `scope: "sim"`: said into a room from a linked office, by that office's user (`key`, `name`): into this office's room (`home: true`; `channel`, the link it came by), or into the one its user is in (its `channel`). `scope: "whisper"`: whispered to this office's user (`id`, the sayer's office id; `key`, its key or null). `scope: "lobby"`: said in the lobby (`id`, `key`, as a whisper's); this office's own too, in the lobby's order. Never this office's own otherwise. `ready` and `online` say whether the lobby carries chat (`lobby_chat`) |
@@ -308,7 +312,7 @@ Both directions, one scene delta (or, from the host's page, one scene edit) per 
 | bytes | field |
 |---|---|
 | 0–1 | `channel`, u16 big-endian |
-| 2 | flags: bit 0 = a key delta (everything that has moved, 8.1); bit 1 = a scene edit (host page to visit-client only, alone); bit 2 = this office's avatar (8.6: page to visit-client only, alone, its channel 0); bit 3 = a packet of voice (8.7: from the page, its own user's, its channel saying where it may go: 1 the room they are in, 2 their calls, 3 both; to it, another office's, on the visit's channel); bit 4 = someone else's voice passed on (8.7, 8.8: to the page only, on the visit's channel it came by: who spoke, then the packet); bit 5 = this room's landscape (8.10: page to visit-client only, alone, its channel 0; gzipped JSON, at most 16 MiB) |
+| 2 | flags: bit 0 = a key delta (everything that has moved, 8.1); bit 1 = a scene edit (host page to visit-client only, alone); bit 2 = this office's avatar (8.6: page to visit-client only, alone, its channel 0); bit 3 = a packet of voice (8.7: from the page, its own user's, its channel saying where it may go: 1 the room they are in, 2 their calls, 3 both; to it, another office's, on the visit's channel); bit 4 = someone else's voice passed on (8.7, 8.8: to the page only, on the visit's channel it came by: who spoke, then the packet); bit 5 = this room's landscape (8.10: page to visit-client only, alone, its channel 0; gzipped JSON, at most 16 MiB); bit 6 = one of this office's possessions' models (8.11: page to visit-client only, alone, its channel its slot in the `possessions` list; gzipped JSON, at most 4 MiB) |
 | 3–10 | timestamp, u64 big-endian, microseconds: the host page's clock when it took the delta (unused for an edit) |
 | 11… | the delta (8.1), or the edit, gzipped JSON |
 
@@ -459,6 +463,8 @@ Messages are JSON, each prefixed by its length (u32 big-endian). In order, relia
 | host | `{"sim_said": {"key", "name", "text"}}` | a line said into the host's room from a linked office (8.9): to each visitor in it but its sayer; checked, passed to the page as `chat` (`scope: "sim"`) |
 | host | `{"near": [{"key", "name", "distance", "id"?, "phone"?}]}` | who is near the visitor in the host's room (8.7), as the host's visit-client has it: checked, passed to the page as `voice_near` |
 | host | `{"avatar_want": true}` | send this office's avatar (8.6): now, on a stream of its own (7.4), and again whenever its page gives a new one |
+| visitor | `{"possessions": [{"id", "name", "mount", "fly", "speed", "lift"}]}` | what the visitor owns (8.11): sent each time the link is up and whenever its page says; checked, passed to the host's page as `possessions` |
+| host | `{"possession_want": "<id>"}` | send this possession's model (8.11): now, on a stream of its own (7.4), and again whenever its page gives a new one |
 | visitor | `{"landscapes": true}` | its visit-client reads landscapes (8.10): sent each time the link is up, passed to the host's page as `landscapes` |
 | host | `{"landscape": "<hash>"}` | this room's landscape is this one (8.10: blake3 of its gzipped JSON, hex): sent when the link is up and whenever it changes. The visitor's visit-client gives its page the one it keeps of that office by that hash, or asks for it |
 | visitor | `{"landscape_want": "<hash>"}` | send that landscape: on a stream of its own (7.4), once a link for a hash |
@@ -500,6 +506,12 @@ And visitor to host, once its host asked (`avatar_want`):
 - **2, its avatar** (8.6): its length (u32 big-endian, at most 4 MiB) then the gzipped JSON, the stream then
   finished. The host's visit-client takes at most one every 2 s, unpacks it to at most 16 MiB of one JSON object
   nested at most 256 deep, and passes it to its page as `avatar`. A host on an older Visit never asks.
+
+And visitor to host, once its host asked (`possession_want`):
+
+- **4, a possession's model** (8.11): its id (one byte, its length, then the id), its length (u32 big-endian, at
+  most 4 MiB) then the gzipped JSON, the stream then finished. The host's visit-client takes at most one every
+  500 ms, checks the id, unpacks it as an avatar, and passes it to its page as `possession`.
 
 And host to visitor, once the visitor asked (`landscape_want`):
 
@@ -592,6 +604,7 @@ data.
 | `strafe` | −1, 0 or 1 | D/→ is 1 (right), A/← is −1 |
 | `up` | −1, 0 or 1 | Space or Page Up is 1 (up), X or Page Down is −1 (down), as in WoW: flying, where the room allows it |
 | `run` | boolean | Shift held |
+| `riding` | string or null | the mount the visitor rides (8.11): `visit:` and the name of Visit's own, or one of its possessions' ids; the host decides |
 | `yaw` | radians | where the visitor is looking, left/right, relative to how it was facing when it arrived (positive: turned left) |
 | `pitch` | radians, −1.4 to 1.4 | up (positive) or down |
 | `t` | ms | the visitor page's clock when it sent this input (`performance.now()`); the host's deltas carry it back |
@@ -833,6 +846,39 @@ object makes it and everything under it landscape (the marker itself stays on th
   its office says so: it ends the watch itself (`kicked`: its door shut, a guest no longer), declines one, or this
   office takes it off its guests.
 
+### 8.11 Possessions: mounts
+
+What an office's user owns and brings along to the rooms they go to. For now, **mounts**: something to ride, on
+the ground or in the air. Nothing to join: a room says nothing, and its visitors ride.
+
+- **Visit's own.** Every Visit has a horse (`visit:horse`: on the ground, twice walking pace) and a flying carpet
+  (`visit:carpet`: it flies, twice walking pace), made by the room's own page with its own three.js: nothing is
+  sent.
+- **A page's own** (`v.possessions([{ id, name, object, unit, mount, fly, speed, lift }])`): a three.js object
+  each (its origin at its feet, facing −z, in `unit` metres; clips named `idle`, `walk`, `run` and `fly` in its
+  `animations`, if it has them); `mount`: it can be ridden; `fly`: it flies; `speed`: times walking pace (1);
+  `lift`: how far up its rider is, in metres (0). Its visit-client keeps the list and the models (in memory, at
+  most 8, each as an avatar may be); every host this office visits is told the list (`possessions`), and asks for a
+  model when it would show it (`possession_want`; 7.4, stream 4).
+- **Riding** (`v.ride(id)`, null to get off; `v.riding`; M, the panel's): what the user rides goes with their
+  input (`riding`) wherever they are; at home, their own room's to show (below).
+- **The room decides.** A host's page takes it (`riding`) if it is Visit's own, or one of the visitor's
+  possessions that is a mount, and the room does not keep mounts out (`mounts: false`). Then:
+  - the mount is in the room's scene, under the visitor (`mount:<name>`, its `userData.visitRider` the visit's
+    id: the visitor does not see it from its own eyes, nor click it; in its world, it sees it under itself),
+    standing on the floor the room's `move` gives (the pose is `eye` metres above it: 1.6 unless the room says),
+    facing the visitor's way, animated as it goes (in the air, walking or running, still);
+  - the visitor is lifted onto it (`lift`), as it flies (`air`, 8.2): the room's `move` sees it on its floor;
+  - the room's `move` is given time at the mount's pace (`dt` × `speed`), and `who.riding` ({ id, name, fly,
+    speed });
+  - a mount that flies flies (`up`, 8.2) unless the room says no flying (`fly: false`); a room that lets
+    everyone fly (`fly: true`) lets riders too; one that flies off a flying mount, or gets off, floats down.
+  - Its entry in `v.visitors` says it (`riding`: { id, name, fly }); a visitor's own avatar (8.6) plays its
+    `ride` (or `sit`) clip, if it has one.
+- **At home** your world (8.4) draws your mount under your user's feet (`me.y`; facing `me.facing`, else where
+  they look), so your visitors see it too. Your page lifts your user onto it (`v.rideLift`, metres), walks them at
+  its pace (`v.rideSpeed`), and flies them if it flies (`v.rideFly`; `air`, 8.2).
+
 ## 9. The library: `visit.js`
 
 The normative surface; INTEGRATING.md shows it in use. Loaded with
@@ -866,8 +912,9 @@ v.knocks       // knocks on your door: [{ id, from: { id, name, sim, key }, mess
 v.knocking     // your knocks still waiting: [{ id, to, link }]
 v.visiting     // the room in your stage: { id, host: { id, name, sim }, paused, link, inside } or null (a link's: in
                //   the corner until you go there, inside: true)
-v.visitors     // your visitors as a host: [{ id, visitor: { id, name, sim, key }, guest, pose, link, avatar }]: avatar,
-               //   its own body (8.6) while your room shows its own look, else null
+v.visitors     // your visitors as a host: [{ id, visitor: { id, name, sim, key }, guest, pose, link, avatar, riding }]: avatar,
+               //   its own body (8.6) while your room shows its own look, else null; riding: the mount it rides here
+               //   (8.11), { id, name, fly }, or null
 v.links        // your links (8.5): [{ id, host, where ("corner" | "aside" | "world"), inside }]
 v.avatars      // whose look your visitors have in your room (8.6): { default: "mine" | "theirs", by: [{ key, use }] }
 
@@ -882,6 +929,10 @@ v.toWorld(id)      // a link's room as a plot in your world (v.world first), whi
 v.unlink(id)       // end a link
 v.watching(officeId)        // whether a plot of theirs is in your world (a guest's, or a link put there)
 v.avatar(object, { unit })  // your own body, for rooms that show their visitors' own looks (8.6); null: none
+v.possessions([{ id, name, object, unit, mount, fly, speed, lift }])   // what your user owns (8.11), besides Visit's own
+v.mounts                    // what they can ride: [{ id, name, fly, speed, lift }] (Visit's horse and carpet first)
+v.ride(id); v.riding; v.mount   // get on a mount (null: off); what they ride; the one M (the panel's) gets them on
+v.rideSpeed; v.rideLift; v.rideFly   // their mount's, for your own room at home: times walking pace, metres up, flies
 v.setMic(on); v.mic         // your microphone (8.7): on, those near your user in the same room hear them (remembered)
 v.voices; v.voiceRange      // who your user can hear, near them (as the room's visit-client says): [{ key, name, distance (m), speaking }]; metres (45)
 v.listener({ x, y, z, yaw })   // where your user is in your room, for a room that draws no world (a world says it)
@@ -926,6 +977,9 @@ v.host({
   walk: { speed },                                  // optional: move() walks with Visit.walk at this speed: visitors walk at once
   fly: true,                                        // optional: visitors may fly here (8.2), or { speed, max } in metres (a second;
                                                     //   above the floor); without it, one in the air floats gently down. Read at every move
+  mounts: false,                                    // optional: keep visitors' mounts out (8.11); without it, they ride
+  eye: 1.6,                                         // optional: how high above its floor a visitor's pose is, in metres (8.11:
+                                                    //   where a mount stands)
   plot: { center: [x, z], size: [w, d] }, unit: 1,  // this room's land in a world (8.4), in its units (without it: what its scene
                                                     //   covers); unit: metres in one
   preview: { x, y, z, yaw, pitch },                 // optional: where a link sees this room from, before going in (8.5); without
@@ -939,8 +993,9 @@ v.host({
 const world = v.world({ scene, renderer, ground, gap, clipOwn, bubbles, speaking });   // your whole scene and its renderer (host()'s by default);
                    //   bubbles (true): it draws the lines said (8.9) in the room your user is in over their speakers' heads;
                    //   speaking (true): a 🔊 over each one your user hears speaking there (8.7)
-const me = world.frame(dt, { x, y, z, yaw, pitch, air }, { forward, strafe, up, run });   // air: how far above its floor your user
-                   //   is (flying), so a plot it steps into has it that high (8.2); up: as a visitor's input
+const me = world.frame(dt, { x, y, z, yaw, pitch, air, facing }, { forward, strafe, up, run });   // air: how far above its floor your user
+                   //   is (flying), so a plot it steps into has it that high (8.2); up: as a visitor's input; facing: the
+                   //   way your user faces (radians, as yaw), for their mount at home (8.11; else yaw)
 world.render(camera);
 world.plots        // [{ key, name, at: { x, z, turn }, rect: [x0, z0, x1, z1], inside, offline }] (offline: a guest's plot
                    //   kept while its office is away, 8.10)

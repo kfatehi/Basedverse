@@ -15,7 +15,7 @@ use tracing::{debug, info, trace, warn};
 use crate::{
     frames::{self, Frame},
     land::{self, Kept, Lands},
-    link::{LinkCmd, Links, Relays, Role},
+    link::{self, LinkCmd, Links, Relays, Role},
     lobby::LobbyOut,
     state::{self, Guest, Place, Saved},
     VERSION,
@@ -50,6 +50,8 @@ pub enum Ev {
     SceneResync { visit: String },
     /// A visitor's avatar (8.6): unpacked, checked JSON, for the host's page.
     LinkAvatar { visit: String, json: String },
+    /// One of a visitor's possessions' models (8.11): its id, and unpacked, checked JSON, for the host's page.
+    LinkPossession { visit: String, id: String, json: String },
     /// A host's landscape this office asked for, gzipped (../SPEC.md 8.10).
     LinkLand { visit: String, gz: Bytes },
     /// A packet of the other side's voice (8.7).
@@ -116,6 +118,10 @@ struct Visit {
     in_world: bool,
     /// The host asked for this office's avatar (visitor side): it goes now, and again when the page gives a new one.
     avatar_asked: bool,
+    /// The possessions whose models the host asked for (visitor side, 8.11): each goes now, and again when the page
+    /// gives a new one. The visitor's possessions, as it last said (host side): for a page that reloads.
+    possessions_asked: Vec<String>,
+    peer_possessions: Value,
     /// The other office's room has a phone (8.8): it takes calls.
     peer_phone: bool,
     /// A call is on over this link (answered, one way or the other, and not hung up), and this office has it on
@@ -216,6 +222,9 @@ pub struct Core {
     lobby_view: Option<Value>,
     /// This office's own avatar, gzipped JSON (8.6), as its page last gave it: for the hosts that ask.
     avatar: Option<Bytes>,
+    /// This office's own possessions (8.11), as its page last gave them: what each is (every host it visits is
+    /// told), and its model, gzipped JSON, for the hosts that ask.
+    possessions: Vec<(Value, Option<Bytes>)>,
     /// This office's room has a phone (8.8), as its page said: every link is told.
     phone: bool,
     /// Where everyone in this office's room is, for its voice (8.7).
@@ -270,6 +279,7 @@ impl Core {
             max_visitors,
             lobby_view: None,
             avatar: None,
+            possessions: Vec::new(),
             phone: false,
             voice: VoiceRoom::default(),
             says: (Instant::now(), 0),
@@ -402,6 +412,15 @@ impl Core {
             Ev::LinkLand { visit, gz } => self.land_in(&visit, gz),
             Ev::LinkAudio { visit, data } => self.voice_in(&visit, data, false),
             Ev::LinkRelay { visit, data } => self.voice_in(&visit, data, true),
+            Ev::LinkPossession { visit, id, json } => {
+                if let Some(v) = self.visits.get(&visit).filter(|v| v.role == Role::Host) {
+                    // Already checked JSON: wrapped as it is, not parsed again (the id was checked as it came).
+                    let msg = format!("{{\"type\":\"possession\",\"channel\":{},\"id\":{},\"possession\":{json}}}", v.channel, json!(id));
+                    if let Some(p) = &self.page {
+                        let _ = p.text.send(PageOut::Text(msg));
+                    }
+                }
+            }
             Ev::LinkAvatar { visit, json } => {
                 if let Some(v) = self.visits.get(&visit).filter(|v| v.role == Role::Host) {
                     // Already checked JSON: wrapped as it is, not parsed again.
@@ -619,6 +638,33 @@ impl Core {
             // host's page asks for a visitor's (`avatar_want`). Whose look visitors have here (`avatars`: by default;
             // `avatar_use`: for a key, or back to the default): kept in the state file.
             "avatar_clear" => self.avatar = None,
+            // Possessions (8.11): what this office's user owns and brings along (Visit's own are not said: every Visit
+            // has them). Every host it visits is told what they are; a host's page asks for one's model
+            // (`possession_want`), which goes as it came, its frame (by its slot in this list).
+            "possessions" => match possessions_from(m.get("list")) {
+                Some(list) => {
+                    let old = std::mem::take(&mut self.possessions);
+                    self.possessions = list.into_iter().map(|p| {
+                        let gz = old.iter().find(|(o, _)| o["id"] == p["id"]).and_then(|(_, gz)| gz.clone());
+                        (p, gz)
+                    }).collect();
+                    let said = json!({ "possessions": self.possessions.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>() });
+                    for v in self.visits.values().filter(|v| v.role == Role::Visitor && v.up) {
+                        let _ = v.cmd.try_send(LinkCmd::Ctl(said.clone()));
+                    }
+                }
+                None => self.page_error("bad_message", &format!("list is at most {MAX_POSSESSIONS} possessions: {{ id, name, mount, fly, speed, lift }}"), Some("possessions")),
+            },
+            "possession_want" => {
+                let ch = m.get("channel").and_then(Value::as_u64).unwrap_or(0) as u16;
+                let Some(id) = m.get("id").and_then(Value::as_str).filter(|id| link::possession_id_ok(id)) else {
+                    return self.page_error("bad_message", "id is a possession's", Some("possession_want"));
+                };
+                match self.visits.values().find(|v| v.channel == ch && v.role == Role::Host && v.up) {
+                    Some(v) => { let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "possession_want": id }))); }
+                    None => self.page_error("no_such_visit", "no visit to you on that channel", Some("possession_want")),
+                }
+            }
             // A phone (8.8): this room has one (or not), and a call on one of its visits: ring, answer, hang up.
             "phone" => match m.get("on").and_then(Value::as_bool) {
                 Some(on) => self.set_phone(on),
@@ -840,6 +886,15 @@ impl Core {
         }
         if let Some((to, audio)) = frames::audio_from_page(data) {   // this office's user's voice: this visit-client decides who hears it
             return self.voice_out(to, audio);
+        }
+        if let Some((slot, gz)) = frames::possession_from_page(data) {   // a possession's model: to every host that asked for it
+            let Some((p, kept)) = self.possessions.get_mut(slot as usize) else { return };
+            let id = p["id"].as_str().unwrap_or("").to_string();
+            *kept = Some(gz.clone());
+            for v in self.visits.values().filter(|v| v.role == Role::Visitor && v.up && v.possessions_asked.contains(&id)) {
+                let _ = v.cmd.try_send(LinkCmd::Possession(id.clone(), gz.clone()));
+            }
+            return;
         }
         if let Some(gz) = frames::avatar_from_page(data) {   // this office's avatar: to every host that asked for it
             for v in self.visits.values().filter(|v| v.role == Role::Visitor && v.up && v.avatar_asked) {
@@ -1405,7 +1460,7 @@ impl Core {
                 self.visits.insert(id.to_string(), Visit {
                     id: id.to_string(), channel, role, peer, up: false, cmd,
                     last_seq: 0, inputs: (Instant::now(), 0), want_key: false, host_state: None, ctl: (Instant::now(), 0), key_asked: None, resync_asked: None, resync_due: false,
-                    points: (Instant::now(), 0), guest, watch, inside: !watch, shared_adds: false, link, in_world: false, avatar_asked: false, peer_phone: false,
+                    points: (Instant::now(), 0), guest, watch, inside: !watch, shared_adds: false, link, in_world: false, avatar_asked: false, possessions_asked: Vec::new(), peer_possessions: json!([]), peer_phone: false,
                     call_on: false, speaker: false, says: (Instant::now(), 0),
                     landscapes: false, land_sent: None, land_hash: None,
                 });
@@ -1576,6 +1631,9 @@ impl Core {
         match role {
             Role::Visitor => {
                 let _ = cmd.try_send(LinkCmd::Ctl(json!({ "shared_adds": true })));
+                if !self.possessions.is_empty() {   // what this office's user owns (8.11)
+                    let _ = cmd.try_send(LinkCmd::Ctl(json!({ "possessions": self.possessions.iter().map(|(p, _)| p.clone()).collect::<Vec<_>>() })));
+                }
                 let _ = cmd.try_send(LinkCmd::Ctl(json!({ "landscapes": true })));
                 if !first {   // back after a blip: where everything is now
                     let _ = cmd.try_send(LinkCmd::Ctl(json!({ "keyframe": true })));
@@ -1673,7 +1731,12 @@ impl Core {
             }
             // From the visitor.
             Role::Host => {
-                if m.get("landscapes") == Some(&json!(true)) {   // the visitor reads landscapes (8.10): its page told, once
+                if let Some(list) = m.get("possessions") {   // what the visitor owns (8.11): checked, kept, to the page
+                    if let Some(list) = possessions_from(Some(list)) {
+                        v.peer_possessions = json!(list);
+                        self.to_page(json!({ "type": "possessions", "channel": ch, "list": list }));
+                    }
+                } else if m.get("landscapes") == Some(&json!(true)) {   // the visitor reads landscapes (8.10): its page told, once
                     if !v.landscapes {
                         v.landscapes = true;
                         self.to_page(json!({ "type": "landscapes", "channel": ch }));
@@ -1717,7 +1780,14 @@ impl Core {
             }
             // From the host.
             Role::Visitor => {
-                if m.get("avatar_want").is_some() {   // the host's page would draw this office as itself (8.6)
+                if let Some(id) = m.get("possession_want").and_then(Value::as_str).filter(|id| link::possession_id_ok(id)) {   // the host would draw it (8.11)
+                    if !v.possessions_asked.iter().any(|a| a == id) && v.possessions_asked.len() < MAX_POSSESSIONS {
+                        v.possessions_asked.push(id.to_string());
+                    }
+                    if let Some((_, Some(gz))) = self.possessions.iter().find(|(p, _)| p["id"] == id) {
+                        let _ = v.cmd.try_send(LinkCmd::Possession(id.to_string(), gz.clone()));
+                    }
+                } else if m.get("avatar_want").is_some() {   // the host's page would draw this office as itself (8.6)
                     v.avatar_asked = true;
                     if let Some(gz) = self.avatar.clone() {
                         let _ = v.cmd.try_send(LinkCmd::Avatar(gz));
@@ -1807,6 +1877,9 @@ fn started(v: &Visit) -> Value {
     }
     if v.peer_phone {
         m["phone"] = json!(true);
+    }
+    if v.peer_possessions.as_array().is_some_and(|l| !l.is_empty()) {
+        m["possessions"] = v.peer_possessions.clone();
     }
     if v.link {
         m["link"] = json!(true);
@@ -1917,11 +1990,38 @@ fn revision(r: &str) -> bool {
 
 /// An input with every field in its range (../SPEC.md section 8.2). `t` (the visitor page's clock when it
 /// sent it, ms) passes through as a number, for the host to echo in its deltas.
+/// The most possessions an office says it has (8.11), besides Visit's own.
+const MAX_POSSESSIONS: usize = 8;
+
+/// A list of possessions (8.11) as a page or a visitor says it, checked: at most MAX_POSSESSIONS, each { id (unique),
+/// name, mount, fly, speed (0.25 to 5 times walking pace), lift (0 to 5 m) }. None if it is not one.
+fn possessions_from(l: Option<&Value>) -> Option<Vec<Value>> {
+    let l = l?.as_array().filter(|l| l.len() <= MAX_POSSESSIONS)?;
+    let mut out: Vec<Value> = Vec::new();
+    for p in l {
+        let id = p.get("id").and_then(Value::as_str).filter(|id| link::possession_id_ok(id))?;
+        if out.iter().any(|o| o["id"] == id) {
+            return None;
+        }
+        let num = |k: &str, d: f64, lo: f64, hi: f64| p.get(k).and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(d, |x| x.clamp(lo, hi));
+        out.push(json!({
+            "id": id, "name": state::clip_name(p.get("name").and_then(Value::as_str).unwrap_or(id)),
+            "mount": p.get("mount") == Some(&json!(true)), "fly": p.get("fly") == Some(&json!(true)),
+            "speed": num("speed", 1.0, 0.25, 5.0), "lift": num("lift", 0.0, 0.0, 5.0),
+        }));
+    }
+    Some(out)
+}
+
 fn clamp_input(m: &Value) -> Value {
     let step = |k: &str| m.get(k).and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0, |x| x.round().clamp(-1.0, 1.0) as i64);
     let angle = |k: &str, lim: f64| m.get(k).and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0.0, |x| x.clamp(-lim, lim));
+    // What the visitor rides (8.11): one of its possessions, or Visit's own (`visit:` and a name); the host decides.
+    let riding = m.get("riding").and_then(Value::as_str)
+        .filter(|r| link::possession_id_ok(r) || r.strip_prefix("visit:").is_some_and(link::possession_id_ok));
     json!({
         "forward": step("forward"), "strafe": step("strafe"), "up": step("up"), "run": m.get("run").and_then(Value::as_bool).unwrap_or(false),
+        "riding": riding,
         "yaw": angle("yaw", 1e6), "pitch": angle("pitch", 1.4),
         "t": m.get("t").and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0.0, |x| x.clamp(0.0, 1e12)),
     })
@@ -1973,9 +2073,26 @@ mod tests {
     #[test]
     fn inputs_are_clamped() {
         let i = clamp_input(&json!({ "forward": 5, "strafe": -0.6, "up": 0.7, "run": "yes", "yaw": 3.0, "pitch": -9 }));
-        assert_eq!(i, json!({ "forward": 1, "strafe": -1, "up": 1, "run": false, "yaw": 3.0, "pitch": -1.4, "t": 0.0 }));
+        assert_eq!(i, json!({ "forward": 1, "strafe": -1, "up": 1, "run": false, "riding": null, "yaw": 3.0, "pitch": -1.4, "t": 0.0 }));
         let j = clamp_input(&json!({ "t": 1234.5 }));
-        assert_eq!(j, json!({ "forward": 0, "strafe": 0, "up": 0, "run": false, "yaw": 0.0, "pitch": 0.0, "t": 1234.5 }));
+        assert_eq!(j, json!({ "forward": 0, "strafe": 0, "up": 0, "run": false, "riding": null, "yaw": 0.0, "pitch": 0.0, "t": 1234.5 }));
+        assert_eq!(clamp_input(&json!({ "riding": "visit:horse" }))["riding"], json!("visit:horse"));
+        assert_eq!(clamp_input(&json!({ "riding": "my-dragon.2" }))["riding"], json!("my-dragon.2"));
+        for bad in [json!("a b"), json!("other:horse"), json!(5), json!("x".repeat(41))] {
+            assert_eq!(clamp_input(&json!({ "riding": bad }))["riding"], Value::Null);
+        }
+    }
+
+    #[test]
+    fn possessions_are_checked() {
+        let l = possessions_from(Some(&json!([{ "id": "dragon", "name": "Smaug\u{7}", "mount": true, "fly": true, "speed": 9, "lift": -1, "extra": 1 }, { "id": "cat" }]))).unwrap();
+        assert_eq!(l, vec![json!({ "id": "dragon", "name": "Smaug", "mount": true, "fly": true, "speed": 5.0, "lift": 0.0 }),
+            json!({ "id": "cat", "name": "cat", "mount": false, "fly": false, "speed": 1.0, "lift": 0.0 })]);
+        assert!(possessions_from(Some(&json!([{ "id": "a" }, { "id": "a" }]))).is_none());   // twice the same
+        assert!(possessions_from(Some(&json!([{ "id": "visit:horse" }]))).is_none());   // Visit's own are not a page's
+        assert!(possessions_from(Some(&json!((0..9).map(|i| json!({ "id": format!("p{i}") })).collect::<Vec<_>>()))).is_none());
+        assert!(possessions_from(Some(&json!("dragon"))).is_none() && possessions_from(None).is_none());
+        assert_eq!(possessions_from(Some(&json!([]))), Some(vec![]));
     }
 
     #[test]

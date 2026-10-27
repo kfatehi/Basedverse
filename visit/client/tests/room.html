@@ -147,7 +147,8 @@ async function build(v) {
     spawn: (who, { at } = {}) => { const near = at && freeNear(at.x, at.z), p = near ? { x: near[0], y: 1.6, z: near[1], yaw: at.yaw, pitch: 0 } : { x: 2, y: 1.6, z: 6, yaw: 0, pitch: 0 }; (window.spawns = window.spawns || []).push({ who: who.name, at: at || null, p, t: Math.round(performance.now()) }); return p; },
     // room.lift (the test sets it): a lift under every visitor, that far up from where they came in
     get fly() { return window.room.fly; },   // room.fly (the test sets it): whether visitors may fly here, read at every move
-    move: (pose, input, dt, who) => { window.movedFor = who && who.id; const p = Visit.walk(pose, input, dt, { speed: 2.5, blocked }); return window.room.lift != null ? Object.assign({}, p, { y: 1.6 + window.room.lift }) : p; },
+    get mounts() { return window.room.mounts; },   // room.mounts (the test sets it): false keeps mounts out (8.11)
+    move: (pose, input, dt, who) => { window.movedFor = who && who.id; window.movedWith = { dt, riding: who && who.riding }; const p = Visit.walk(pose, input, dt, { speed: 2.5, blocked }); return window.room.lift != null ? Object.assign({}, p, { y: 1.6 + window.room.lift }) : p; },
     fov: 70,
     scene: { root: t.scene, three: t.THREE, renderer: t.renderer, near: 0.05, far: 100 },
     walk: { speed: 2.5 },   // as move() walks: the visitor's page walks at once, before the answer

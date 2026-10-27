@@ -32,6 +32,9 @@ const RELAY: u8 = 16;
 /// A landscape (8.10), from the page: its own, gzipped JSON (its channel is ignored). Another office's goes to the
 /// page as text (`landscape`), never dropped as a frame may be.
 const LAND: u8 = 32;
+/// One of a page's own possessions (8.11): its model, gzipped JSON, its slot in the list the page gave (the frame's
+/// channel). Kept by its visit-client for the hosts that ask.
+const POSSESSION: u8 = 64;
 /// The most one packet of voice takes (20 ms of Opus is some tens of bytes).
 pub const MAX_AUDIO: usize = 1000;
 /// The most an avatar takes gzipped, and unpacked.
@@ -113,6 +116,15 @@ pub fn avatar_from_page(b: &[u8]) -> Option<Bytes> {
         return None;
     }
     Some(Bytes::copy_from_slice(&b[11..]))
+}
+
+/// One of the page's own possessions' models, gzipped, and its slot, if the frame is one and not too big (as an
+/// avatar may be).
+pub fn possession_from_page(b: &[u8]) -> Option<(u16, Bytes)> {
+    if b.len() < 12 || b[2] != POSSESSION || b.len() - 11 > MAX_AVATAR {
+        return None;
+    }
+    Some((u16::from_be_bytes([b[0], b[1]]), Bytes::copy_from_slice(&b[11..])))
 }
 
 /// The page's own landscape, gzipped, if the frame is one and not too big.
