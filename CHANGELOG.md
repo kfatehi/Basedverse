@@ -9,6 +9,18 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.14.1 — 2026-10-26
+
+**Telemetry that says what is Visit's.** In a world, `world.render` draws your whole room (it is your room's own
+drawing, in place of `renderer.render`), and the ⏱ counted it, and pictures encoded in the background, as Visit's
+work. Now the corner adds up only Visit's own (scan, send, whole, landscape, world, voice), shows drawing on a line
+of its own ("drawing your room and its plots: … ms a second, … a frame"), and pictures as how many were sent and how
+long the background took. In `v.perfReport()`, drawing is the part `draw`.
+
+### What an integration does
+
+1. Nothing, beyond getting visit-client 0.14.1 (`bin/setup` again, download; or this release).
+
 ## v0.14.0 — 2026-10-26
 
 **Telemetry, and no more stutter from redrawn canvases.** A room that redrew a canvas texture (a board, a screen)

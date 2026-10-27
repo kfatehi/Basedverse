@@ -13,7 +13,7 @@
 // visitor's page walks at once and the host corrects it), and a host renders and encodes nothing for anyone.
 "use strict";
 (function () {
-  const VERSION = "0.14.0", PROTO = "basedverse-visit-local/2";
+  const VERSION = "0.14.1", PROTO = "basedverse-visit-local/2";
   const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, LOOK = 0.0025;
   const POINT_MS = 200, AIM_MS = 125;   // a visitor's points, at most one this often; what it aims at, looked for this often
   // What the host hears many times a second: none of it changes what the page shows, so none fires "change".
@@ -1341,8 +1341,10 @@
     // On (the panel's ⏱, or v.perf(true); remembered in this browser), a second at a time: this page's frames (how
     // many, the slowest), long tasks (the page stopped 50 ms or more: a stutter), and Visit's own work by part, in ms
     // (scan: this room's scene looked over for changes; send: its edits made ready; whole: rooms sent whole to visitors
-    // starting; landscape: made again; world: your world walked and drawn; voice; textures: canvases encoded in the
-    // background, and how long they waited), with how much it had to do. Shown in a corner of the page; nothing leaves
+    // starting; landscape: made again; world: your world walked and laid out; voice), apart from what is not Visit's
+    // own work: draw (your room and its plots drawn, by world.render: your room's own drawing, in a world) and textures
+    // (canvases encoded in the background: how many, and how long each took, off the page's main thread), with how much
+    // it had to do. Shown in a corner of the page; nothing leaves
     // it. v.perfReport(): the last two minutes, a row a second, to copy.
     perf(on = true) {
       try { localStorage.setItem("visit:perf", on ? "on" : "off"); } catch (e) { /* not kept */ }
@@ -1384,11 +1386,12 @@
           landscape: sync ? sync.statics.length : 0, voices: this.voices.length, visiting: !!(this.visiting && this.visiting.inside) } };
       p.rows.push(row); if (p.rows.length > 120) p.rows.shift();
       p.cur = {}; p.at = now;
-      const all = Object.values(parts).reduce((n, x) => n + (x.n && x.ms), 0), c = row.counts;
+      const own = ["scan", "send", "whole", "landscape", "world", "voice"], all = own.reduce((n, k) => n + (parts[k] ? parts[k].ms : 0), 0), c = row.counts;
       const line = k => parts[k] ? `${k} ${parts[k].ms}${parts[k].max >= 8 ? ` (slowest ${parts[k].max})` : ""}` : null;
       p.el.innerHTML = `<b>⏱ ${row.fps} fps</b> · slowest frame ${row.frame_max_ms ?? "–"} ms · ${row.long_tasks ? `<span style="color:#f85149">${row.long_tasks} stall${row.long_tasks > 1 ? "s" : ""} (${row.long_max_ms} ms)</span>` : "no stalls"}\n`
-        + `Visit ${r1(all)} ms a second: ${["scan", "send", "whole", "landscape", "world", "voice"].map(line).filter(Boolean).join(" · ") || "idle"}`
-        + (parts.textures ? `\npictures sent: ${parts.textures.n} (encoded in the background, ${parts.textures.max} ms at most)` : "")
+        + `Visit ${r1(all)} ms a second: ${own.map(line).filter(Boolean).join(" · ") || "idle"}`
+        + (parts.draw ? `\ndrawing your room${c.plots ? " and its plots" : ""}: ${parts.draw.ms} ms a second (${r1(parts.draw.ms / Math.max(1, parts.draw.n))} a frame)` : "")
+        + (parts.textures ? `\npictures sent: ${parts.textures.n} (encoded in the background, off the page: ${parts.textures.max} ms at most)` : "")
         + `\n${c.visitors} visitor${c.visitors === 1 ? "" : "s"} · ${c.watchers} watching · ${c.plots} plot${c.plots === 1 ? "" : "s"}${c.offline ? ` (${c.offline} offline)` : ""} · ${c.objects} objects`
         + `${c.landscape ? ` + ${c.landscape} landscape` : ""}${c.voices ? ` · ${c.voices} near` : ""}\n`
         + `<button data-p="copy" style="font:inherit;color:inherit;background:#161b22;border:1px solid #2d333b;border-radius:5px;padding:1px 6px;cursor:pointer">copy report</button> <button data-p="off" style="font:inherit;color:inherit;background:#161b22;border:1px solid #2d333b;border-radius:5px;padding:1px 6px;cursor:pointer">off</button>`;
@@ -3005,7 +3008,7 @@
     // depth buffer: what is nearer hides what is behind, across plots. Each plot lit by its own lights.
     render(camera) {
       const t0 = this.v._perf ? performance.now() : 0;
-      try { this._render(camera); } finally { if (this.v._perf) this.v._pt("world", performance.now() - t0); }
+      try { this._render(camera); } finally { if (this.v._perf) this.v._pt("draw", performance.now() - t0); }
     }
     _render(camera) {
       const r = this.renderer, auto = r.autoClear, planes = r.clippingPlanes, now = performance.now(), v = this.v;
