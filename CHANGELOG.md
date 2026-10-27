@@ -9,6 +9,26 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.11.0 — 2026-10-26
+
+**Chat: type a line, and it shows over your head.** Everyone in the room you are in sees it (SPEC 8.9), and
+nobody else. Nothing to join. visit-client carries it, room to room, and checks it the same for every room:
+plain text, at most 200 characters, at most 5 lines every 10 s.
+
+- visit.js: `v.say(text)`, `v.chats` and the `chat` event; bubbles drawn over speakers in your world (`v.world`,
+  `bubbles: false` to draw your own) and in another's room; `Visit.bubble(THREE, text, unit)` for a room drawing its
+  own; the panel's say box (last in it), and `panel.say()` to focus it from a key of yours.
+- visit-client: the page message `say`, to the page `chat`; the link control messages `{"say": …}` (visitor to host)
+  and `{"said": …}` (host to visitors). A 0.10 office in the same room neither sends nor shows lines (it ignores
+  them).
+
+### What an integration does
+
+1. Get visit-client 0.11.0 (`bin/setup` again, download; or this release).
+2. With a world, bubbles show by themselves; without one, draw them from `visit.chats`. If your page has keys of
+   its own (WASD, say), have them ignore key presses in a text box, as the panel's say box is one. Optionally, a key
+   to start a line: `panel.say()`.
+
 ## v0.10.0 — 2026-10-26
 
 **Your world is yours alone: no more edges; see where a friend has put you instead.** Where your friends' rooms

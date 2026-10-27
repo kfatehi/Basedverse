@@ -556,6 +556,20 @@ async def main():
               await a.until("v.voices.length === 0 && v._voiceTo === 0")), (True, True))
         await b.js("room.me.x = %f" % bx0)
         await a.until("v.voices.length === 1")
+
+        print("\nchat: a line said, over its speaker's head, for everyone in the room")
+        await a.js("v.say('hello from A')")
+        check("A says a line in B's room: B has it, from A", await b.until("(c => c && c.text)(v.chats.find(c => c.name === 'A'))"), "hello from A")
+        check("and B's world draws it over A's body, above its head", await b.until(
+            "!!room.world.bubbles && room.world.bubbles.by.size === 1 && [...room.world.bubbles.by.values()][0].sprite.position.y > 1.8"), True)
+        await b.js("(f => { f.querySelector('input').value = 'hi A, from my panel'; f.requestSubmit(); })(document.querySelector('.visit-panel form[data-v=say]'))")
+        check("B says one from its panel's say box: A has it, from the room's owner", await a.until("(c => c && c.owner && c.text)(v.chats.find(c => c.name === 'B'))"), "hi A, from my panel")
+        check("A's view of B's room draws it over B (B's mark), not A's own line (A's eyes are there)", await a.until(
+            "(b => !!b && b.by.size === 1 && [...b.by.values()][0].text === 'hi A, from my panel')(v._viewer && v._viewer.scene && v._viewer.scene.bubbles)"), True)
+        check("and B's world draws B's own over B's head too", await b.until("room.world.bubbles.by.size === 2"), True)
+        await a.shot("a_chat.png")
+        await b.shot("b_chat.png")
+        check("six lines at once: the sixth not said (5 every 10 s)", await a.js("(r => r[5])(Array.from({ length: 6 }, (_, i) => v.say('n' + i)))"), False)
         await a.js("v.leave()")
         await b.until("v.visitors.length === 0")
         await a.js("v.setMic(false)")

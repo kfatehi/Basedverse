@@ -119,6 +119,8 @@ struct Visit {
     /// its phone's speaker (8.8; else to the ear).
     call_on: bool,
     speaker: bool,
+    /// Lines said by the visitor in the current window (host side): at most SAYS a SAY_WINDOW.
+    says: (Instant, u32),
 }
 
 /// Where everyone in this office's room is (8.7), in metres, as its page last said: its own user (none while they
@@ -147,6 +149,11 @@ const INPUTS_PER_SECOND: u32 = 120;
 const VOICE_RANGE: f64 = 45.0;
 const VOICE_MARGIN: f64 = 15.0;
 const NEAR_EVERY: Duration = Duration::from_secs(1);
+/// Chat (8.9): a line said is at most SAY_LEN characters; each office says at most SAYS lines a SAY_WINDOW (its
+/// page, and each visitor in its room, apart).
+const SAY_LEN: usize = 200;
+const SAYS: u32 = 5;
+const SAY_WINDOW: Duration = Duration::from_secs(10);
 /// The most points a second taken from a visitor (a click at the middle of its view: 8.3); more are dropped.
 /// Its page sends at most one every 200 ms.
 const POINTS_PER_SECOND: u32 = 5;
@@ -203,6 +210,8 @@ pub struct Core {
     phone: bool,
     /// Where everyone in this office's room is, for its voice (8.7).
     voice: VoiceRoom,
+    /// Lines this office's page said in the current window (8.9).
+    says: (Instant, u32),
     /// Where this office's page has put others in its world (8.4), by key: each told over every link up with it.
     seen_out: HashMap<String, Value>,
     /// Where others have put this office in their worlds, by key: (their name, where), for a page that comes back;
@@ -249,6 +258,7 @@ impl Core {
             avatar: None,
             phone: false,
             voice: VoiceRoom::default(),
+            says: (Instant::now(), 0),
             seen_out: HashMap::new(),
             seen_in: HashMap::new(),
             knocks: BTreeMap::new(),
@@ -613,6 +623,16 @@ impl Core {
                     None => return self.page_error("no_call", "no call on that channel", Some("speaker")),
                 }
                 self.tell_near();
+            }
+            // A line this office's user says (8.9): to everyone in the room they are in, and nobody else.
+            "say" => {
+                let Some(text) = m.get("text").and_then(Value::as_str).and_then(said) else {
+                    return self.page_error("bad_message", &format!("text is 1 to {SAY_LEN} characters"), Some("say"));
+                };
+                if !counted(&mut self.says) {
+                    return self.page_error("rate_limited", &format!("at most {SAYS} lines every {} s", SAY_WINDOW.as_secs()), Some("say"));
+                }
+                self.say_out(text);
             }
             // Where everyone in this office's room is (8.7), in metres, as its page has them: its own user (null:
             // elsewhere), its phone, and each visitor in it ([channel, x, y, z]). Who hears whom here goes by it.
@@ -979,6 +999,32 @@ impl Core {
         }
     }
 
+    // ---------- chat (8.9): a line said, to everyone in the same room ----------
+
+    /// A line this office's user says: to the room they are in (another's: its owner's visit-client passes it on to
+    /// everyone there; their own: to each visitor in it).
+    fn say_out(&mut self, text: String) {
+        if let Some(v) = self.visits.values().find(|v| v.up && v.role == Role::Visitor && v.inside) {
+            let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "say": text })));
+            return;
+        }
+        let line = json!({ "key": self.key, "name": self.office.get("name"), "owner": true, "text": text });
+        for v in self.visits.values().filter(|v| v.up && v.role == Role::Host && v.inside) {
+            let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "said": line })));
+        }
+    }
+
+    /// A line a visitor in this room said: to this office's page, and to every other visitor in the room.
+    fn say_in(&mut self, from: u16, line: Value) {
+        for v in self.visits.values().filter(|v| v.up && v.role == Role::Host && v.inside && v.channel != from) {
+            let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "said": line })));
+        }
+        let mut chat = line;
+        chat["type"] = json!("chat");
+        chat["channel"] = json!(from);
+        self.to_page(chat);
+    }
+
     /// A control message to the office with this key, over any link up with it; false if there is none.
     fn to_peer(&self, key: &str, ctl: Value) -> bool {
         match self.visits.values().find(|v| v.up && v.peer.get("key").and_then(Value::as_str) == Some(key)) {
@@ -1223,7 +1269,7 @@ impl Core {
                     id: id.to_string(), channel, role, peer, up: false, cmd,
                     last_seq: 0, inputs: (Instant::now(), 0), want_key: false, host_state: None, ctl: (Instant::now(), 0), key_asked: None, resync_asked: None, resync_due: false,
                     points: (Instant::now(), 0), guest, watch, inside: !watch, shared_adds: false, link, in_world: false, avatar_asked: false, peer_phone: false,
-                    call_on: false, speaker: false,
+                    call_on: false, speaker: false, says: (Instant::now(), 0),
                 });
             }
             Err(e) => {
@@ -1472,6 +1518,11 @@ impl Core {
                         v.shared_adds = true;
                         self.to_page(json!({ "type": "shared_adds", "channel": ch }));
                     }
+                } else if let Some(text) = m.get("say").filter(|_| v.inside).and_then(Value::as_str).and_then(said) {
+                    if counted(&mut v.says) {
+                        let line = json!({ "key": v.peer.get("key"), "name": v.peer.get("name"), "id": v.id, "text": text });
+                        self.say_in(ch, line);
+                    }
                 } else if m.get("scene_resync").is_some() {
                     v.resync_due = true;
                     self.resyncs();
@@ -1500,6 +1551,11 @@ impl Core {
                     }
                 } else if let Some(p) = m.get("paused").and_then(Value::as_bool) {
                     self.to_page(json!({ "type": if p { "host_paused" } else { "host_resumed" }, "channel": ch }));
+                } else if let Some(line) = m.get("said").filter(|_| v.inside).and_then(said_from) {   // a line said in the host's room (8.9)
+                    let mut line = line;
+                    line["type"] = json!("chat");
+                    line["channel"] = json!(ch);
+                    self.to_page(line);
                 } else if let Some(near) = m.get("near").filter(|_| v.inside) {   // who is near this office's user in the host's room (8.7)
                     self.to_page(json!({ "type": "voice_near", "channel": ch, "near": near_from(near) }));
                 } else if let Some(reason) = m.get("enter_refused").filter(|_| v.watch && v.inside) {
@@ -1602,6 +1658,35 @@ fn call_state(v: &mut Visit, act: &str) {
     }
 }
 
+/// A line of chat as it may be said (8.9): no control characters, trimmed, at most SAY_LEN characters; none if empty.
+fn said(text: &str) -> Option<String> {
+    let t: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().trim().chars().take(SAY_LEN).collect();
+    let t = t.trim_end().to_string();
+    (!t.is_empty()).then_some(t)
+}
+
+/// A line the host says was said in its room, checked: who (a key, a name; a visitor's visit id there, or the
+/// room's owner) and what.
+fn said_from(v: &Value) -> Option<Value> {
+    let s = |x: &Value, n: usize| x.as_str().map(|s| s.chars().filter(|c| !c.is_control()).take(n).collect::<String>());
+    let mut out = json!({ "key": s(&v["key"], 100)?, "name": s(&v["name"], 24).unwrap_or_default(), "text": said(v["text"].as_str()?)? });
+    if let Some(id) = s(&v["id"], 40) {
+        out["id"] = json!(id);
+    } else if v["owner"] == json!(true) {
+        out["owner"] = json!(true);
+    }
+    Some(out)
+}
+
+/// One more in a window of SAYS a SAY_WINDOW: true if it may go.
+fn counted(w: &mut (Instant, u32)) -> bool {
+    if w.0.elapsed() >= SAY_WINDOW {
+        *w = (Instant::now(), 0);
+    }
+    w.1 += 1;
+    w.1 <= SAYS
+}
+
 /// A spot in a room, in metres: [x, y, z], each finite and within 100 km; null or anything else, none.
 fn spot(v: Option<&Value>) -> Option<[f64; 3]> {
     let a = v?.as_array().filter(|a| a.len() == 3)?;
@@ -1664,6 +1749,19 @@ mod tests {
     fn revisions_are_digits() {
         assert!(revision("128") && revision("186"));
         assert!(!revision("r128") && !revision("") && !revision("12345") && !revision("1.2"));
+    }
+
+    #[test]
+    fn a_line_said_is_plain_and_short() {
+        assert_eq!(said("  hi\tthere\n "), Some("hi there".to_string()));
+        assert_eq!(said(&"é".repeat(300)).map(|t| t.chars().count()), Some(SAY_LEN));
+        assert!(said(" \n\t ").is_none() && said("").is_none());
+        let line = said_from(&json!({ "key": "k1", "name": "Ada\u{7}", "id": "v1", "owner": true, "text": "hello\u{1b}[31m", "evil": 1 })).unwrap();
+        assert_eq!(line, json!({ "key": "k1", "name": "Ada", "id": "v1", "text": "hello [31m" }));
+        assert_eq!(said_from(&json!({ "key": "k2", "owner": true, "text": "yo" })), Some(json!({ "key": "k2", "name": "", "owner": true, "text": "yo" })));
+        assert!(said_from(&json!({ "key": "k3", "text": "  " })).is_none() && said_from(&json!({ "text": "no key" })).is_none());
+        let mut w = (Instant::now(), 0);
+        assert_eq!((0..7).map(|_| counted(&mut w)).filter(|ok| *ok).count(), SAYS as usize);
     }
 
     #[test]

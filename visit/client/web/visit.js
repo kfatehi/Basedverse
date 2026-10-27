@@ -13,7 +13,7 @@
 // visitor's page walks at once and the host corrects it), and a host renders and encodes nothing for anyone.
 "use strict";
 (function () {
-  const VERSION = "0.10.0", PROTO = "basedverse-visit-local/2";
+  const VERSION = "0.11.0", PROTO = "basedverse-visit-local/2";
   const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, LOOK = 0.0025;
   const POINT_MS = 200, AIM_MS = 125;   // a visitor's points, at most one this often; what it aims at, looked for this often
   // What the host hears many times a second: none of it changes what the page shows, so none fires "change".
@@ -46,6 +46,9 @@
   const VOICE_RATE = 48000, VOICE_FRAME = 960, VOICE_BITRATE = 24000, VOICE_LEAD = 0.06, VOICE_LATE = 0.4, VOICE_RANGE = 45, VOICE_ROOM = 1, VOICE_CALLS = 2;
   // A phone (SPEC 8.8) rings this long, unanswered, then stops.
   const CALL_RING_MS = 30000;
+  // Chat (SPEC 8.9): a line is at most CHAT_LEN characters, at most CHATS of them every CHAT_WINDOW ms (as visit-client
+  // takes them), and shows over its speaker's head a while, the longer the longer it is.
+  const CHAT_LEN = 200, CHATS = 5, CHAT_WINDOW = 10000, chatShows = text => Math.min(12000, 4000 + 70 * text.length);
   // The microphone's side: 20 ms at a time, to the page (an AudioWorklet, from a blob: as the ticker's Worker is).
   const MIC_WORKLET = `registerProcessor("visit-mic", class extends AudioWorkletProcessor {
     constructor() { super(); this.b = new Float32Array(${VOICE_FRAME}); this.n = 0; }
@@ -520,6 +523,8 @@
       this.voiceRange = VOICE_RANGE;   // metres: farther, nobody is heard (visit-client's, from ready)
       this._voices = new Map();   // their key -> a decoder, its panner, and where its next moment plays
       this._voiceTo = 0;          // where your voice may go: VOICE_ROOM, VOICE_CALLS, both, or nowhere (nothing encoded)
+      this._chats = new Map();    // lines said in the rooms you are in or host (8.9), still showing, by who said them
+      this._said = [];            // when you last said lines (CHATS every CHAT_WINDOW)
       this._nearHome = [];        // who is near your user in your room, as your visit-client says (voice_near)
       this._nearBy = new Map();   // and in another's room, as its owner's says: channel -> [{ key, name, distance, id, phone }]
       this._whereTold = { sig: "", at: 0 };   // where everyone in your room is, as last told to your visit-client
@@ -667,6 +672,10 @@
         case "phone": if (m.on) this._phoneOn.add(m.channel); else { this._phoneOn.delete(m.channel); const p = this._peerOf(m.channel); if (p && p.key) this._callEnd(p.key, "their phone went", false); } break;
         case "call": this._callIn(m); break;
         case "layout": this.layout = Array.isArray(m.layout) ? m.layout : []; break;
+        case "chat":   // a line said (8.9): in your room by a visitor (their channel), or in the room you are in
+          this._chatIn({ key: String(m.key || ""), name: String(m.name || ""), text: String(m.text || "").slice(0, 4 * CHAT_LEN), id: typeof m.id === "string" ? m.id : null,
+            owner: m.owner === true, channel: m.channel, room: this._hosted.has(m.channel) ? "home" : m.channel });
+          break;
         case "voice_near": {   // who is near your user (8.7): in your room (no channel), or in the one you are in
           const near = (Array.isArray(m.near) ? m.near : []).filter(isObj).map(n => ({ key: String(n.key), name: String(n.name || ""), distance: Number(n.distance) || 0,
             id: typeof n.id === "string" ? n.id : null, phone: n.phone === true }));
@@ -1199,6 +1208,47 @@
       if (h) return h.visitor;
       const w = this._viewing(ch) || this._links.get(ch);
       return w ? (w.host || (this.visiting && this.visiting.host)) : null;
+    }
+
+    // ---------- chat (8.9) ----------
+    // Say a line: everyone in the room your user is in sees it over their head for a few seconds (you too, over
+    // yours), and nobody else, not even next door in a world. Plain text, at most 200 characters, 5 lines every 10 s
+    // (false: not said). "chat" says each line said where you are, and in your room: { key, name, text, mine, owner,
+    // id, channel }; v.chats, those still showing. Visit draws them in the views it draws (your world, and another's
+    // room); a room without a world draws its own (Visit.bubble).
+    say(text) {
+      const t = [...String(text == null ? "" : text).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim()].slice(0, CHAT_LEN).join("").trim(), now = Date.now();
+      this._said = this._said.filter(at => now - at < CHAT_WINDOW);
+      if (!t || this._said.length >= CHATS || !this._ws || this._ws.readyState !== 1) return false;
+      this._said.push(now);
+      this._send({ type: "say", text: t });
+      const r = this._room();
+      this._chatIn({ key: this.key || "", name: this.office ? this.office.name : "", text: t, mine: true, owner: false, id: null, room: r.kind === "home" ? "home" : r.w.channel });
+      return true;
+    }
+    get chats() {
+      const now = performance.now();
+      return [...this._chats.values()].filter(c => c.until > now).map(c => ({ key: c.key, name: c.name, text: c.text, mine: c.mine, owner: c.owner, id: c.id, channel: c.channel }));
+    }
+    _chatIn(c) {
+      if (!c.text) return;
+      c.until = performance.now() + chatShows(c.text);
+      this._chats.set(c.mine ? "mine" : c.key + "|" + (c.id || ""), c);
+      this._emit("chat", { key: c.key, name: c.name, text: c.text, mine: !!c.mine, owner: !!c.owner, id: c.id, channel: c.channel });
+      this._changed();
+    }
+    // The lines showing in one room ("home", or the channel of the one visited), and where each is said from: its
+    // speaker there (`at`, the spot over their head in that scene's world terms), or not drawn (not found, or you).
+    // `own`: draw your own (a view of yours from outside); `who`: the speaker's object in that room, or a spot.
+    _chatsIn(room, who) {
+      const now = performance.now(), out = [];
+      for (const [k, c] of this._chats) {
+        if (c.until <= now) { this._chats.delete(k); continue; }
+        if (c.room !== room) continue;
+        const at = who(c);
+        if (at) out.push({ key: k, text: c.text, at });
+      }
+      return out;
     }
 
     // ---------- phones (8.8) ----------
@@ -1825,6 +1875,10 @@
       for (const o of s.own) o.visible = false;
       if (!outside) this._aim(s, now);
       s.renderer.render(s.root, s.camera);
+      if (this._chats.size && !outside) {   // lines said in this room: over its owner (its mark) and its visitors (their bodies)
+        const b = s.bubbles || (s.bubbles = new Bubbles(s.T)), k = s.unit || 1;
+        b.draw(s.renderer, s.camera, this._chatsIn(w.channel, c => c.mine ? null : b.over(c.id ? this._body(s, c.id) : s.root.getObjectByName("visit:me"), 2.1 / k, 0.3 / k)), k);
+      }
       w.count++;
       this.frames = (this.frames || 0) + 1;
       const done = performance.now();
@@ -1889,6 +1943,7 @@
       const s = w && w.scene;
       if (!s) return;
       w.scene = null;
+      if (s.bubbles) s.bubbles.release();
       cancelAnimationFrame(s.raf);
       if (this._world) this._world._forget(w);
       for (const map of [s.geos, s.mats, s.texs]) for (const x of map.values()) { try { x.dispose(); } catch (e) { /* gone */ } }
@@ -2176,6 +2231,75 @@
     return pose;
   }
 
+  // ---------- chat bubbles (8.9): a line said, over its speaker's head ----------
+  // A line on a card (wrapped, at most four lines), as a three.js sprite whose bottom sits where it is put: `unit`, the
+  // metres of a unit in the scene it goes in. For a room drawing its own: Visit.bubble(THREE, text, unit).
+  function bubble(T, text, unit = 1) {
+    const c = document.createElement("canvas"), g = c.getContext("2d"), font = "500 30px system-ui, -apple-system, sans-serif", W = 460, pad = 18, lh = 38, tail = 14;
+    g.font = font;
+    const lines = [];
+    let line = "";
+    for (const ch of text) {   // by character, breaking at the line's last space when it is full
+      if (g.measureText(line + ch).width <= W - 2 * pad) { line += ch; continue; }
+      const at = line.lastIndexOf(" ");
+      if (at > 0 && ch !== " ") { lines.push(line.slice(0, at)); line = line.slice(at + 1) + ch; } else { lines.push(line); line = ch === " " ? "" : ch; }
+    }
+    if (line) lines.push(line);
+    if (lines.length > 4) { lines.length = 4; lines[3] = lines[3].replace(/.?$/, "…"); }
+    const w = Math.ceil(Math.min(W, Math.max(80, ...lines.map(l => g.measureText(l).width + 2 * pad)))), h = lines.length * lh + 2 * pad + tail;
+    c.width = w; c.height = h;
+    g.font = font;
+    const r = 16, b = h - tail;
+    g.beginPath(); g.moveTo(r, 0); g.arcTo(w, 0, w, b, r); g.arcTo(w, b, 0, b, r);
+    g.lineTo(w / 2 + 10, b); g.lineTo(w / 2, h - 1); g.lineTo(w / 2 - 10, b);
+    g.arcTo(0, b, 0, 0, r); g.arcTo(0, 0, w, 0, r); g.closePath();
+    g.fillStyle = "rgba(255,255,255,0.95)"; g.fill(); g.lineWidth = 2; g.strokeStyle = "rgba(0,0,0,0.25)"; g.stroke();
+    g.fillStyle = "#111"; g.textBaseline = "middle"; g.textAlign = "center";
+    lines.forEach((l, i) => g.fillText(l, w / 2, pad + lh * (i + 0.5)));
+    const tex = new T.CanvasTexture(c);
+    if ("colorSpace" in tex && T.SRGBColorSpace) tex.colorSpace = T.SRGBColorSpace; else if (T.sRGBEncoding) tex.encoding = T.sRGBEncoding;
+    const sprite = new T.Sprite(new T.SpriteMaterial({ map: tex, transparent: true, depthWrite: false }));
+    sprite.center.set(0.5, 0);
+    const m = 0.0045 / (Number(unit) > 0 ? Number(unit) : 1);   // a pixel, in the scene's units: the widest card some 2 m
+    sprite.scale.set(w * m, h * m, 1);
+    sprite.name = "visit:bubble"; sprite.renderOrder = 10;
+    return sprite;
+  }
+
+  // The bubbles of one view: drawn after its room, into the same depth (a wall in front hides one).
+  class Bubbles {
+    constructor(T) { this.T = T; this.scene = new T.Scene(); this.by = new Map(); this.box = new T.Box3(); }
+    // Over an object: the top of what it draws (its bounding box) and `gap` more; or, drawing nothing (a mark), `up`
+    // over it. In world terms; null for no object.
+    over(o, up, gap) {
+      if (!o) return null;
+      for (let p = o; p; p = p.parent) if (!p.visible) return null;   // hidden (an owner away, say): not there to see
+      this.box.setFromObject(o);
+      const T = this.T, p = o.getWorldPosition(new T.Vector3());
+      return this.box.isEmpty() ? { x: p.x, y: p.y + up, z: p.z } : { x: (this.box.min.x + this.box.max.x) / 2, y: this.box.max.y + gap, z: (this.box.min.z + this.box.max.z) / 2 };
+    }
+    draw(renderer, camera, items, unit) {
+      const seen = new Set();
+      for (const it of items) {
+        let b = this.by.get(it.key);
+        if (!b || b.text !== it.text || b.unit !== unit) {
+          if (b) this._drop(it.key);
+          b = { text: it.text, unit, sprite: bubble(this.T, it.text, unit) };
+          this.by.set(it.key, b); this.scene.add(b.sprite);
+        }
+        b.sprite.position.set(it.at.x, it.at.y, it.at.z);
+        seen.add(it.key);
+      }
+      for (const k of [...this.by.keys()]) if (!seen.has(k)) this._drop(k);
+      if (!this.by.size) return;
+      const auto = renderer.autoClear, planes = renderer.clippingPlanes;
+      renderer.autoClear = false; renderer.clippingPlanes = [];
+      try { renderer.render(this.scene, camera); } finally { renderer.autoClear = auto; renderer.clippingPlanes = planes; }
+    }
+    _drop(k) { const b = this.by.get(k); this.by.delete(k); this.scene.remove(b.sprite); b.sprite.material.map.dispose(); b.sprite.material.dispose(); }
+    release() { for (const k of [...this.by.keys()]) this._drop(k); }
+  }
+
   // ---------- the world (../../WORLD.md): friends' plots around your room, and walking onto them ----------
   // A side of a plot, by where it faces in the plot's own terms; turning left a (radians) on the floor.
   const turnXZ = (x, z, a) => [x * Math.cos(a) + z * Math.sin(a), -x * Math.sin(a) + z * Math.cos(a)];
@@ -2231,15 +2355,18 @@
   //                 (where your page has its user, in its room's terms, and what they press; `me` is where they
   //                 are now: at home as you said, or in a plot as its host has them, `me.in` = { key, name })
   //                 world.render(camera);   (instead of renderer.render(scene, camera))
+  // It draws the lines said (8.9) in the room your user is in over their speakers' heads, yours too (bubbles: false,
+  // and your page draws them itself, from v.chats).
   class World {
-    constructor(v, { scene, renderer, ground = 0x30363d, gap = WORLD_GAP, clipOwn = true } = {}) {
+    constructor(v, { scene, renderer, ground = 0x30363d, gap = WORLD_GAP, clipOwn = true, bubbles = true } = {}) {
       const hk = v._hooks;
       if (!hk) throw new Error("visit.world: v.host first (the world is drawn with your three.js, round your plot)");
       this.v = v; this.T = hk.scene.three;
       this.scene = scene || (hk.scene.root.isScene ? hk.scene.root : null);
       this.renderer = renderer || hk.scene.renderer;
       if (!this.scene || !this.renderer) throw new Error("visit.world needs { scene, renderer }: your whole scene, and the renderer that draws it");
-      Object.assign(this, { gap: Number(gap) >= 0 ? Number(gap) : WORLD_GAP, clipOwn: clipOwn !== false, in: null, home: null, bounce: null, yHome: null,
+      Object.assign(this, { gap: Number(gap) >= 0 ? Number(gap) : WORLD_GAP, clipOwn: clipOwn !== false, in: null, home: null, bounce: null, yHome: null, me: null,
+        bubbles: bubbles === false ? null : new Bubbles(hk.scene.three),
         refused: new Map(), holders: new Map(), sent: { at: 0, sig: "" }, look: { yaw: 0, pitch: 0 }, list: [], listAt: -1, plots: [], told: new Map() });
       const T = this.T;
       this.commons = new T.Scene();   // the ground between plots
@@ -2345,7 +2472,8 @@
 
     // Where your user is now: at home, where your page says (stepping onto a plot takes them in); in a plot, where
     // its host has them (walked at once as it walks, put right by its answers), until it has them off it.
-    frame(dt, me, input = {}) {
+    frame(dt, me, input = {}) { return (this.me = this._frame(dt, me, input)); }
+    _frame(dt, me, input) {
       const v = this.v, T = this.T, now = performance.now();
       dt = Math.min(0.1, Math.max(0, Number(dt) || 0));
       me = { x: Number(me.x) || 0, y: Number(me.y) || 0, z: Number(me.z) || 0, yaw: Number(me.yaw) || 0, pitch: Number(me.pitch) || 0 };
@@ -2373,7 +2501,7 @@
       this._input(w, inp, yaw, me.pitch, now);
       const hp = s.hostPose, pl = s.plot, margin = 0.3 / x.k;
       if (hp && s.yBase == null) { s.yBase = s.pose.y; s.vis.y = 0; }   // the height its host first had us at: where we stepped on
-      if (!hp && now - s.inAt > ENTER_WAIT) { this._refused(w, "no answer"); return this.frame(0, me, {}); }   // its host never had us: back out
+      if (!hp && now - s.inAt > ENTER_WAIT) { this._refused(w, "no answer"); return this._frame(0, me, {}); }   // its host never had us: back out
       if (hp && (Math.abs(hp.x - pl.center[0]) > pl.size[0] / 2 + margin || Math.abs(hp.z - pl.center[1]) > pl.size[1] / 2 + margin)) {
         this._exit(w);   // its host has us off its plot: home again, walking on from there
         const out = new T.Vector3(hp.x, 0, hp.z).applyMatrix4(h.place.matrix);
@@ -2458,11 +2586,36 @@
           r.render(h.holder, camera);
           if (now - s.gcAt > 30000) { s.gcAt = now; v._sceneGc(s); }   // what its room no longer uses, freed
         }
+        if (this.bubbles && v._chats.size) this._bubbles(camera, list);
       } finally { r.autoClear = auto; r.clippingPlanes = planes; }
+    }
+
+    // The lines said in the room your user is in (8.9), over their speakers: at home, you and your visitors (their
+    // bodies in your scene, as your room marks them, or where you have them); on a plot, its owner (its mark), its
+    // visitors (their bodies there) and you.
+    _bubbles(camera, list) {
+      const v = this.v, b = this.bubbles, u = v._unit(), hk = v._hooks, me = this.me, x = this.in != null && list.find(p => p.w && p.w.channel === this.in);
+      const mine = () => me ? { x: me.x, y: (Number(me.y) || 0) + 2.1 / u, z: me.z } : null;
+      let items;
+      if (x && x.w.scene) {
+        const s = x.w.scene;
+        items = v._chatsIn(this.in, c => c.mine ? mine() : b.over(c.id ? v._body(s, c.id) : s.root.getObjectByName("visit:me"), 2.1 / u, 0.3 / u));
+      } else {
+        items = v._chatsIn("home", c => {
+          if (c.mine) return mine();
+          const h = v._hosted.get(c.channel);
+          if (!h) return null;
+          if (!this.homeBodies || this.homeBodies.root !== hk.scene.root) this.homeBodies = { root: hk.scene.root, bodiesAt: 0 };   // your scene's bodies, looked for once a second
+          const o = b.over(v._body(this.homeBodies, h.id), 2.1 / u, 0.3 / u);
+          return o || (h.pose ? { x: h.pose.x, y: (Number(h.pose.y) || 0) + 0.6 / u, z: h.pose.z } : null);
+        });
+      }
+      b.draw(this.renderer, camera, items, u);
     }
 
     release() {
       this.leave();
+      if (this.bubbles) this.bubbles.release();
       for (const w of this.v._watches.values()) this._forget(w);
       for (const key of this.told.keys()) this.v._send({ type: "seen", key, at: null });   // no world now: in none of it
       this.v._send({ type: "world", on: false });
@@ -2563,11 +2716,13 @@
         if (composing === o.id) rows.push(`<form class="row" data-o="${esc(o.id)}"><input maxlength="280" placeholder="a message for ${esc(o.name)}"><button class="go">${word}</button></form>`);
       }
       if (v.state === "online" && v.offices.length < 2) rows.push(`<div class="row muted">nobody else is here yet</div>`);
+      // Chat (8.9), last: a line, over your head for everyone in the room you are in.
+      if (v.state === "online") rows.push(`<form class="row" data-v="say"><input maxlength="${CHAT_LEN}" placeholder="say something to the room you are in" title="everyone in the room you are in sees it over your head; nobody else"><button type="submit">Say</button></form>`);
       const html = rows.join("");
       if (html === drawn) return;   // nothing new: an open menu stays open, a click lands
       drawn = html;
       root.innerHTML = html;
-      const input = root.querySelector("form input");
+      const input = root.querySelector("form[data-o] input");   // a knock's message, being written (never the say box: only on a key or click)
       if (input) input.focus();
     }
     root.addEventListener("click", e => {
@@ -2607,7 +2762,14 @@
     });
     root.addEventListener("submit", e => {
       e.preventDefault();
-      const f = e.target.closest("form"), o = v.offices.find(x => x.id === f.dataset.o);
+      const f = e.target.closest("form");
+      if (f.dataset.v === "say") {   // said: the box empties and lets go of the keys (Enter again, or a click, for another)
+        const i = f.querySelector("input");
+        if (v.say(i.value)) i.value = "";
+        i.blur();
+        return;
+      }
+      const o = v.offices.find(x => x.id === f.dataset.o);
       (o && o.links ? v.link : v.knock).call(v, f.dataset.o, f.querySelector("input").value.trim());
       composing = null;
       f.querySelector("input").blur();
@@ -2618,7 +2780,9 @@
     timer = setInterval(() => { if (v.knocks.length) draw(); }, 1000);   // the knocks' countdown
     const speaking = setInterval(() => { if (v.mic || v.voices.length || v._calls.size) draw(); }, 250);   // who is near, and speaking
     draw();
-    return { element: root, release() { clearInterval(timer); clearInterval(speaking); v.off("change", draw); root.remove(); } };
+    return { element: root, release() { clearInterval(timer); clearInterval(speaking); v.off("change", draw); root.remove(); },
+      // the say box, focused: for a key of your page's own (Enter, say) to start a line
+      say() { const i = root.querySelector("form[data-v=say] input"); if (i) i.focus(); } };
   }
 
   // ---------- your world's map: where friends' rooms sit round yours, seen from above ----------
@@ -2947,6 +3111,7 @@
       return c._open().then(() => c, e => { c.close(); throw e; });
     },
     walk,
+    bubble,
     panel,
     stage,
     map,

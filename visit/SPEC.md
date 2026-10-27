@@ -247,6 +247,7 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `avatar_use` | `key`, `use` (`"mine"` \| `"theirs"` \| null: the default) | the same for one office, apart from the default; kept in the state file |
 | `phone` | `on` (bool) | this room has a phone (8.8), or no longer: every link is told |
 | `call` | `channel`, `act` (`"ring"` \| `"answer"` \| `"hangup"`) | a call on that visit (8.8): ring their phone (refused `no_phone` if their room has none), answer it, end it |
+| `say` | `text` (1 to 200 characters) | a line this office's user says (8.9): to everyone in the room they are in, and nobody else. Control characters become spaces; trimmed; at most 5 every 10 s (`rate_limited`) |
 | `speaker` | `channel`, `on` (bool) | a call on this office's phone's speaker (8.8), or back to the ear (`no_call` if none is on there) |
 | `voice_where` | `me` [x, y, z] \| null, `phone` [x, y, z] \| null, `visitors` [[`channel`, x, y, z], …] (metres, this room's terms) | where everyone in this office's room is (8.7): its own user (null: not in it), its phone, each visitor in it. Who hears whom in the room goes by it. Sent when it changes, at most 10 a second |
 | `knock` | `to` (office id), `message`? (≤ 280), `link`? (true: a link, 8.5) | ask to visit an office, or to link with it (refused `not_hosting` before `host`) |
@@ -271,6 +272,7 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `avatar` | `channel`, `avatar` {`unit`, `json`} | a visitor's avatar, which this page asked for (host side, 8.6): unpacked and checked as a scene edit is |
 | `phone` | `channel`, `on` | the other office's room has a phone now (8.8), or no longer (also `phone` in `visit_started`) |
 | `call` | `channel`, `act` | a call on that visit (8.8): they ring, answer, or hang up |
+| `chat` | `channel`, `key`, `name`, `text`, and `id` (a visitor's, by its visit there) or `owner` (true: the room's owner) | a line said (8.9): in this office's room by a visitor (that visit's channel, its `id`), or in the room its user is in (that visit's channel: its owner, or another visitor). Never this office's own |
 | `voice_near` | `channel`?, `near`: [{`key`, `name`, `distance` (m), `id`?, `phone`?}] | who is near this office's user (8.7), within `voice_range`: in its own room (no `channel`: as its visit-client has it), or in the room it is in (that visit's `channel`: as its owner's says). `id`: a visitor's, by its visit there; `phone`: a call on that room's speaker. When it changes; distances at most every second. `ready` has `voice_range` (45) |
 | `enter` / `exit` | `channel`, `pose`? {`x`, `y`, `z`, `yaw`} (for `enter`) | a watcher stepped into this room, there (host side: spawn it, as a visitor), or out of it; no `pose`: a link going there, spawned where newcomers go |
 | `enter_refused` | `channel`, `reason` (`"full"`, or `"moved"`: a visit to a room began, and this office stepped out) | stepping into a watched room was refused, or undone: outside it |
@@ -439,6 +441,8 @@ Messages are JSON, each prefixed by its length (u32 big-endian). In order, relia
 | visitor | `{"point": {"yaw", "pitch"}}` | a point (8.3): passed to the host's page with only those two, clamped, at most 5 a second |
 | either | `{"phone": true}` / `{"phone": false}` | this side's room has a phone, or no longer (8.8): sent on every link, and on each new one while it has |
 | either | `{"call": "ring" \| "answer" \| "hangup"}` | a call (8.8), passed to the page as `call` |
+| visitor | `{"say": "<text>"}` | a line the visitor says in the host's room (8.9): only while in it; checked and rate-limited as the page's is; passed to the host's page as `chat` and on to the room's other visitors |
+| host | `{"said": {"key", "name", "text", "id"? \| "owner"?}}` | a line said in the host's room (8.9), by its owner or one of its visitors (by its visit's id): only to a visitor in it; checked, passed to the page as `chat` |
 | host | `{"near": [{"key", "name", "distance", "id"?, "phone"?}]}` | who is near the visitor in the host's room (8.7), as the host's visit-client has it: checked, passed to the page as `voice_near` |
 | host | `{"avatar_want": true}` | send this office's avatar (8.6): now, on a stream of its own (7.4), and again whenever its page gives a new one |
 | visitor | `{"shared_adds": true}` | its page reads an `add` that names what it already has by uuid only (8.3; Visit 0.7 on): sent each time the link is up, passed to the host's page once as `shared_adds` |
@@ -729,6 +733,23 @@ carries calls, and the room shows the phone (where it stands, its ringing, picki
   phone is heard on the call (the room's visit-client passes its visitors' voices there); the user, only while
   near it. The other side hears them all, each apart.
 
+### 8.9 Chat
+
+A line typed shows over its speaker's head, for everyone in the same room, and nobody else: not next door in a
+world, not a room seen from outside it. Nothing to join.
+
+- **Saying.** A page says its user's line to its own visit-client (`say`, `v.say`); it goes to the room the user is
+  in: another's (to its owner's visit-client) or their own. The room's visit-client gives it to everyone in the
+  room: its own page (`chat`), and each visitor in it (`said`), but the one who said it. A visitor's line names
+  them by their visit's id there; the owner's says so (`owner`). Every visit-client checks it again: plain text
+  (control characters become spaces), at most 200 characters, at most 5 lines every 10 s from each.
+- **Showing.** A line shows over its speaker a few seconds (4 s, and longer the longer it is: at most 12 s), until
+  they say another. Visit draws it in the views it draws (`Visit.bubble`, a card over the head): another's room
+  (over its owner's `visit:me`, over visitors' marked bodies; never one's own, from one's own eyes) and a world
+  (`v.world`: at home over its user and its visitors; on a plot, over its owner, its visitors and its user). A
+  room without a world draws them itself, from `v.chats` and the `chat` event.
+- **Text is text.** A page shows a line as text (a canvas, `textContent`), never as markup.
+
 ## 9. The library: `visit.js`
 
 The normative surface; INTEGRATING.md shows it in use. Loaded with
@@ -781,6 +802,9 @@ v.avatar(object, { unit })  // your own body, for rooms that show their visitors
 v.setMic(on); v.mic         // your microphone (8.7): on, those near your user in the same room hear them (remembered)
 v.voices; v.voiceRange      // who your user can hear, near them (as the room's visit-client says): [{ key, name, distance (m), speaking }]; metres (45)
 v.listener({ x, y, z, yaw })   // where your user is in your room, for a room that draws no world (a world says it)
+v.say(text)                 // a line (8.9), over your user's head for everyone in the room they are in: true if said
+v.chats                     // the lines still showing where you are and in your room: [{ key, name, text, mine, owner, id, channel }]
+                            //   and the "chat" event, each as it is said
 v.phone(on, { at })         // a phone in your room (8.8), at that spot (your units)
 v.phones; v.calls           // those linked to you whose rooms have phones: [{ key, name }]; your calls: [{ key, name,
                             //   state ("calling" | "ringing" | "on"), speaker, speaking }]
@@ -815,7 +839,8 @@ v.host({
 // what comes back is where they are now: at home as given, or in a plot as its host has them (in: { key, name }), its
 // y the one given plus however far that host has since moved them up or down (a stair, a lift: its move() sets pose.y).
 // Then world.render(camera), in place of renderer.render(scene, camera).
-const world = v.world({ scene, renderer, ground, gap, clipOwn });   // your whole scene and its renderer (host()'s by default)
+const world = v.world({ scene, renderer, ground, gap, clipOwn, bubbles });   // your whole scene and its renderer (host()'s by default);
+                   //   bubbles (true): it draws the lines said (8.9) in the room your user is in over their speakers' heads
 const me = world.frame(dt, { x, y, z, yaw, pitch }, { forward, strafe, run });
 world.render(camera);
 world.plots        // [{ key, name, at: { x, z, turn }, rect: [x0, z0, x1, z1], inside }]
@@ -838,14 +863,16 @@ const view = v.view(element);   // { release(), setActive(on), active, canvas }:
 
 // helpers
 Visit.walk(pose, input, dt, { speed, blocked })   // first-person walking with wall sliding, for move()
+Visit.bubble(THREE, text, unit)                  // a line's bubble (8.9), a sprite whose bottom sits where you put it (unit: metres
+                                                 //   a unit), for a room that draws its own
 Visit.panel(element, v)                          // an optional ready-made lobby panel: Link (Knock, to an older office) with a
                                                  //   message; links asked of you (Link, Not now, ★ always: a guest from now on);
                                                  //   your links (Go there, Back to my room, Put in my world, Unlink); your visitors
                                                  //   and who is linked to you (Kick, Unlink, their look / your model); visitors
                                                  //   look like (default); your world (Map); voice (🎙, who is near); calls (Pick up,
-                                                 //   speaker / handset, Hang up);
+                                                 //   speaker / handset, Hang up); a say box (8.9);
                                                  //   stars, door, status, Go offline / online:
-                                                 //   { element, release() }
+                                                 //   { element, release(), say() (the say box focused: for a key of yours) }
 Visit.map(v)                                     // an optional ready-made map of your world from above (the panel's Map): drag,
                                                  //   turn or type where friends' rooms sit; pick one: their view of you two;
                                                  //   { element, open(), close(), shown, release() }
@@ -906,6 +933,7 @@ slowly while its tab is hidden.
 | watches | 8 watchers of a plot, 8 plots watched; 30 knocks to watch a minute; one declined tried again after 20 s |
 | world | a plot not said: what its scene covers, at most 200 units a side; 4 units between plots in a ring; out of a plot 0.3 units past it; stepping in answered within 3 s |
 | layout, seen | 256 each |
+| chat | a line at most 200 characters; 5 lines every 10 s, from a page and from each visitor; shown 4 to 12 s, by its length |
 
 ## 11. Errors
 

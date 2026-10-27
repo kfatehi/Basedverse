@@ -633,6 +633,32 @@ async def main():
         check("A speaks: B hears it, C (too far) does not; C speaks: nobody hears it", await no_voice(a, b, c), [[], [(8, opus(3))], []])
         await a.ws.send(voice(2, 5))
         check("A's voice for its calls only, with no call on: nowhere", await no_voice(b, c), [[], []])
+
+        print("\nchat: a line said, to everyone in the same room")
+        chat = lambda m: m["type"] == "chat"
+        pick = lambda m, *ks: {k: m.get(k) for k in ks}
+        await a.send(type="say", text="  hello\tB \n")
+        x, y = await b.until(chat), await c.until(chat)
+        check("A says a line in B's room: B's page has it, plain, from A (by its visit there)", pick(x, "channel", "key", "name", "id", "text", "owner"),
+              {"channel": vb["channel"], "key": ka, "name": "A", "id": va["id"], "text": "hello B", "owner": None})
+        check("and C's, in the same room, by A's visit there", pick(y, "channel", "key", "name", "id", "text"), {"channel": vc["channel"], "key": ka, "name": "A", "id": va["id"], "text": "hello B"})
+        await b.send(type="say", text="hi both")
+        x, y = await a.until(chat), await c.until(chat)
+        check("B, the room's owner, says one: A and C have it, from the owner", (pick(x, "channel", "key", "text", "owner", "id"), pick(y, "channel", "text", "owner")),
+              ({"channel": va["channel"], "key": kb, "text": "hi both", "owner": True, "id": None}, {"channel": vc["channel"], "text": "hi both", "owner": True}))
+        await asyncio.sleep(0.3)
+        check("nobody's own line comes back to them", ([t for t in quiet_types(a) if t == "chat"], [t for t in quiet_types(b) if t == "chat"]), ([], []))
+        await c.send(type="say", text="é" * 500)
+        check("a long line: cut to 200 characters", len((await b.until(chat))["text"]), 200)
+        await c.send(type="say", text=" \n\t ")
+        check("an empty one: refused", (await c.until(lambda m: m["type"] == "error"))["code"], "bad_message")
+        for i in range(5):
+            await c.send(type="say", text="line %d" % i)
+        check("more than 5 lines in 10 s: refused", (await c.until(lambda m: m["type"] == "error"))["code"], "rate_limited")
+        got = [(await b.until(chat))["text"] for _ in range(4)]
+        await asyncio.sleep(0.3)
+        check("the room had the 4 that went, and no more", (got, [t for t in quiet_types(b) if t == "chat"]), (["line 0", "line 1", "line 2", "line 3"], []))
+        await a.drain(); await b.drain(); await c.drain()
         await b.send(type="voice_where", me=None, phone=None, visitors=[[vb["channel"], 10, 0, 0]])
         await a.until(lambda m: m["type"] == "voice_near" and m["near"] == [])
         await a.ws.send(voice(1, 6))
@@ -668,6 +694,10 @@ async def main():
         await b.until(lambda m: m["type"] == "call")
         await b.send(type="call", channel=lb["channel"], act="answer")
         await a.until(lambda m: m["type"] == "call")
+        await a.send(type="say", text="anyone?")
+        await asyncio.sleep(0.5)
+        check("A, linked to B but outside its room: its line stays in its own (empty) room, B's page has none",
+              [t for t in quiet_types(b) if t == "chat"] + [t for t in quiet_types(c) if t == "chat"], [])
         await b.send(type="voice_where", me=[0, 1.6, 0], phone=[0, 1, 5], visitors=[[vbc["channel"], 2, 0, 5]])
         await b.send(type="speaker", channel=lb["channel"], on=True)
         nc = await c.until(lambda m: m["type"] == "voice_near" and any(n.get("phone") for n in m["near"]))

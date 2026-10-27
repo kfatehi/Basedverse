@@ -316,6 +316,11 @@ visit.host({
   `visit.listener({ x, y, z, yaw })` each frame. Your visitors it takes from where your room has them. A
   page's Content-Security-Policy needs `blob:` for worklets too (as for the ticker's Worker), and the browser
   WebCodecs (Chrome, Edge, Safari, recent Firefox). Headphones keep your user's speakers out of their microphone.
+- **Chat**: your user types a line (the panel's say box, or `visit.say(text)`) and everyone in the room they are in
+  sees it over their head for a few seconds; nobody else. With a world (step 9) Visit draws the bubbles in your room
+  too; without one, draw them yourself from `visit.chats` (`Visit.bubble(THREE, text, unit)` makes one). A key of your
+  own to start a line: `panel.say()` focuses the say box; make sure your room's keys ignore a text box (WASD there is
+  typing, not walking).
 - **A phone** (optional): for your user to talk with a friend in another room, wherever each stands.
   `visit.phone(true, { at: { x, y, z } })` puts it in your room (draw it there yourself); `visit.phones` lists
   those linked to your user whose rooms have phones, to call (`visit.call(key)`); `visit.on("call", e => ...)`
