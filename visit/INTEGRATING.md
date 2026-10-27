@@ -32,6 +32,28 @@ You write: a launcher step (start visit-client with a token), a way to hand the 
 scene and two host hooks, a little UI (or use the ready-made panel), and a few lines in your drawing loop for
 the world. Your page never opens any connection to another machine itself.
 
+## The vanilla experience
+
+Every room that takes Visit's defaults looks and works the same for the people visiting it, and that is the point:
+take them unless your user asks for something else. The defaults are Visit's own ready-made pieces:
+
+- **the panel** (`Visit.panel`): the lobby, links and knocks, your door and guests, your visitors and their looks,
+  your world's Map, the microphone and who is near, calls (📞 call, Pick up, speaker / handset, Hang up), notes (where
+  a friend's world put your room), and the Say box;
+- **the stage** (`Visit.stage`): the room you visit, full-window or in the corner;
+- **the Map** (`Visit.map`, from the panel): your world from above;
+- **in your world** (`visit.world`): chat bubbles over whoever said something, and a 🔊 over whoever you hear
+  speaking, drawn by Visit (`bubbles`, `speaking`);
+- **the phone** (`visit.phone(true, { at })`): Visit's own desk phone on a stand where you put it, ringing, its handset
+  lifted on a call, its lamp lit on speaker;
+- your user's **voice** on the panel's 🎙, heard by distance in the same room.
+
+What has no default is your room's own: what your landscape is, where the phone stands, which interactions (cosmetic
+only, step 5), your user's avatar. When your user asks for something else (their own panel, a phone of their own, no
+🔊), it is theirs: switch that default off (`bubbles: false`, `speaking: false`, `model: false`, your own UI from
+`visit.*`) and write it down in your workroom (a `VISIT.md`, say: what, why, in their words), so that an upgrade keeps
+it rather than putting the default back. basedverse's `basedverse` plugin for Claude Code keeps that file for you.
+
 ## Before you start
 
 Check these about the sim you are integrating; if one is not true, stop and tell your user why.
@@ -329,7 +351,8 @@ visit.host({
   own to start a line: `panel.say()` focuses the say box; make sure your room's keys ignore a text box (WASD there is
   typing, not walking).
 - **A phone** (optional): for your user to talk with a friend in another room, wherever each stands.
-  `visit.phone(true, { at: { x, y, z } })` puts it in your room (draw it there yourself); `visit.phones` lists
+  `visit.phone(true, { at: { x, y, z } })` puts it in your room: Visit's own phone, its handset at `at` (or
+  `model: false`, and draw your own there); `visit.phones` lists
   those linked to your user whose rooms have phones, to call (`visit.call(key)`); `visit.on("call", e => ...)`
   says when it rings (ring your phone), and `visit.pickUp(key)`, `visit.hangUp(key)`. The handset is private;
   `visit.speaker(key, true)` puts the call on speaker: everyone near your phone, your visitors too, hears it and

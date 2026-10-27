@@ -1,0 +1,12 @@
+{
+  "name": "basedverse",
+  "description": "basedverse: rooms that visit each other. Its Claude Code plugin.",
+  "owner": { "name": "sarmiena" },
+  "plugins": [
+    {
+      "name": "basedverse",
+      "source": "./plugins/basedverse",
+      "description": "Integrate Visit into your three.js workroom, or upgrade it: features, questions, a plan, the work, and a log of your choices"
+    }
+  ]
+}

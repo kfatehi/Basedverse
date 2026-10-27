@@ -392,6 +392,8 @@ async def main():
         check("B moves A's room in its world: A sees it move (25 m east of B's middle, turned a quarter left)",
               await a.until("(s => s && s.at.dx === 25 && s.at.dz === 0 && s.at.turn === 1 && s.at.dx)(v.seen.find(s => s.key === %s))" % json.dumps(kb)), 25)
         check("A's own world is unchanged by it: nobody agrees, each has its own", await a.js("room.world.plots[0].rect"), r)
+        check("A's panel says so once it settles (Visit's own note): B put A's room east of B's", await a.until(
+            "[...document.querySelectorAll('.visit-panel .note')].some(n => n.textContent.startsWith('B put your room east of theirs'))", 10), True)
 
         print("\nflush: walked straight across")
         await a.js("v.place(%s, { x: 15, z: 4, turn: 0 })" % json.dumps(kb))
@@ -568,6 +570,9 @@ async def main():
             "(s => !!s && s.frames > 50 && s.level > 0.01 && s.near)(v._voices.get(v.voices[0].key))"), True)
         check("and B hears A, from where B has A in its room", await b.until("(s => !!s && s.frames > 50 && s.level > 0.01 && s.near)(v._voices.get(v.voices[0].key))"), True)
         check("B's panel shows A near, speaking", await b.until("document.querySelector('.visit-panel').textContent.includes('🔊 A')"), True)
+        check("A's view of B's room draws a 🔊 over B, as A hears B (Visit's own, by default)", await a.until(
+            "(b => !!b && [...b.by.keys()].some(k => k.startsWith('speak:')))(v._viewer && v._viewer.scene && v._viewer.scene.bubbles)"), True)
+        check("and B's world one over A's body, as B hears A", await b.until("!!room.world.bubbles && [...room.world.bubbles.by.keys()].some(k => k.startsWith('speak:'))"), True)
         check("heard within 45 m, as both visit-clients say", (await a.js("v.voiceRange"), await b.js("v.voiceRange")), (45, 45))
         bx0 = await b.js("room.me.x")
         await b.js("room.me.x += 30")
@@ -607,8 +612,13 @@ async def main():
         await a.until("v.links.length === 1")
         kb = await a.js("v.offices.find(o => o.name === 'B').key")
         check("linked: A sees B's room has a phone (and B A's)", (await a.until("v.phones.length === 1 && v.phones[0].name"), await b.until("v.phones.length === 1 && v.phones[0].name")), ("B", "A"))
-        await a.js("v.call(%s)" % json.dumps(kb))
+        await b.js("v.phone(true, { at: { x: room.me.x + 1, y: 1, z: room.me.z } })")   # B's phone, a step from B: Visit's ready-made one
+        check("B's room has Visit's ready-made phone, where B said", await b.until("(p => !!p && !!p.g.parent && p.g.name === 'visit:phone-model')(v._phoneObj)"), True)
+        check("A's panel offers B's phone to call", await a.until("(b => b && b.textContent)(document.querySelector('.visit-panel button[data-v=call]'))"), "B")
+        await a.js("document.querySelector('.visit-panel button[data-v=call]').click()")
         check("A calls B: B's phone rings (its panel too)", await b.until("v.calls.length === 1 && v.calls[0].state === 'ringing' && document.querySelector('.visit-panel').textContent.includes('A is calling')"), True)
+        check("B's phone shakes and says RING RING while it rings", await b.until("(p => Math.abs(p.handset.rotation.z) > 0.01 || p.ring.visible)(v._phoneObj)"), True)
+        check("and A sees it in B's room (it is in B's scene)", await a.until("!!(v._viewer && v._viewer.scene && v._viewer.scene.root.getObjectByName('visit:phone-model'))"), True)
         await b.js("document.querySelector('.visit-panel button[data-v=pick_up]').click()")
         check("B picks up: on, both ways, each in its own room", (await a.until("v.calls.length === 1 && v.calls[0].state === 'on'"), await b.until("v.calls.length === 1 && v.calls[0].state === 'on'")), (True, True))
         check("A hears B, as a telephone (not by where anyone stands), and B A", (await a.until("(s => !!s && s.frames > 50 && s.level > 0.005)(v._voices.get(v.calls[0].key))"),
@@ -616,7 +626,9 @@ async def main():
         check("the microphone on for the call only: nobody near either", (await a.js("!v.mic && !!v._mic && v.voices.length === 0"), await b.js("!v.mic && !!v._mic")), (True, True))
         ka = await b.js("v.calls[0].key")
         await b.js("v.phone(true, { at: { x: room.me.x + 1, y: 1, z: room.me.z } })")   # B's phone, a step from B
+        check("B's handset off its cradle, at B's ear", await b.until("!v._phoneObj.handset.visible && !v._phoneObj.ring.visible"), True)
         await b.js("document.querySelector('.visit-panel button[data-v=speaker]').click()")
+        check("B puts it on speaker: its lamp lit, its handset back", await b.until("v._phoneObj.lamp.visible && v._phoneObj.handset.visible"), True)
         check("B puts it on speaker: A's voice from B's phone, heard where B stands (its voice for the call only: its microphone is off)", await b.until(
             "v.calls[0].speaker && (s => !!s && s.near && s.frames > 10)(v._voices.get(" + json.dumps(ka) + ")) && v._voiceTo === 2"), True)
         heard = "(s => s ? s.frames : 0)(v._voices.get(v.calls[0].key))"

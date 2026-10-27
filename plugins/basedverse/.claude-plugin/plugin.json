@@ -1,0 +1,7 @@
+{
+  "name": "basedverse",
+  "description": "Integrate basedverse's Visit into a three.js workroom, or upgrade one: list its features and what your room uses, ask about them, plan (vanilla unless you say otherwise), do it, and keep VISIT.md, your choices, for every upgrade after.",
+  "author": { "name": "sarmiena" },
+  "homepage": "https://github.com/sarmiena/Basedverse",
+  "repository": "https://github.com/sarmiena/Basedverse"
+}

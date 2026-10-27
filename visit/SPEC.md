@@ -723,7 +723,8 @@ room: not next door in a world, not across a plot's side.
   (`voice_near`, `near`), so a page with nobody near encodes nothing.
 - **Hearing.** A page plays each voice from where the speaker is (Web Audio's HRTF panner, linear to nothing at 45
   m): at home, its visitors where it has them; in another's room, its owner from `visit:me` and the voices passed on
-  from their bodies.
+  from their bodies. Visit marks each one heard speaking with a 🔊 over them (Visit 0.13), in the views it draws: a
+  world (`speaking: false`, for a page drawing its own from `v.voices`) and another's room.
 - **The voice**: 48 kHz mono, 20 ms a packet, Opus at about 24 kbps (WebCodecs), as a binary frame (5.4, bit 3) to
   the visit-client, sent on as a QUIC datagram (7.4: unreliable, so late is lost); the page decodes each speaker's
   in order and plays it a little behind now (60 ms, to ride out the network's unevenness; past 400 ms behind, it
@@ -738,7 +739,10 @@ carries calls, and the room shows the phone (where it stands, its ringing, picki
 
 - **A phone** (`v.phone(true, { at })`): the room says so on every link (control `phone`), and keeps an empty object
   named `visit:phone` in its scene where it stands. A user calls only those linked to them (any visit either way)
-  whose rooms have phones (`v.phones`).
+  whose rooms have phones (`v.phones`). Visit puts a phone there in the room's scene (Visit 0.13: `visit:phone-model`,
+  a stand, its handset at `at`, a lamp), so everyone sees it: shaking with RING RING over it while it rings, its
+  handset off its cradle while its user has it to their ear, its lamp lit on speaker. `model: false`: the room draws
+  its own. The panel calls (📞 call, a button for each of `v.phones`), picks up, and hangs up.
 - **A call**: `ring` (`v.call`), `answer` (`v.pickUp`), `hangup` (`v.hangUp`), as control messages on the visit
   between them; unanswered, it stops ringing after 30 s. While on, each sends its voice on that visit (the
   microphone runs for the call, on or off otherwise).
@@ -847,7 +851,7 @@ v.landscapeChanged()        // something marked userData.visitStatic (8.10) chan
 v.say(text)                 // a line (8.9), over your user's head for everyone in the room they are in: true if said
 v.chats                     // the lines still showing where you are and in your room: [{ key, name, text, mine, owner, id, channel }]
                             //   and the "chat" event, each as it is said
-v.phone(on, { at })         // a phone in your room (8.8), at that spot (your units)
+v.phone(on, { at, model })  // a phone in your room (8.8), at that spot (your units): Visit's own there (model: false, yours)
 v.phones; v.calls           // those linked to you whose rooms have phones: [{ key, name }]; your calls: [{ key, name,
                             //   state ("calling" | "ringing" | "on"), speaker, speaking }]
 v.call(key); v.pickUp(key); v.hangUp(key); v.speaker(key, on)   // and the "call" event: { key, name, state, speaker, why }
@@ -881,8 +885,9 @@ v.host({
 // what comes back is where they are now: at home as given, or in a plot as its host has them (in: { key, name }), its
 // y the one given plus however far that host has since moved them up or down (a stair, a lift: its move() sets pose.y).
 // Then world.render(camera), in place of renderer.render(scene, camera).
-const world = v.world({ scene, renderer, ground, gap, clipOwn, bubbles });   // your whole scene and its renderer (host()'s by default);
-                   //   bubbles (true): it draws the lines said (8.9) in the room your user is in over their speakers' heads
+const world = v.world({ scene, renderer, ground, gap, clipOwn, bubbles, speaking });   // your whole scene and its renderer (host()'s by default);
+                   //   bubbles (true): it draws the lines said (8.9) in the room your user is in over their speakers' heads;
+                   //   speaking (true): a 🔊 over each one your user hears speaking there (8.7)
 const me = world.frame(dt, { x, y, z, yaw, pitch }, { forward, strafe, run });
 world.render(camera);
 world.plots        // [{ key, name, at: { x, z, turn }, rect: [x0, z0, x1, z1], inside, offline }] (offline: a guest's plot
@@ -913,8 +918,10 @@ Visit.panel(element, v)                          // an optional ready-made lobby
                                                  //   your links (Go there, Back to my room, Put in my world, Unlink); your visitors
                                                  //   and who is linked to you (Kick, Unlink, their look / your model); visitors
                                                  //   look like (default); your world (Map); voice (🎙, who is near); calls (Pick up,
-                                                 //   speaker / handset, Hang up); a say box (8.9);
-                                                 //   stars, door, status, Go offline / online:
+                                                 //   speaker / handset, Hang up), 📞 call (those linked with phones); a say box (8.9);
+                                                 //   notes a while (where a friend's world put your room, 8.4, once it
+                                                 //   settles; a call that ended other than hung up); stars, door, status,
+                                                 //   Go offline / online:
                                                  //   { element, release(), say() (the say box focused: for a key of yours) }
 Visit.map(v)                                     // an optional ready-made map of your world from above (the panel's Map): drag,
                                                  //   turn or type where friends' rooms sit; pick one: their view of you two;

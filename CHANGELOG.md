@@ -9,6 +9,34 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.13.0 — 2026-10-26
+
+**The vanilla experience: what every room got by hand, Visit now gives.** Rooms that take the defaults look and work
+the same for their visitors; INTEGRATING.md's new "The vanilla experience" lists them. New defaults:
+
+- **A 🔊 over whoever you hear speaking**, drawn by Visit in your world and in a room you visit (`v.world({ speaking:
+  false })` to draw your own from `v.voices`).
+- **A phone in your room**: `v.phone(true, { at })` puts Visit's own desk phone there, in your scene, so everyone sees
+  it: it shakes with RING RING while it rings, its handset is off its cradle while you have it to your ear, its lamp
+  lit on speaker (`model: false` to draw your own). The panel gets **📞 call**, a button for each of `v.phones`.
+- **Notes in the panel**: where a friend's world put your room (once it settles: not at every step of their dragging,
+  nor twice for the same place), and a call that ended other than hung up.
+- Chat bubbles now sit a little higher, so a 🔊 fits under them.
+
+And basedverse is a **Claude Code plugin** (`/plugin marketplace add sarmiena/Basedverse`, then `/plugin install
+basedverse@basedverse`): its `/basedverse:visit` skill lists Visit's features and what a workroom uses, answers
+questions about them, plans an integration or an upgrade with you (vanilla unless you say otherwise), does it, and
+keeps the workroom's `VISIT.md`: what it uses and every way it differs from vanilla, in your words, so that an upgrade
+keeps your choices.
+
+### What an integration does
+
+1. Get visit-client 0.13.0 (`bin/setup` again, download; or this release).
+2. If your room draws its own phone, pass `model: false` to `visit.phone` (or drop yours for Visit's: the vanilla
+   one). If it draws its own 🔊 marks, pass `speaking: false` to `visit.world` (or drop yours). If it shows its own
+   notes of where a friend's world put your room, drop them (the panel shows them now) or keep them: both is double.
+3. Write down what you kept as your own (a `VISIT.md`): the `/basedverse:visit` skill does it for you.
+
 ## v0.12.0 — 2026-10-26
 
 **Landscapes: what never changes in a room is sent once, and kept.** A room marks its ground, walls, trees and

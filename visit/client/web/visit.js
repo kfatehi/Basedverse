@@ -13,7 +13,7 @@
 // visitor's page walks at once and the host corrects it), and a host renders and encodes nothing for anyone.
 "use strict";
 (function () {
-  const VERSION = "0.12.0", PROTO = "basedverse-visit-local/2";
+  const VERSION = "0.13.0", PROTO = "basedverse-visit-local/2";
   const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, LOOK = 0.0025;
   const POINT_MS = 200, AIM_MS = 125;   // a visitor's points, at most one this often; what it aims at, looked for this often
   // What the host hears many times a second: none of it changes what the page shows, so none fires "change".
@@ -1318,6 +1318,21 @@
       this._emit("chat", { key: c.key, name: c.name, text: c.text, mine: !!c.mine, owner: !!c.owner, id: c.id, channel: c.channel });
       this._changed();
     }
+    // Who your user hears speaking (v.voices), each where `who(key)` says it is in the room they are in: a 🔊 over
+    // each (8.7). In another's room, keys are its owner's, "relay:" a visitor's visit there, "relay:phone…" a call on
+    // its speaker.
+    _speakersIn(who) {
+      const out = [];
+      for (const x of this.voices) if (x.speaking) { const at = who(x.key); if (at) out.push({ key: "speak:" + x.key, icon: "speak", at }); }
+      return out;
+    }
+    // Where a voice is in a room visited or watched (its scene `s`, its host's key), for a 🔊 over it.
+    _speakerIn(s, hostKey, key, b, u) {
+      if (key === hostKey) return b.over(s.root.getObjectByName("visit:me"), 2.0 / u, 0.15 / u);
+      if (key.startsWith("relay:phone")) return b.over(s.root.getObjectByName("visit:phone"), 0.35 / u, 0.15 / u);
+      return key.startsWith("relay:") ? b.over(this._body(s, key.slice(6)), 2.0 / u, 0.15 / u) : null;
+    }
+
     // The lines showing in one room ("home", or the channel of the one visited), and where each is said from: its
     // speaker there (`at`, the spot over their head in that scene's world terms), or not drawn (not found, or you).
     // `own`: draw your own (a view of yours from outside); `who`: the speaker's object in that room, or a spot.
@@ -1340,11 +1355,38 @@
     // state: "calling" | "ringing" | "on", speaking }]; "call" says each change ({ key, name, state, why }).
     // `at`: where the phone stands in your room (your units): on speaker, its call comes from there, and those near it
     // are heard in it.
-    phone(on = true, { at } = {}) {
+    // Visit puts a phone there too (a stand, its handset, a lamp): it shakes while it rings, its handset is off its
+    // cradle while you have it to your ear, its lamp lit on speaker (`model: false`: your room draws its own).
+    phone(on = true, { at, model = true } = {}) {
       this._phone = !!on;
+      this._phoneModel = model !== false;
       if (isObj(at)) this._phoneAt = { x: Number(at.x) || 0, y: Number(at.y) || 0, z: Number(at.z) || 0 };
       this._send({ type: "phone", on: this._phone });
       if (!on) for (const k of [...this._calls.keys()]) this.hangUp(k);
+      this._phoneSet();
+    }
+    // The ready-made phone, in your scene where `at` says (its handset there), or out of it.
+    _phoneSet() {
+      const hk = this._hooks, pa = this._phoneAt, want = !!(hk && this._phone && this._phoneModel && pa);
+      let p = this._phoneObj;
+      if (p && (!want || p.T !== hk.scene.three || p.g.parent !== hk.scene.root)) { if (p.g.parent) p.g.parent.remove(p.g); if (!want || p.T !== hk.scene.three) p = this._phoneObj = null; }
+      if (!want) return;
+      if (!p) p = this._phoneObj = phoneModel(hk.scene.three);
+      if (p.g.parent !== hk.scene.root) hk.scene.root.add(p.g);
+      const u = this._unit();
+      p.g.scale.setScalar(1 / u);
+      p.g.position.set(pa.x, pa.y - 1.06 / u, pa.z);
+    }
+    // 30 times a second: the ready-made phone shaking while it rings (RING RING over it), its handset off its cradle
+    // on a call to your ear, its lamp lit on speaker. Your visitors see it as you do: it is in your scene.
+    _phoneTick(now) {
+      const p = this._phoneObj;
+      if (!p || !p.g.parent) return;
+      const calls = [...this._calls.values()], ringing = calls.some(c => c.state === "ringing"), on = calls.find(c => c.state === "on");
+      p.handset.visible = !(on && !on.speaker);
+      p.lamp.visible = !!(on && on.speaker);
+      p.handset.rotation.z = ringing ? Math.sin(now / 25) * 0.12 : 0;
+      p.ring.visible = ringing && Math.floor(now / 400) % 2 === 0;
     }
     // A call on speaker (your side): their voice from your phone, heard by everyone near it in your room (your
     // visitors too: your room passes it on), and everyone near it heard by them; you only while you are near it.
@@ -1473,6 +1515,7 @@
         this._phoneMark.name = "visit:phone"; this._phoneMark.visible = false;
         sc.root.add(this._phoneMark);
       }
+      this._phoneSet();   // the ready-made phone, in this scene
       for (const h of this._hosted.values()) { if (h.inside) this._spawn(h); h.sceneSent = false; }
       for (const w of this._watches.values()) if (w.failed) Object.assign(w, { failed: false, since: performance.now(), askedAt: 0 });   // now it can read them
       this._sendHost();
@@ -2043,9 +2086,10 @@
       for (const o of s.own) o.visible = false;
       if (!outside) this._aim(s, now);
       s.renderer.render(s.root, s.camera);
-      if (this._chats.size && !outside) {   // lines said in this room: over its owner (its mark) and its visitors (their bodies)
-        const b = s.bubbles || (s.bubbles = new Bubbles(s.T)), k = s.unit || 1;
-        b.draw(s.renderer, s.camera, this._chatsIn(w.channel, c => c.mine ? null : b.over(c.id ? this._body(s, c.id) : s.root.getObjectByName("visit:me"), 2.1 / k, 0.3 / k)), k);
+      if ((this._chats.size || this.voices.some(x => x.speaking) || s.bubbles) && !outside) {   // lines said in this room, and who you hear speaking
+        const b = s.bubbles || (s.bubbles = new Bubbles(s.T)), k = s.unit || 1, hostKey = (w.host || (this.visiting && this.visiting.host) || {}).key;
+        b.draw(s.renderer, s.camera, this._chatsIn(w.channel, c => c.mine ? null : b.over(c.id ? this._body(s, c.id) : s.root.getObjectByName("visit:me"), 2.4 / k, 0.6 / k))
+          .concat(this._speakersIn(key => this._speakerIn(s, hostKey, key, b, k))), k);
       }
       w.count++;
       this.frames = (this.frames || 0) + 1;
@@ -2140,6 +2184,7 @@
         if (m) { m.visible = !!h && !away; if (h && !away) m.position.set(h.x, h.y + 1.5 / this._unit(), h.z); }
         const pm = this._phoneMark, pa = this._phoneAt;
         if (pm) { pm.visible = !!(this._phone && pa); if (pa) pm.position.set(pa.x, pa.y, pa.z); }
+        this._phoneTick(now);
         this._voiceTick();
       }
       if (!this._hooks || !this._hosted.size) return;
@@ -2399,6 +2444,22 @@
     return pose;
   }
 
+  // ---------- the ready-made phone (8.8) ----------
+  // A desk phone on a stand, in metres (its handset 1.06 m up): red, its lamp green on speaker, RING RING over it.
+  function phoneModel(T) {
+    const g = new T.Group(), red = new T.MeshLambertMaterial({ color: 0xb3261e }), wood = new T.MeshLambertMaterial({ color: 0x6e5a44 });
+    const box = (w, h, d, m, x, y, z, to) => { const o = new T.Mesh(new T.BoxGeometry(w, h, d), m); o.position.set(x, y, z); o.castShadow = o.receiveShadow = true; to.add(o); return o; };
+    box(0.36, 0.95, 0.36, wood, 0, 0.475, 0, g);   // the stand
+    box(0.3, 0.08, 0.22, red, 0, 0.99, 0, g);      // the phone
+    const handset = new T.Group(); handset.position.set(0, 1.06, 0); g.add(handset);
+    box(0.32, 0.05, 0.07, red, 0, 0, 0, handset); box(0.08, 0.06, 0.09, red, -0.13, 0.02, 0, handset); box(0.08, 0.06, 0.09, red, 0.13, 0.02, 0, handset);
+    const lamp = new T.Mesh(new T.SphereGeometry(0.025, 8, 6), new T.MeshBasicMaterial({ color: 0x3fb950 }));
+    lamp.position.set(0.11, 1.04, 0.1); lamp.visible = false; g.add(lamp);
+    const ring = bubble(T, "📞 RING RING", 1); ring.position.set(0, 1.35, 0); ring.visible = false; g.add(ring);
+    g.name = "visit:phone-model";
+    return { T, g, handset, lamp, ring };
+  }
+
   // ---------- chat bubbles (8.9): a line said, over its speaker's head ----------
   // A line on a card (wrapped, at most four lines), as a three.js sprite whose bottom sits where it is put: `unit`, the
   // metres of a unit in the scene it goes in. For a room drawing its own: Visit.bubble(THREE, text, unit).
@@ -2434,7 +2495,32 @@
     return sprite;
   }
 
-  // The bubbles of one view: drawn after its room, into the same depth (a wall in front hides one).
+  // Who is speaking (8.7), as Visit marks them: a 🔊 card (`unit`, the metres of a unit) whose bottom sits where it is
+  // put. Made once a three.js, its picture shared.
+  const speakPics = new WeakMap();
+  function speakMark(T, unit = 1) {
+    let pic = speakPics.get(T);
+    if (!pic) {
+      const c = document.createElement("canvas"), g = c.getContext("2d");
+      c.width = c.height = 128;
+      g.fillStyle = "#ffffff"; g.strokeStyle = "#1c2128"; g.lineWidth = 6;
+      g.beginPath(); g.moveTo(36, 6); g.arcTo(122, 6, 122, 122, 30); g.arcTo(122, 122, 6, 122, 30); g.arcTo(6, 122, 6, 6, 30); g.arcTo(6, 6, 122, 6, 30); g.closePath(); g.fill(); g.stroke();
+      g.fillStyle = "#1c2128"; g.beginPath(); g.moveTo(24, 50); g.lineTo(42, 50); g.lineTo(64, 30); g.lineTo(64, 98); g.lineTo(42, 78); g.lineTo(24, 78); g.closePath(); g.fill();
+      g.strokeStyle = "#2ea043"; g.lineWidth = 9; g.lineCap = "round";
+      for (const r of [16, 31]) { g.beginPath(); g.arc(68, 64, r, -0.85, 0.85); g.stroke(); }
+      pic = new T.CanvasTexture(c);
+      if ("colorSpace" in pic && T.SRGBColorSpace) pic.colorSpace = T.SRGBColorSpace; else if (T.sRGBEncoding) pic.encoding = T.sRGBEncoding;
+      speakPics.set(T, pic);
+    }
+    const sprite = new T.Sprite(new T.SpriteMaterial({ map: pic, transparent: true, depthWrite: false }));
+    sprite.center.set(0.5, 0);
+    sprite.userData.size = 0.45 / (Number(unit) > 0 ? Number(unit) : 1);
+    sprite.scale.set(sprite.userData.size, sprite.userData.size, 1);
+    sprite.name = "visit:speaking"; sprite.renderOrder = 10;
+    return sprite;
+  }
+
+  // The bubbles of one view, and its 🔊 marks: drawn after its room, into the same depth (a wall in front hides one).
   class Bubbles {
     constructor(T) { this.T = T; this.scene = new T.Scene(); this.by = new Map(); this.box = new T.Box3(); }
     // Over an object: the top of what it draws (its bounding box) and `gap` more; or, drawing nothing (a mark), `up`
@@ -2446,16 +2532,18 @@
       const T = this.T, p = o.getWorldPosition(new T.Vector3());
       return this.box.isEmpty() ? { x: p.x, y: p.y + up, z: p.z } : { x: (this.box.min.x + this.box.max.x) / 2, y: this.box.max.y + gap, z: (this.box.min.z + this.box.max.z) / 2 };
     }
+    // Each item: { key, at, text } a line's bubble, or { key, at, icon: "speak" } a 🔊, pulsing.
     draw(renderer, camera, items, unit) {
-      const seen = new Set();
+      const seen = new Set(), pulse = 1 + 0.12 * Math.sin(performance.now() / 100);
       for (const it of items) {
         let b = this.by.get(it.key);
         if (!b || b.text !== it.text || b.unit !== unit) {
           if (b) this._drop(it.key);
-          b = { text: it.text, unit, sprite: bubble(this.T, it.text, unit) };
+          b = { text: it.text, unit, sprite: it.icon === "speak" ? speakMark(this.T, unit) : bubble(this.T, it.text, unit) };
           this.by.set(it.key, b); this.scene.add(b.sprite);
         }
         b.sprite.position.set(it.at.x, it.at.y, it.at.z);
+        if (it.icon === "speak") b.sprite.scale.set(b.sprite.userData.size * pulse, b.sprite.userData.size * pulse, 1);
         seen.add(it.key);
       }
       for (const k of [...this.by.keys()]) if (!seen.has(k)) this._drop(k);
@@ -2464,7 +2552,12 @@
       renderer.autoClear = false; renderer.clippingPlanes = [];
       try { renderer.render(this.scene, camera); } finally { renderer.autoClear = auto; renderer.clippingPlanes = planes; }
     }
-    _drop(k) { const b = this.by.get(k); this.by.delete(k); this.scene.remove(b.sprite); b.sprite.material.map.dispose(); b.sprite.material.dispose(); }
+    _drop(k) {
+      const b = this.by.get(k);
+      this.by.delete(k); this.scene.remove(b.sprite);
+      if (b.sprite.name !== "visit:speaking") b.sprite.material.map.dispose();   // (a 🔊's picture is shared)
+      b.sprite.material.dispose();
+    }
     release() { for (const k of [...this.by.keys()]) this._drop(k); }
   }
 
@@ -2524,9 +2617,10 @@
   //                 are now: at home as you said, or in a plot as its host has them, `me.in` = { key, name })
   //                 world.render(camera);   (instead of renderer.render(scene, camera))
   // It draws the lines said (8.9) in the room your user is in over their speakers' heads, yours too (bubbles: false,
-  // and your page draws them itself, from v.chats).
+  // and your page draws them itself, from v.chats); and a 🔊 over each one your user hears speaking (8.7; speaking:
+  // false, and your page draws its own, from v.voices).
   class World {
-    constructor(v, { scene, renderer, ground = 0x30363d, gap = WORLD_GAP, clipOwn = true, bubbles = true } = {}) {
+    constructor(v, { scene, renderer, ground = 0x30363d, gap = WORLD_GAP, clipOwn = true, bubbles = true, speaking = true } = {}) {
       const hk = v._hooks;
       if (!hk) throw new Error("visit.world: v.host first (the world is drawn with your three.js, round your plot)");
       this.v = v; this.T = hk.scene.three;
@@ -2534,7 +2628,7 @@
       this.renderer = renderer || hk.scene.renderer;
       if (!this.scene || !this.renderer) throw new Error("visit.world needs { scene, renderer }: your whole scene, and the renderer that draws it");
       Object.assign(this, { gap: Number(gap) >= 0 ? Number(gap) : WORLD_GAP, clipOwn: clipOwn !== false, in: null, home: null, bounce: null, yHome: null, me: null,
-        bubbles: bubbles === false ? null : new Bubbles(hk.scene.three),
+        bubbles: bubbles === false && speaking === false ? null : new Bubbles(hk.scene.three), showLines: bubbles !== false, showSpeaking: speaking !== false,
         refused: new Map(), holders: new Map(), sent: { at: 0, sig: "" }, look: { yaw: 0, pitch: 0 }, list: [], listAt: -1, plots: [], told: new Map() });
       const T = this.T;
       this.commons = new T.Scene();   // the ground between plots
@@ -2815,7 +2909,7 @@
           r.render(h.holder, camera);
           if (now - s.gcAt > 30000) { s.gcAt = now; v._sceneGc(s); }   // what its room no longer uses, freed
         }
-        if (this.bubbles && v._chats.size) this._bubbles(camera, list);
+        if (this.bubbles && ((this.showLines && v._chats.size) || (this.showSpeaking && v.voices.some(x => x.speaking)) || this.bubbles.by.size)) this._bubbles(camera, list);
       } finally { r.autoClear = auto; r.clippingPlanes = planes; }
     }
 
@@ -2824,22 +2918,23 @@
     // visitors (their bodies there) and you.
     _bubbles(camera, list) {
       const v = this.v, b = this.bubbles, u = v._unit(), hk = v._hooks, me = this.me, x = this.in != null && list.find(p => p.w && p.w.channel === this.in);
-      const mine = () => me ? { x: me.x, y: (Number(me.y) || 0) + 2.1 / u, z: me.z } : null;
-      let items;
+      const mine = () => me ? { x: me.x, y: (Number(me.y) || 0) + 2.4 / u, z: me.z } : null;
+      let items, speakers = [];
       if (x && x.w.scene) {
-        const s = x.w.scene;
-        items = v._chatsIn(this.in, c => c.mine ? mine() : b.over(c.id ? v._body(s, c.id) : s.root.getObjectByName("visit:me"), 2.1 / u, 0.3 / u));
+        const s = x.w.scene, hostKey = (x.w.host || {}).key;
+        items = v._chatsIn(this.in, c => c.mine ? mine() : b.over(c.id ? v._body(s, c.id) : s.root.getObjectByName("visit:me"), 2.4 / u, 0.6 / u));
+        if (this.showSpeaking) speakers = v._speakersIn(key => v._speakerIn(s, hostKey, key, b, u));
       } else {
+        if (!this.homeBodies || this.homeBodies.root !== hk.scene.root) this.homeBodies = { root: hk.scene.root, bodiesAt: 0 };   // your scene's bodies, looked for once a second
+        const over = (h, up, gap) => b.over(v._body(this.homeBodies, h.id), up, gap) || (h.pose ? { x: h.pose.x, y: (Number(h.pose.y) || 0) + gap * 2, z: h.pose.z } : null);
         items = v._chatsIn("home", c => {
           if (c.mine) return mine();
           const h = v._hosted.get(c.channel);
-          if (!h) return null;
-          if (!this.homeBodies || this.homeBodies.root !== hk.scene.root) this.homeBodies = { root: hk.scene.root, bodiesAt: 0 };   // your scene's bodies, looked for once a second
-          const o = b.over(v._body(this.homeBodies, h.id), 2.1 / u, 0.3 / u);
-          return o || (h.pose ? { x: h.pose.x, y: (Number(h.pose.y) || 0) + 0.6 / u, z: h.pose.z } : null);
+          return h ? over(h, 2.4 / u, 0.6 / u) : null;
         });
+        if (this.showSpeaking) speakers = v._speakersIn(key => { const h = [...v._hosted.values()].find(y => y.inside && y.visitor.key === key); return h ? over(h, 2.0 / u, 0.15 / u) : null; });
       }
-      b.draw(this.renderer, camera, items, u);
+      b.draw(this.renderer, camera, (this.showLines ? items : []).concat(speakers), u);
     }
 
     release() {
@@ -2870,7 +2965,20 @@
 .visit-panel .lnk { display: block; } .visit-panel .lnk .btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
 .visit-panel .speaking { color: #3fb950; } .visit-panel button.on { background: #9e2f2f; border-color: #9e2f2f; color: #fff; }
 .visit-panel .knock input[type=checkbox] { flex: none; }
-.visit-panel input { flex: 1; min-width: 0; }`;
+.visit-panel input { flex: 1; min-width: 0; }
+.visit-panel .note { color: #e3b341; }`;
+
+  // Where a friend's world has put your room (8.4, `seen`), said plainly: which way from theirs (north is -z), and how
+  // far apart the two plots' edges are.
+  function seenText(v, name, at) {
+    if (!at) return `${name} took your room out of their world`;
+    const dx = Number(at.dx) || 0, dz = Number(at.dz) || 0, [W, D] = v._plotMetres(), [mw, md] = (at.turn | 0) % 2 ? [D, W] : [W, D];
+    const [tw, td] = Array.isArray(at.size) ? at.size.map(Number) : [NaN, NaN];
+    const gap = Math.max(Math.abs(dx) - (tw + mw) / 2, Math.abs(dz) - (td + md) / 2);
+    const dir = ["north", "north-east", "east", "south-east", "south", "south-west", "west", "north-west"][(Math.round(Math.atan2(dx, -dz) / (Math.PI / 4)) + 8) % 8];
+    if (gap <= 0.5) return `${name} put your room right next to theirs, to the ${dir}`;
+    return `${name} put your room ${dir} of theirs` + (Number.isFinite(gap) ? `, ${Math.round(gap)} m off` : "");
+  }
 
   function panel(element, v) {
     if (!document.getElementById("visit-panel-css")) {
@@ -2881,11 +2989,29 @@
     element.appendChild(root);
     let composing = null, timer = null, drawn = "";
     const always = new Set();   // links on your door to let in for good (a guest, ★), as you answer them
+    // Notes, a while each: where a friend's world put your room (once it settles: a friend dragging it about on their
+    // Map tells you at every step; never again for the same place), and a call that ended other than hung up.
+    let notes = [];
+    const note = text => { notes = notes.filter(n => n.until > Date.now()).concat([{ text, until: Date.now() + 10000 }]).slice(-3); drawn = ""; draw(); setTimeout(draw, 10100); };
+    const seenSaid = new Map((v.seen || []).map(x => [x.key, JSON.stringify(x.at)])), seenWait = new Map();
+    const onSeen = ({ key, name, at }) => {
+      clearTimeout(seenWait.get(key));
+      seenWait.set(key, setTimeout(() => {
+        seenWait.delete(key);
+        const sig = JSON.stringify(at || null);
+        if (seenSaid.get(key) === sig || (!at && !seenSaid.has(key))) return;
+        seenSaid.set(key, sig);
+        note(seenText(v, name || "A friend", at));
+      }, 1500));
+    };
+    const onCall = e => { if (e.state === "ended" && e.why && e.why !== "hung up") note(`📞 ${e.name}: ${e.why}`); };
+    v.on("seen", onSeen); v.on("call", onCall);
     function draw() {
       if (root.contains(document.activeElement) && document.activeElement.tagName === "INPUT") return;   // never under a typing hand
       const me = v.office, rows = [];
       rows.push(`<div class="row hd"><span class="dot ${v.state === "online" ? esc(v.status) : ""}"></span><span class="grow">Visit${me ? " · " + esc(me.name) : ""}</span><span class="muted">${esc(v.state)}</span>${v.state === "online" ? `<button data-v="away" title="leave the lobby: nobody sees you or can link until you come back">Go offline</button>` : ""}</div>`);
       if (v.state === "away") rows.push(`<div class="row"><span class="grow muted">out of the lobby: nobody sees you or can link</span><button class="go" data-v="back">Go online</button></div>`);
+      for (const n of notes) if (n.until > Date.now()) rows.push(`<div class="row note">${esc(n.text)}</div>`);
       if (v.state === "online") {
         rows.push(`<div class="row"><span class="grow">you are</span><select data-v="status">${["available", "busy"].map(s => `<option${s === v.status ? " selected" : ""}>${s}</option>`).join("")}</select>
           <select data-v="max" title="how many visitors at once">${[0, 1, 2, 3, 4, 5, 6, 7, 8].map(n => `<option value="${n}"${n === v.maxVisitors ? " selected" : ""}>${n} visitors</option>`).join("")}</select></div>`);
@@ -2905,6 +3031,8 @@
           <div class="btns"><button class="go" data-v="in" data-k="${esc(k.id)}">${k.link ? "Link" : "Let in"}</button><button data-v="out" data-k="${esc(k.id)}">Not now</button>
           ${forGood}<span class="muted">${Math.max(0, Math.round((k.until - Date.now()) / 1000))}s</span></div></div>`);
       }
+      // Your phone (8.8): a call to make, to those linked to you whose rooms have phones.
+      if (v._phone && !v.calls.length && v.phones.length) rows.push(`<div class="row lnk"><div>📞 call</div><div class="btns">${v.phones.map(p => `<button data-v="call" data-key="${esc(p.key)}" title="ring their phone">${esc(p.name)}</button>`).join("")}</div></div>`);
       // Calls (8.8): ringing, calling, on.
       for (const c of v.calls) rows.push(`<div class="row lnk"><div>📞 ${c.state === "ringing" ? `<b>${esc(c.name)}</b> is calling` : c.state === "calling" ? `calling <b>${esc(c.name)}</b>…`
         : `on a call with <b class="${c.speaking ? "speaking" : ""}">${esc(c.name)}</b>`}</div><div class="btns">${c.state === "ringing" ? `<button class="go" data-v="pick_up" data-key="${esc(c.key)}">Pick up</button>` : ""}${c.state === "on"
@@ -2968,6 +3096,7 @@
       else if (act === "leave") v.leave();
       else if (act === "map") (v._mapView || (v._mapView = map(v))).open();
       else if (act === "mic") v.setMic(!v.mic).catch(x => v._emit("error", { code: "mic", message: String(x.message || x) }));
+      else if (act === "call") { try { v.call(b.dataset.key); } catch (x) { note(String(x.message || x)); } }
       else if (act === "pick_up") v.pickUp(b.dataset.key).catch(x => v._emit("error", { code: "mic", message: String(x.message || x) }));
       else if (act === "hang_up") v.hangUp(b.dataset.key);
       else if (act === "speaker") v.speaker(b.dataset.key, !(v.calls.find(c => c.key === b.dataset.key) || {}).speaker);
@@ -3009,7 +3138,7 @@
     timer = setInterval(() => { if (v.knocks.length) draw(); }, 1000);   // the knocks' countdown
     const speaking = setInterval(() => { if (v.mic || v.voices.length || v._calls.size) draw(); }, 250);   // who is near, and speaking
     draw();
-    return { element: root, release() { clearInterval(timer); clearInterval(speaking); v.off("change", draw); root.remove(); },
+    return { element: root, release() { clearInterval(timer); clearInterval(speaking); v.off("change", draw); v.off("seen", onSeen); v.off("call", onCall); for (const t of seenWait.values()) clearTimeout(t); root.remove(); },
       // the say box, focused: for a key of your page's own (Enter, say) to start a line
       say() { const i = root.querySelector("form[data-v=say] input"); if (i) i.focus(); } };
   }

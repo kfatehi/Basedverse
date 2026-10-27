@@ -30,7 +30,21 @@ two hooks, and two pieces everyone drops in unchanged.
 
 ## Adding Visit to a workroom
 
-Paste this to your coding agent, in your workroom's project, with the lobby's address filled in (ask
+**With Claude Code**, the easiest way: install basedverse's plugin once, then, in your workroom's project, run its
+skill. It lists Visit's features and which your room uses, answers your questions, plans the work with you (Visit's
+vanilla experience unless you say otherwise), does it when you say go, and keeps a `VISIT.md` in your workroom with
+your choices, so that later upgrades keep them. Run it again after a new release to upgrade.
+
+```
+/plugin marketplace add sarmiena/Basedverse
+/plugin install basedverse@basedverse
+/basedverse:visit
+```
+
+(Claude Code 2.1.275 or later can install it in one line: `/plugin install basedverse --marketplace
+sarmiena/Basedverse`. Updates: `/plugin marketplace update basedverse`.)
+
+**With any coding agent**, paste this, in your workroom's project, with the lobby's address filled in (ask
 whoever runs your lobby):
 
 > Clone https://github.com/sarmiena/Basedverse beside this project, then integrate Visit into my
@@ -60,7 +74,9 @@ open, then `bin/deploy-lobby user@server` sets it up, and later updates it.
 
 Set the new `version` in `visit/client/Cargo.toml` (and `VERSION` in `visit/client/web/visit.js`), and add
 its entry at the top of [CHANGELOG.md](CHANGELOG.md): what changed, and **what an integration does**, step
-by step, for the agent upgrading a workroom. Commit, then tag that commit `v<version>` and push the tag
+by step, for the agent upgrading a workroom. A new feature also gets a row in the plugin skill's "Where to look"
+table (`plugins/basedverse/skills/visit/SKILL.md`), and, if it is a default, a line in INTEGRATING.md's "The
+vanilla experience". Commit, then tag that commit `v<version>` and push the tag
 (`git tag v0.3.0 && git push origin v0.3.0`). [The release workflow](.github/workflows/release.yml)
 builds and tests visit-client on Linux (x86_64, ARM64), macOS (Apple silicon, Intel) and Windows (x86_64),
 and publishes the files, with their checksums, as that tag's release, its notes the changelog's entry (a
