@@ -1,18 +1,16 @@
 //! What a visit-client keeps across its runs, in its state file (`--state-file`, ../SPEC.md section 4.1):
 //! whether its office is out of the lobby, its link key (the office's lasting identity, and its secret half:
 //! the file is readable by its owner only), its door and its guests, and its world (../WORLD.md): where it
-//! has put its friends' plots, and the edges it has agreed with them; and whose look its visitors have in its
-//! room (their own avatars, or its models). Written whole each time, by a rename.
+//! has put its friends' plots; and whose look its visitors have in its room (their own avatars, or its models).
+//! Written whole each time, by a rename. (Visit 0.7 to 0.9 kept agreed edges too: a file that has them still loads.)
 use std::{io::Write, path::Path};
 
 use iroh::{EndpointId, SecretKey};
 use serde_json::{json, Value};
 
-/// The most guests an office keeps; and plots it has placed, and edges it has agreed.
+/// The most guests an office keeps; and plots it has placed.
 pub const MAX_GUESTS: usize = 256;
 pub const MAX_PLACES: usize = 256;
-/// A plot's sides, by where they face in its own terms: north -z, south +z, east +x, west -x.
-pub const SIDES: [&str; 4] = ["north", "east", "south", "west"];
 
 /// Someone let in without knocking while the door is open: their key, and the name they were known by.
 #[derive(Clone, Debug, PartialEq)]
@@ -30,25 +28,12 @@ pub struct Place {
     pub turn: u8,
 }
 
-/// A side of this office's plot agreed with a friend's: `mine` touches their `theirs`, their middle `along`
-/// metres from mine (along my side, turning left), and their plot's size in metres when agreed.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Edge {
-    pub key: String,
-    pub name: String,
-    pub mine: String,
-    pub theirs: String,
-    pub along: f64,
-    pub size: [f64; 2],
-}
-
 pub struct Saved {
     pub away: bool,
     pub key: SecretKey,
     pub door_open: bool,
     pub guests: Vec<Guest>,
     pub layout: Vec<Place>,
-    pub edges: Vec<Edge>,
     /// Whether visitors have their own avatars in this room by default (else its models; ../SPEC.md 8.6), and the
     /// keys for which it is the other way: (key, their own).
     pub avatars_theirs: bool,
@@ -72,7 +57,6 @@ impl Saved {
             .collect();
         let list = |k: &str| v.get(k).and_then(Value::as_array).cloned().unwrap_or_default();
         let layout = list("layout").iter().filter_map(place_from).take(MAX_PLACES).collect();
-        let edges = list("edges").iter().filter_map(edge_from).take(MAX_PLACES).collect();
         let av = v.get("avatars").cloned().unwrap_or(Value::Null);
         let avatars_by = av.get("by").and_then(Value::as_array).into_iter().flatten()
             .filter_map(|x| Some((x.get("key").and_then(Value::as_str).filter(|k| key_ok(k))?.to_string(), use_from(x.get("use"))?)))
@@ -84,7 +68,6 @@ impl Saved {
             door_open: v.get("door").and_then(Value::as_str) != Some("closed"),
             guests,
             layout,
-            edges,
             avatars_theirs: use_from(av.get("default")).unwrap_or(false),
             avatars_by,
         };
@@ -95,7 +78,7 @@ impl Saved {
         json!({
             "away": self.away, "key": hex(&self.key.to_bytes()), "door": if self.door_open { "open" } else { "closed" },
             "guests": self.guests.iter().map(|g| json!({ "key": g.key, "name": g.name })).collect::<Vec<_>>(),
-            "layout": self.layout_json(), "edges": self.edges_json(), "avatars": self.avatars_json(),
+            "layout": self.layout_json(), "avatars": self.avatars_json(),
         })
     }
 
@@ -106,10 +89,6 @@ impl Saved {
 
     pub fn layout_json(&self) -> Value {
         json!(self.layout.iter().map(|p| json!({ "key": p.key, "x": p.x, "z": p.z, "turn": p.turn })).collect::<Vec<_>>())
-    }
-
-    pub fn edges_json(&self) -> Value {
-        json!(self.edges.iter().map(|e| json!({ "key": e.key, "name": e.name, "mine": e.mine, "theirs": e.theirs, "along": e.along, "size": e.size })).collect::<Vec<_>>())
     }
 
     /// Written to a file beside it, readable by its owner only, then renamed over it.
@@ -145,29 +124,11 @@ pub fn use_from(v: Option<&Value>) -> Option<bool> {
     }
 }
 
-/// A side's name, if it is one.
-pub fn side(v: Option<&Value>) -> Option<String> {
-    v.and_then(Value::as_str).filter(|s| SIDES.contains(s)).map(str::to_string)
-}
-
 /// A plot's size in metres: two numbers, each above 0 and at most 10 km.
 pub fn size_from(v: Option<&Value>) -> Option<[f64; 2]> {
     let a = v?.as_array()?;
     let n = |i: usize| a.get(i).and_then(Value::as_f64).filter(|x| x.is_finite() && *x > 0.0 && *x <= 1e4);
     Some([n(0)?, n(1)?])
-}
-
-/// How far along a side, in metres: at most 10 km either way.
-pub fn along_from(v: Option<&Value>) -> Option<f64> {
-    v.and_then(Value::as_f64).filter(|x| x.is_finite() && x.abs() <= 1e4)
-}
-
-fn edge_from(v: &Value) -> Option<Edge> {
-    let key = v.get("key").and_then(Value::as_str).filter(|k| key_ok(k))?;
-    Some(Edge {
-        key: key.to_string(), name: clip_name(v.get("name").and_then(Value::as_str).unwrap_or("")),
-        mine: side(v.get("mine"))?, theirs: side(v.get("theirs"))?, along: along_from(v.get("along"))?, size: size_from(v.get("size"))?,
-    })
 }
 
 /// An office's key, as the lobby lists it: a link endpoint's public key.
@@ -212,13 +173,12 @@ mod tests {
         s.door_open = false;
         let friend = SecretKey::generate().public().to_string();
         s.guests.push(Guest { key: friend.clone(), name: "Ada".into() });
-        s.layout.push(Place { key: friend.clone(), x: 20.5, z: -3.0, turn: 3 });
-        s.edges.push(Edge { key: friend, name: "Ada".into(), mine: "east".into(), theirs: "west".into(), along: 1.5, size: [12.0, 9.0] });
+        s.layout.push(Place { key: friend, x: 20.5, z: -3.0, turn: 3 });
         s.save(&path).unwrap();
         let (again, fresh) = Saved::load(Some(&path));
         assert!(!fresh);
         assert_eq!((again.key.public(), again.door_open, again.guests.clone()), (s.key.public(), false, s.guests.clone()));
-        assert_eq!((again.layout.clone(), again.edges.clone()), (s.layout.clone(), s.edges.clone()));
+        assert_eq!(again.layout, s.layout);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -241,17 +201,14 @@ mod tests {
     }
 
     #[test]
-    fn places_and_edges_are_checked() {
+    fn places_and_sizes_are_checked() {
         let k = SecretKey::generate().public().to_string();
         assert!(place_from(&json!({ "key": k, "x": 1, "z": 2, "turn": 1 })).is_some());
         assert!(place_from(&json!({ "key": k, "x": 1, "z": 2, "turn": 4 })).is_none());
         assert!(place_from(&json!({ "key": k, "x": 1e9, "z": 2 })).is_none());
         assert!(place_from(&json!({ "key": "nope", "x": 1, "z": 2 })).is_none());
-        assert_eq!(side(Some(&json!("east"))), Some("east".into()));
-        assert_eq!(side(Some(&json!("up"))), None);
         assert_eq!(size_from(Some(&json!([10, 8]))), Some([10.0, 8.0]));
         assert_eq!(size_from(Some(&json!([0, 8]))), None);
-        assert_eq!(along_from(Some(&json!(-2.5))), Some(-2.5));
     }
 
     #[test]

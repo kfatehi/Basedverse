@@ -9,6 +9,48 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.10.0 — 2026-10-26
+
+**Your world is yours alone: no more edges; see where a friend has put you instead.** Where your friends' rooms
+sit round yours was always your own layout, but two offices could also agree an edge, a side shared by both.
+That is gone: nobody proposes, agrees or waits for anything. Instead each world tells each friend in it where their
+own room sits (SPEC 8.4, `seen`), and nothing else of it: not its other friends, nor where they are. On the Map,
+pick a friend to see their view of the two of you; put each other flush on your own maps, if you like, and walking
+across is as seamless as an edge was.
+
+- visit.js: `v.seen` ([{ key, name, at: { dx, dz, turn, size } }]) and the `seen` event; a world (`v.world`) tells
+  its friends by itself. Gone: `v.edges`, `v.edgeProposals`, `proposeEdge`, `acceptEdge`, `declineEdge`,
+  `removeEdge`, `world.plots`' `seen` and `edge`, the outlines of agreed neighbours, and the panel's edge
+  proposals (Agree / No).
+- visit-client: the page message `seen` (`key`, `at` or null), to the page `seen` and `ready`'s `seen`; the link
+  control message `{"seen": …}`. Gone: `edge_propose`, `edge_accept`, `edge_decline`, `edge_remove`, `edges`,
+  `edge_proposed`, `edge_declined`, `ready`'s `edges`, the link's `edge`, `edge_ok`, `edge_no`, `edge_off`, and
+  the error `no_link`. A state file with edges still loads; they are dropped. An older office's edge proposal
+  goes unanswered, and it never hears where it is in yours.
+
+**Voice: decided by visit-client, heard three times as far.** Who hears whom in a room was each page's choice (and
+its relaying of one visitor's voice to another); now the room's visit-client decides, the same for every room. A
+page sends its user's voice once, to its own visit-client, and tells it where everyone in its room stands (its user,
+its phone, its visitors: `voice_where`, which visit.js sends by itself); the room's visit-client sends each voice to
+whoever is near the speaker, passes visitors' voices on, and does the phone's speaker. A visitor's position is the
+room's word (it moves them), not the visitor's. Voices carry 45 m (was 15), sent 15 m farther to fade in (was 5).
+
+- visit-client: the page messages `voice_where` and `speaker`; to the page `voice_near` (who is near, as the room's
+  visit-client says) and `ready`'s `voice_range`; the link control message `{"near": …}`; the error `no_call`. A
+  page's voice frame (bit 3) now says where it may go (1 the room, 2 calls) instead of naming a visit; pages no
+  longer send voice passed on (bit 4), visit-clients do. The datagrams are the same, so 0.9 offices still talk with
+  0.10 ones (a 0.9 room still decides by 15 m).
+- visit.js: `v.voices` and `v.voiceRange` (45, read-only now) come from visit-client.
+
+### What an integration does
+
+1. Get visit-client 0.10.0 (`bin/setup` again, download; or this release).
+2. Nothing for voice, unless your room set `visit.voiceRange` (it no longer changes anything) or has no world and
+   never calls `visit.listener` (then your user is in nobody's hearing, as before).
+3. If your room calls `proposeEdge`, `acceptEdge`, `declineEdge` or `removeEdge`, or reads `v.edges`,
+   `v.edgeProposals` or `world.plots[i].seen` / `.edge`, take that out. To show where a friend has put you, read
+   `v.seen` (the ready-made Map already does).
+
 ## v0.9.1 — 2026-10-26
 
 **A visitor's click in a room with sprites runs its interaction.** Following a click into the room (SPEC 8.3),

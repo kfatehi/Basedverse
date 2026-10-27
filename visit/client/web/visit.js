@@ -13,7 +13,7 @@
 // visitor's page walks at once and the host corrects it), and a host renders and encodes nothing for anyone.
 "use strict";
 (function () {
-  const VERSION = "0.9.1", PROTO = "basedverse-visit-local/2";
+  const VERSION = "0.10.0", PROTO = "basedverse-visit-local/2";
   const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, LOOK = 0.0025;
   const POINT_MS = 200, AIM_MS = 125;   // a visitor's points, at most one this often; what it aims at, looked for this often
   // What the host hears many times a second: none of it changes what the page shows, so none fires "change".
@@ -40,8 +40,10 @@
   // data (cleanScene). The visitor walks at once, predicted here, and the host's answer corrects it.
   const KEY = 1, EDIT = 2, AVATAR = 4, AUDIO = 8, RELAY = 16;   // frames' flags: bit 0 a key delta; bit 1 a scene edit, bit 2 this office's avatar (page to visit-client); bit 3 voice (SPEC 5.4)
   // Voice (SPEC 8.7): 20 ms of 48 kHz mono a packet, Opus at 24 kbps; played this far behind, to ride out jitter.
-  // Heard within VOICE_RANGE metres (v.voiceRange), fading to nothing there; sent a little farther.
-  const VOICE_RATE = 48000, VOICE_FRAME = 960, VOICE_BITRATE = 24000, VOICE_LEAD = 0.06, VOICE_LATE = 0.4, VOICE_RANGE = 15, VOICE_MARGIN = 5;
+  // Heard within v.voiceRange metres (as visit-client says: VOICE_RANGE until it has), fading to nothing there. Who
+  // hears whom the room's visit-client decides; a page's voice says where it may go: the room its user is in, their
+  // calls, or both (VOICE_ROOM, VOICE_CALLS: its frame's channel).
+  const VOICE_RATE = 48000, VOICE_FRAME = 960, VOICE_BITRATE = 24000, VOICE_LEAD = 0.06, VOICE_LATE = 0.4, VOICE_RANGE = 45, VOICE_ROOM = 1, VOICE_CALLS = 2;
   // A phone (SPEC 8.8) rings this long, unanswered, then stops.
   const CALL_RING_MS = 30000;
   // The microphone's side: 20 ms at a time, to the page (an AudioWorklet, from a blob: as the ticker's Worker is).
@@ -62,12 +64,6 @@
     dv.setUint16(0, ch); dv.setUint8(2, flags); dv.setBigUint64(3, BigInt(Math.round(performance.now() * 1000)));
     buf.set(data, 11);
     return buf;
-  };
-  // Who spoke, before their voice passed on (SPEC 8.7): an id and a name, each a length byte and UTF-8.
-  const relayHead = (id, name, data) => {
-    const i = new TextEncoder().encode(id).slice(0, 64), n = new TextEncoder().encode(name).slice(0, 60), out = new Uint8Array(2 + i.length + n.length + data.length);
-    out[0] = i.length; out.set(i, 1); out[1 + i.length] = n.length; out.set(n, 2 + i.length); out.set(data, 2 + i.length + n.length);
-    return out;
   };
   const rms = a => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * a[i]; return Math.sqrt(s / (a.length || 1)); };
   // An avatar (SPEC 8.6): at most this much, gzipped; and once read by a host, at most so many vertices and objects.
@@ -515,16 +511,18 @@
       this.knocks = [];        // on your door: { id, from, message, until, link }
       this.knocking = [];      // yours, waiting: { id, to, link }
       this.layout = [];        // where you have put friends' plots in your world: [{ key, x, z, turn }]
-      this.edges = [];         // sides of your plot agreed with friends': [{ key, name, mine, theirs, along, size }]
-      this.edgeProposals = []; // edges friends propose, waiting for you: [{ key, name, mine, theirs, along, size }]
+      this.seen = [];          // where friends have put your room in their worlds (8.4): [{ key, name, at: { dx, dz, turn, size } }]
       this.watchers = [];      // who sees your room from outside it (your guests' worlds, links): [{ id, visitor, inside, link }]
       this.links = [];         // your links (8.5): [{ id, host, where ("corner", "aside" or "world"), inside }]
       this.avatars = { default: "mine", by: [] };   // whose look your visitors have in your room (8.6): "theirs" or "mine"
       this.mic = false;        // your microphone on (8.7): those near you hear you
       this.voices = [];        // who you can hear, near you: [{ key, name, distance (m), speaking }]
-      this.voiceRange = VOICE_RANGE;   // metres: farther, nobody is heard, and your voice does not go
+      this.voiceRange = VOICE_RANGE;   // metres: farther, nobody is heard (visit-client's, from ready)
       this._voices = new Map();   // their key -> a decoder, its panner, and where its next moment plays
-      this._voiceTo = [];         // the visits' channels your voice goes on: those near you, and your calls
+      this._voiceTo = 0;          // where your voice may go: VOICE_ROOM, VOICE_CALLS, both, or nowhere (nothing encoded)
+      this._nearHome = [];        // who is near your user in your room, as your visit-client says (voice_near)
+      this._nearBy = new Map();   // and in another's room, as its owner's says: channel -> [{ key, name, distance, id, phone }]
+      this._whereTold = { sig: "", at: 0 };   // where everyone in your room is, as last told to your visit-client
       this._voiceRoom = null;     // the room your user is in, as voice last saw it
       this._calls = new Map();    // their key -> a call: { key, name, channel, state, timer }
       this._phoneOn = new Set();  // channels whose other office's room has a phone
@@ -614,8 +612,9 @@
       this.key = typeof m.key === "string" ? m.key : null;
       this._guests(m);
       this.layout = Array.isArray(m.layout) ? m.layout : [];
-      this.edges = Array.isArray(m.edges) ? m.edges : [];
-      this.edgeProposals = [];
+      this.voiceRange = Number(m.voice_range) > 0 ? Number(m.voice_range) : VOICE_RANGE;
+      this._nearHome = []; this._nearBy.clear(); this._whereTold.sig = "";
+      this.seen = (Array.isArray(m.seen) ? m.seen : []).filter(x => isObj(x) && isObj(x.at)).map(x => ({ key: String(x.key), name: String(x.name || ""), at: x.at }));
       this.knocks = []; this.knocking = [];
       this._avatarsFrom(m.avatars);
       this._phoneOn.clear();
@@ -668,14 +667,18 @@
         case "phone": if (m.on) this._phoneOn.add(m.channel); else { this._phoneOn.delete(m.channel); const p = this._peerOf(m.channel); if (p && p.key) this._callEnd(p.key, "their phone went", false); } break;
         case "call": this._callIn(m); break;
         case "layout": this.layout = Array.isArray(m.layout) ? m.layout : []; break;
-        case "edges": this.edges = Array.isArray(m.edges) ? m.edges : []; this.edgeProposals = this.edgeProposals.filter(p => !this.edges.some(e => e.key === p.key)); break;
-        case "edge_proposed": {
-          const p = { key: String(m.key), name: String(m.name || ""), mine: m.mine, theirs: m.theirs, along: Number(m.along) || 0, size: m.size };
-          this.edgeProposals = this.edgeProposals.filter(x => x.key !== p.key).concat([p]);
-          this._emit("edge_proposed", p);
+        case "voice_near": {   // who is near your user (8.7): in your room (no channel), or in the one you are in
+          const near = (Array.isArray(m.near) ? m.near : []).filter(isObj).map(n => ({ key: String(n.key), name: String(n.name || ""), distance: Number(n.distance) || 0,
+            id: typeof n.id === "string" ? n.id : null, phone: n.phone === true }));
+          if (m.channel == null) this._nearHome = near; else this._nearBy.set(m.channel, near);
           break;
         }
-        case "edge_declined": this._emit("edge_declined", { key: m.key }); break;
+        case "seen": {   // where a friend has put your room in their world (8.4), or that it is not in it now
+          const at = isObj(m.at) ? m.at : null;
+          this.seen = this.seen.filter(x => x.key !== m.key).concat(at ? [{ key: String(m.key), name: String(m.name || ""), at }] : []);
+          this._emit("seen", { key: m.key, name: m.name, at });
+          break;
+        }
         case "enter": this._hostEnter(m); break;
         case "exit": this._hostExit(m); break;
         case "enter_refused": this._enterRefused(m); break;
@@ -869,15 +872,11 @@
     removeGuest(key) { this._send({ type: "guest_remove", key }); }
     isGuest(key) { return !!key && this.guests.some(g => g.key === key); }
     // Your world's layout (kept by visit-client): where a friend's plot sits, its centre in your room's units and
-    // 0-3 quarter turns; unplaced, it goes in a ring round yours by itself. And edges agreed with friends (both
-    // must): your side ("north" -z, "east" +x, "south" +z, "west" -x) to theirs, their middle `along` metres from
-    // yours (along your side, turning left); while agreed, their plot sits there, for both of you.
+    // 0-3 quarter turns; unplaced, it goes in a ring round yours by itself. It is yours alone, nobody agrees to it:
+    // each friend in it is told where their own room sits beside yours, and nothing else of it; and you, where
+    // yours sits in theirs (`seen`; none of their other friends).
     place(key, { x, z, turn = 0 }) { this._send({ type: "place", key, x, z, turn }); }
     unplace(key) { this._send({ type: "unplace", key }); }
-    proposeEdge(key, { mine, theirs, along = 0 }) { this._send({ type: "edge_propose", key, mine, theirs, along, size: this._plotMetres() }); }
-    acceptEdge(key) { this._send({ type: "edge_accept", key, size: this._plotMetres() }); this.edgeProposals = this.edgeProposals.filter(p => p.key !== key); this._changed(); }
-    declineEdge(key) { this._send({ type: "edge_decline", key }); this.edgeProposals = this.edgeProposals.filter(p => p.key !== key); this._changed(); }
-    removeEdge(key) { this._send({ type: "edge_remove", key }); }
     // This room's plot ({ center, size } in its units: as host() said, or what its scene covers), and in metres.
     _plot() {
       const hk = this._hooks;
@@ -935,6 +934,7 @@
     }
 
     _ended(m) {
+      this._nearBy.delete(m.channel);
       const h = this._hosted.get(m.channel);
       if (h && h.id === m.id) { this._avatarDrop(h); this._hosted.delete(m.channel); }
       const w = this._watches.get(m.channel);
@@ -1011,7 +1011,7 @@
         node.port.onmessage = e => {
           const pcm = e.data;
           mic.level = rms(pcm);
-          if (!this._voiceTo.length || enc.state !== "configured") return;   // nobody to hear it: nothing encoded, nothing sent
+          if (!this._voiceTo || enc.state !== "configured") return;   // nobody to hear it: nothing encoded, nothing sent
           enc.encode(new AudioData({ format: "f32-planar", sampleRate: VOICE_RATE, numberOfFrames: pcm.length, numberOfChannels: 1, timestamp: mic.t, data: pcm }));
           mic.t += pcm.length * 1e6 / VOICE_RATE;
         };
@@ -1028,12 +1028,12 @@
       try { m.src.disconnect(); m.node.disconnect(); m.hush.disconnect(); } catch (e) { /* gone */ }
       if (m.enc.state !== "closed") m.enc.close();
     }
-    // A packet of your voice: on each visit _voiceTo names (visit-client sends it there).
+    // A packet of your voice, once, to your visit-client: it sends it to those who hear it (where _voiceTo allows).
     _voiceOut(chunk) {
-      if (!this._ws || this._ws.readyState !== 1) return;
+      if (!this._ws || this._ws.readyState !== 1 || !this._voiceTo) return;
       const data = new Uint8Array(chunk.byteLength);
       chunk.copyTo(data);
-      for (const ch of this._voiceTo) this._ws.send(frameOf(ch, AUDIO, data));
+      this._ws.send(frameOf(this._voiceTo, AUDIO, data));
     }
 
     // Which room your user is in: their own (at home), one they went to (a visit, a link gone there), or a plot they
@@ -1079,25 +1079,24 @@
       }
       return out;
     }
-    // 30 times a second: who is near enough in your user's room to hear them (where your voice goes: at home to each
-    // of them; in another's room, to its owner, who passes it on), your calls, and where each voice comes from.
+    // 30 times a second: where everyone in your room is (to your visit-client, which decides who hears whom there);
+    // who is near your user, as the room they are in says (an older one says nothing: then by where its scene has
+    // them); whether your voice goes anywhere; and where each voice comes from.
     _voiceTick() {
-      const r = this._room(), range = Number(this.voiceRange) > 0 ? Number(this.voiceRange) : VOICE_RANGE, near = r.ears ? this._near(r) : new Map();
+      const r = this._room(), range = this.voiceRange, near = r.ears ? this._near(r) : new Map();
       for (const p of near.values()) p.distance = Math.hypot(p.x - r.ears.x, p.z - r.ears.z);
       this._voiceRoom = r;
-      const to = new Set();
-      if (this.mic && r.ears) {
-        if (r.kind === "home") { for (const p of near.values()) if (p.distance <= range + VOICE_MARGIN) to.add(p.channel); }
-        else to.add(r.w.channel);   // their room's owner hears you by where you are, and passes you on to those near you
-      }
+      this._voiceWhere(r);
+      const now = performance.now(), told = r.kind === "home" ? this._nearHome : this._nearBy.get(r.w.channel);
+      const speaking = k => { const s = this._voices.get(k); return !!s && now - s.heardAt < 400; };
+      this.voices = told
+        ? told.map(n => { const key = r.kind === "home" ? n.key : n.phone ? "relay:phone" : n.id ? "relay:" + n.id : n.key;
+            return { key, name: n.name, distance: n.distance, speaking: n.phone ? [...this._voices.keys()].some(k => k.startsWith("relay:phone") && speaking(k)) : speaking(key) }; })
+        : [...near.values()].filter(p => p.distance <= range).map(p => ({ key: p.key, name: p.name, distance: Math.round(p.distance * 10) / 10, speaking: speaking(p.key) }));
+      const room = this.mic && !!r.ears && (this.voices.length > 0 || (r.kind !== "home" && !told)), calls = [...this._calls.values()].some(c => c.state === "on");
+      this._voiceTo = (room ? VOICE_ROOM : 0) | (calls ? VOICE_CALLS : 0);
+      for (const c of this._calls.values()) c.speaking = speaking(c.key);
       const ku = this._unit(), pa = this._phoneAt, phone = pa && r.ears && r.kind === "home" && { x: pa.x * ku, y: (pa.y || 0) * ku, z: pa.z * ku };   // your phone, in your room
-      for (const c of this._calls.values()) {   // on the handset, you to them; on speaker, you if you are near your phone
-        if (c.state === "on" && (!c.speaker || (r.kind === "home" && phone && Math.hypot(phone.x - r.ears.x, phone.z - r.ears.z) <= range))) to.add(c.channel);
-      }
-      this._voiceTo = [...to];
-      const now = performance.now();
-      this.voices = [...near.values()].filter(p => p.distance <= range).map(p => { const s = this._voices.get(p.key); return { key: p.key, name: p.name, distance: Math.round(p.distance * 10) / 10, speaking: !!s && now - s.heardAt < 400 }; });
-      for (const c of this._calls.values()) { const s = this._voices.get(c.key); c.speaking = !!s && now - s.heardAt < 400; }
       const ctx = this._ctx;
       if (ctx && r.ears) {
         const l = ctx.listener, t = ctx.currentTime, fx = -Math.sin(r.ears.yaw), fz = -Math.cos(r.ears.yaw);
@@ -1118,9 +1117,21 @@
         else s.panner.setPosition(p.x, p.y, p.z);
       }
     }
-    // A packet of someone's voice. On a call: theirs, or (passed on) someone near their phone on speaker, heard as a
-    // call is (_callVoice). Passed on by the room your user is in: heard if near. From a visitor of yours: passed on
-    // to your other visitors near them, and to a call on speaker if they are near your phone; heard if near you.
+    // Where everyone in your room is, in metres, for your visit-client (8.7): your user while they are at home (where
+    // your world, or listener(), has them), your phone, and each visitor in it (where your room has them). Sent when
+    // it changes, at most ten times a second.
+    _voiceWhere(r) {
+      const k = this._unit(), q = x => Math.round(x * 10) / 10, pa = this._phoneAt;
+      const where = { me: r.kind === "home" && r.ears ? [q(r.ears.x), q(r.ears.y), q(r.ears.z)] : null, phone: pa ? [q(pa.x * k), q((pa.y || 0) * k), q(pa.z * k)] : null,
+        visitors: [...this._hosted.values()].filter(h => h.inside && h.pose).map(h => [h.channel, q(h.pose.x * k), q((Number(h.pose.y) || 0) * k), q(h.pose.z * k)]) };
+      const sig = JSON.stringify(where), now = performance.now();
+      if (sig === this._whereTold.sig || now - this._whereTold.at < 100 || !this._ws || this._ws.readyState !== 1) return;
+      Object.assign(this._whereTold, { sig, at: now });
+      this._send(Object.assign({ type: "voice_where" }, where));
+    }
+    // A packet of someone's voice, sent here because the room's visit-client has you near them (or on a call). On a
+    // call: theirs, or (passed on) someone near their phone on speaker, heard as a call is (_callVoice). Passed on by
+    // the room your user is in: from where its scene has them. Another office's own: from where it is.
     _voiceIn(ch, data, relayed) {
       let id = null, name = "";
       if (relayed) {
@@ -1131,43 +1142,21 @@
         name = new TextDecoder().decode(data.subarray(2 + n, 2 + n + m)); data = data.subarray(2 + n + m);
       }
       const p = this._peerOf(ch), call = p && p.key && this._calls.get(p.key);
-      if (call && call.state === "on" && call.channel === ch) return this._callVoice(call, relayed ? "call:" + id : p.key, relayed ? name : p.name || "", data, id);
+      if (call && call.state === "on" && call.channel === ch) return this._callVoice(call, relayed ? "call:" + id : p.key, relayed ? name : p.name || "", data);
       if (relayed) {
         const r = this._voiceRoom;
         if (!r || r.kind === "home" || r.w.channel !== ch) return;
         (r.s.relayed || (r.s.relayed = new Map())).set(id, { name, at: performance.now() });
         return this._voiceDecode(this._voiceOf("relay:" + id), data);   // where they are, and whether near: _voiceTick
       }
-      const h = this._hosted.get(ch);
-      if (h && h.inside && h.pose) {
-        this._relay(h.pose, h.id, h.visitor.name || "", data, y => y !== h);
-        for (const c of this._calls.values()) {
-          if (c.state === "on" && c.speaker && this._nearPhone(h.pose) && this._ws && this._ws.readyState === 1) this._ws.send(frameOf(c.channel, RELAY, relayHead(h.id, h.visitor.name || "", data)));
-        }
-      }
-      if (p && p.key && this.voices.some(x => x.key === p.key)) this._voiceDecode(this._voiceOf(p.key), data);
+      if (p && p.key) this._voiceDecode(this._voiceOf(p.key), data);
     }
     // A call's voice: on the handset, to your ear; on speaker, from your phone (to you, by where you are in your
-    // room), and passed on to your visitors near it, as the phone's.
-    _callVoice(c, key, name, data, id) {
-      if (c.speaker && this._phoneAt) this._relay(this._phoneAt, id ? "phone:" + id : "phone", name, data, () => true);
+    // room; your visit-client passes it on to your visitors near the phone, as the phone's).
+    _callVoice(c, key, name, data) {
       const s = this._voiceOf(key);
       s.callKey = c.key; s.name = name;
       this._voiceDecode(s, data);
-    }
-    // Your visitors near a spot in your room (your units), but those `but` leaves out: someone's voice, passed on.
-    _relay(at, id, name, data, but) {
-      const k = this._unit(), range = (Number(this.voiceRange) > 0 ? Number(this.voiceRange) : VOICE_RANGE) + VOICE_MARGIN;
-      let head = null;
-      for (const y of this._hosted.values()) {
-        if (!y.inside || !y.pose || !but(y) || Math.hypot(y.pose.x - at.x, y.pose.z - at.z) * k > range) continue;
-        head = head || relayHead(id, name, data);
-        if (this._ws && this._ws.readyState === 1) this._ws.send(frameOf(y.channel, RELAY, head));
-      }
-    }
-    _nearPhone(pose) {
-      const a = this._phoneAt, range = Number(this.voiceRange) > 0 ? Number(this.voiceRange) : VOICE_RANGE;
-      return !!a && Math.hypot(pose.x - a.x, pose.z - a.z) * this._unit() <= range;
     }
     // Someone's voice: a decoder of its own, played by distance (a panner), or as a telephone (a filter).
     _voiceOf(key) {
@@ -1229,7 +1218,7 @@
     // A call on speaker (your side): their voice from your phone, heard by everyone near it in your room (your
     // visitors too: your room passes it on), and everyone near it heard by them; you only while you are near it.
     // Off (the handset, as a call starts): only you, to your ear. The caller sees only their own links (phones).
-    speaker(key, on) { const c = this._calls.get(key); if (!c) return; c.speaker = !!on; this._callSaid(c); }
+    speaker(key, on) { const c = this._calls.get(key); if (!c) return; c.speaker = !!on; this._send({ type: "speaker", channel: c.channel, on: c.speaker }); this._callSaid(c); }
     get phones() {
       const seen = new Map();
       for (const ch of this._phoneOn) { const p = this._peerOf(ch); if (p && p.key && !seen.has(p.key)) seen.set(p.key, { key: p.key, name: p.name || "" }); }
@@ -2189,7 +2178,6 @@
 
   // ---------- the world (../../WORLD.md): friends' plots around your room, and walking onto them ----------
   // A side of a plot, by where it faces in the plot's own terms; turning left a (radians) on the floor.
-  const SIDE_NORMAL = { north: [0, -1], east: [1, 0], south: [0, 1], west: [-1, 0] };
   const turnXZ = (x, z, a) => [x * Math.cos(a) + z * Math.sin(a), -x * Math.sin(a) + z * Math.cos(a)];
   const MAX_PLOT = 200, WORLD_GAP = 4, ENTER_WAIT = 3000;
 
@@ -2234,7 +2222,7 @@
   const within = (r, x, z) => x > r[0] && x < r[2] && z > r[1] && z < r[3];
 
   // Your world: your own room, at home in its own coordinates, and each plot you watch (a guest's, whose door is
-  // open to you) where your layout puts it: an edge you agreed, else where you placed it, else a ring round yours.
+  // open to you, or a link you put there) where your layout puts it: where you placed it, else a ring round yours.
   // You walk in your own room with your own walking; step onto a plot and you are in its owner's room (it moves
   // you, by its walls), drawn there by your page as yourself; walk off it and you are home again.
   //
@@ -2252,15 +2240,14 @@
       this.renderer = renderer || hk.scene.renderer;
       if (!this.scene || !this.renderer) throw new Error("visit.world needs { scene, renderer }: your whole scene, and the renderer that draws it");
       Object.assign(this, { gap: Number(gap) >= 0 ? Number(gap) : WORLD_GAP, clipOwn: clipOwn !== false, in: null, home: null, bounce: null, yHome: null,
-        refused: new Map(), holders: new Map(), sent: { at: 0, sig: "" }, look: { yaw: 0, pitch: 0 }, list: [], listAt: -1, plots: [] });
+        refused: new Map(), holders: new Map(), sent: { at: 0, sig: "" }, look: { yaw: 0, pitch: 0 }, list: [], listAt: -1, plots: [], told: new Map() });
       const T = this.T;
-      this.commons = new T.Scene();   // the ground between plots, and the outlines of agreed neighbours not seen
+      this.commons = new T.Scene();   // the ground between plots
       if (ground !== null) {
         const g = new T.Mesh(new T.PlaneGeometry(4000, 4000), new T.MeshBasicMaterial({ color: ground }));
         g.rotation.x = -Math.PI / 2; g.position.y = -0.02; g.name = "visit:commons";
         this.commons.add(g);
       }
-      this.outlines = new T.Group(); this.commons.add(this.outlines); this.outlineSig = "";
       v._world = this;
       v._send({ type: "world", on: true });
       for (const w of [...v._links.values()]) if (w.wantWorld) v.toWorld(w.id);   // links that were in it before this page reloaded
@@ -2269,7 +2256,7 @@
 
     get inside() { return this.in != null; }
 
-    // Every plot, placed: watched ones (with their scenes), and agreed neighbours not watched (an outline).
+    // Every plot you watch (with its scene), placed.
     _layout() {
       const now = performance.now();
       if (now - this.listAt < 4) return this.list;   // once a frame
@@ -2277,11 +2264,9 @@
       taken.push([mine.center[0] - mine.size[0] / 2, mine.center[1] - mine.size[1] / 2, mine.center[0] + mine.size[0] / 2, mine.center[1] + mine.size[1] / 2]);
       const xs = [];
       for (const w of v._watches.values()) if (w.scene && w.host.key) xs.push({ key: w.host.key, name: w.host.name || "", w, plot: w.scene.plot, k: w.scene.unit / unit });
-      for (const e of v.edges) if (!xs.some(x => x.key === e.key)) xs.push({ key: e.key, name: e.name, w: null, plot: { center: [0, 0], size: e.size }, k: 1 / unit });
       for (const x of xs) {
-        const edge = v.edges.find(e => e.key === x.key), placed = v.layout.find(p => p.key === x.key);
-        x.edge = !!edge;
-        x.at = edge ? this._fromEdge(edge, x, mine, unit) : placed ? { x: placed.x, z: placed.z, turn: placed.turn | 0 } : null;
+        const placed = v.layout.find(p => p.key === x.key);
+        x.at = placed ? { x: placed.x, z: placed.z, turn: placed.turn | 0 } : null;
         if (x.at) { x.rect = this._rect(x); taken.push(x.rect); out.push(x); } else wait.push(x);
       }
       // The rest by themselves: round yours, each in the first of eight places (from one its key picks) it fits.
@@ -2298,20 +2283,22 @@
         taken.push(x.rect); out.push(x);
       }
       this.list = out; this.listAt = now;
-      this.plots = out.map(x => ({ key: x.key, name: x.name, at: x.at, rect: x.rect, seen: !!x.w, edge: x.edge, inside: !!(x.w && x.w.inside) }));
+      this.plots = out.map(x => ({ key: x.key, name: x.name, at: x.at, rect: x.rect, inside: !!(x.w && x.w.inside) }));
+      this._tell(out, mine, unit);
       return out;
     }
 
-    // Where an agreed edge puts a friend's plot: their side against yours, facing it, their middle `along` metres
-    // from yours (along your side, turning left).
-    _fromEdge(e, x, mine, unit) {
-      const n = SIDE_NORMAL[e.mine], nt = SIDE_NORMAL[e.theirs];
-      if (!n || !nt) return null;
-      let turn = 0;
-      for (; turn < 4; turn++) { const [a, b] = turnXZ(nt[0], nt[1], turn * Math.PI / 2); if (Math.abs(a + n[0]) < 1e-6 && Math.abs(b + n[1]) < 1e-6) break; }
-      const mid = [mine.center[0] + n[0] * mine.size[0] / 2, mine.center[1] + n[1] * mine.size[1] / 2];
-      const ext = (e.theirs === "east" || e.theirs === "west" ? x.plot.size[0] : x.plot.size[1]) * x.k / 2, t = turnXZ(n[0], n[1], Math.PI / 2), along = (Number(e.along) || 0) / unit;
-      return { x: mid[0] + n[0] * ext + t[0] * along, z: mid[1] + n[1] * ext + t[1] * along, turn: turn % 4 };
+    // Each friend in your world told where their room sits in it (8.4), when that changes, and nothing else of it:
+    // their plot's middle in metres from yours (north -z), its quarter turns, and your plot's size. One no longer in
+    // it is told that. visit-client tells them again over each link that comes up with them.
+    _tell(out, mine, unit) {
+      const v = this.v, r = x => Math.round(x * 100) / 100, size = v._plotMetres().map(r), now = new Set();
+      for (const x of out) {
+        const at = { dx: r((x.at.x - mine.center[0]) * unit), dz: r((x.at.z - mine.center[1]) * unit), turn: x.at.turn, size }, sig = JSON.stringify(at);
+        now.add(x.key);
+        if (this.told.get(x.key) !== sig) { this.told.set(x.key, sig); v._send({ type: "seen", key: x.key, at }); }
+      }
+      for (const key of [...this.told.keys()]) if (!now.has(key)) { this.told.delete(key); v._send({ type: "seen", key, at: null }); }
     }
 
     _rect(x) {
@@ -2354,24 +2341,6 @@
       this.holders.delete(w.channel);
       if (this.in === w.channel) this.in = null;
       this.listAt = -1;
-    }
-
-    // Agreed neighbours whose plots are not seen (their door shut to you, or away): where they are, and who.
-    _outlines(list) {
-      const T = this.T, unseen = list.filter(x => !x.w), sig = unseen.map(x => [x.key, x.name, ...x.rect].join()).join("|");
-      if (sig === this.outlineSig) return;
-      this.outlineSig = sig;
-      for (const o of [...this.outlines.children]) { this.outlines.remove(o); o.traverse(c => { if (c.geometry) c.geometry.dispose(); if (c.material) { if (c.material.map) c.material.map.dispose(); c.material.dispose(); } }); }
-      for (const x of unseen) {
-        const [x0, z0, x1, z1] = x.rect, y = 0.02;
-        const g = new T.BufferGeometry().setFromPoints([[x0, z0], [x1, z0], [x1, z1], [x0, z1]].map(([a, b]) => new T.Vector3(a, y, b)));
-        this.outlines.add(new T.LineLoop(g, new T.LineBasicMaterial({ color: 0x8b949e })));
-        const c = document.createElement("canvas"); c.width = 256; c.height = 64;
-        const cx = c.getContext("2d"); cx.font = "28px system-ui, sans-serif"; cx.fillStyle = "#e6edf3"; cx.textAlign = "center"; cx.fillText(x.name || "?", 128, 42);
-        const label = new T.Sprite(new T.SpriteMaterial({ map: new T.CanvasTexture(c), transparent: true, depthWrite: false }));
-        label.position.set((x0 + x1) / 2, 1.5, (z0 + z1) / 2); label.scale.set(4, 1, 1);
-        this.outlines.add(label);
-      }
     }
 
     // Where your user is now: at home, where your page says (stepping onto a plot takes them in); in a plot, where
@@ -2478,7 +2447,6 @@
         r.render(this.scene, camera);
         r.autoClear = false;
         r.clippingPlanes = [];
-        this._outlines(list);
         this.commons.fog = this.scene.fog || null;
         r.render(this.commons, camera);
         for (const x of list) {
@@ -2496,6 +2464,7 @@
     release() {
       this.leave();
       for (const w of this.v._watches.values()) this._forget(w);
+      for (const key of this.told.keys()) this.v._send({ type: "seen", key, at: null });   // no world now: in none of it
       this.v._send({ type: "world", on: false });
       if (this.v._world === this) this.v._world = null;
     }
@@ -2553,10 +2522,6 @@
         rows.push(`<div class="row knock"><b>${esc(k.from.name)}</b> ${k.link ? "wants to link" : "is knocking"}${k.message ? `: “${esc(k.message)}”` : ""}
           <div class="btns"><button class="go" data-v="in" data-k="${esc(k.id)}">${k.link ? "Link" : "Let in"}</button><button data-v="out" data-k="${esc(k.id)}">Not now</button>
           ${forGood}<span class="muted">${Math.max(0, Math.round((k.until - Date.now()) / 1000))}s</span></div></div>`);
-      }
-      for (const p of v.edgeProposals) {
-        rows.push(`<div class="row knock"><b>${esc(p.name)}</b> proposes their plot's ${esc(p.theirs)} side against your ${esc(p.mine)} side
-          <div class="btns"><button class="go" data-v="edge_yes" data-key="${esc(p.key)}">Agree</button><button data-v="edge_no" data-key="${esc(p.key)}">No</button></div></div>`);
       }
       // Calls (8.8): ringing, calling, on.
       for (const c of v.calls) rows.push(`<div class="row lnk"><div>📞 ${c.state === "ringing" ? `<b>${esc(c.name)}</b> is calling` : c.state === "calling" ? `calling <b>${esc(c.name)}</b>…`
@@ -2632,8 +2597,6 @@
       else if (act === "away") v.leaveLobby();
       else if (act === "back") v.joinLobby();
       else if (act === "guest") v.isGuest(b.dataset.key) ? v.removeGuest(b.dataset.key) : v.addGuest(b.dataset.key, b.dataset.name);
-      else if (act === "edge_yes") v.acceptEdge(b.dataset.key);
-      else if (act === "edge_no") v.declineEdge(b.dataset.key);
     });
     root.addEventListener("change", e => {
       if (e.target.dataset.v === "always") { if (e.target.checked) always.add(e.target.dataset.k); else always.delete(e.target.dataset.k); }
@@ -2672,27 +2635,46 @@
 .visit-map button, .visit-map input { font: inherit; color: inherit; background: #161b22; border: 1px solid #2d333b; border-radius: 6px; padding: 3px 8px; }
 .visit-map button { cursor: pointer; } .visit-map button.go { background: #2f9e4f; border-color: #2f9e4f; color: #fff; }
 .visit-map button.pick { text-align: left; } .visit-map input { width: 76px; }
-.visit-map .row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }`;
+.visit-map .row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.visit-map svg { display: block; width: 100%; height: 150px; background: #161b22; border-radius: 6px; }`;
+
+  // A friend's view of the two of you (8.4, `v.seen`): their plot, and yours where they have put it in their
+  // world; in metres, north (-z) up. Nothing of their other friends: they never say. HTML, for the map's side.
+  const COMPASS = ["east", "north-east", "north", "north-west", "west", "south-west", "south", "south-east"];
+  function theirView(s, mine) {
+    const a = s.at, odd = a.turn % 2 === 1, [tw, td] = a.size, mw = odd ? mine[1] : mine[0], md = odd ? mine[0] : mine[1], r = x => Math.round(x * 100) / 100;
+    const x0 = Math.min(-tw / 2, a.dx - mw / 2), z0 = Math.min(-td / 2, a.dz - md / 2), x1 = Math.max(tw / 2, a.dx + mw / 2), z1 = Math.max(td / 2, a.dz + md / 2);
+    const span = Math.max(x1 - x0, z1 - z0), pad = span * 0.08, fs = span / 14;
+    const box = (cx, cz, w, d, fill, stroke, text) => `<rect x="${r(cx - w / 2)}" y="${r(cz - d / 2)}" width="${r(w)}" height="${r(d)}" fill="${fill}" stroke="${stroke}" stroke-width="${r(fs / 6)}"/>`
+      + `<text x="${r(cx)}" y="${r(cz + fs / 3)}" font-size="${r(fs)}" text-anchor="middle" fill="#e6edf3">${text}</text>`;
+    // your room's own north, as they have it turned: an arrow against that side, pointing out of it
+    const [nx, nz] = turnXZ(0, -1, a.turn * Math.PI / 2), k = fs * 0.45, cx = a.dx + nx * (mw / 2 - k), cz = a.dz + nz * (md / 2 - k);
+    const arrow = [[cx + nx * k, cz + nz * k], [cx - nx * k / 2 - nz * k * 0.8, cz - nz * k / 2 + nx * k * 0.8], [cx - nx * k / 2 + nz * k * 0.8, cz - nz * k / 2 - nx * k * 0.8]];
+    const dist = Math.hypot(a.dx, a.dz), dir = COMPASS[(Math.round(Math.atan2(-a.dz, a.dx) / (Math.PI / 4)) % 8 + 8) % 8];
+    return `<div class="muted">in their world:</div><svg viewBox="${r(x0 - pad)} ${r(z0 - pad)} ${r(x1 - x0 + 2 * pad)} ${r(z1 - z0 + 2 * pad)}">`
+      + box(0, 0, tw, td, "rgba(88,166,255,.16)", "#58a6ff", esc(s.name || "theirs")) + box(a.dx, a.dz, mw, md, "rgba(63,185,80,.18)", "#3fb950", "you")
+      + `<polygon points="${arrow.map(p => p.map(r).join(",")).join(" ")}" fill="#8b949e"/></svg>`
+      + `<div class="muted">${dist < 0.5 ? "your room on theirs" : `your room ${dir} of theirs, ${Math.round(dist)} m middle to middle`}${a.turn ? ", " + ["", "turned a quarter left", "turned half round", "turned a quarter right"][a.turn] : ""}</div>`;
+  }
 
   // Your world from above (v.world first): your room's plot, and each friend's where your layout puts it. Drag one
   // to put it there (it snaps to half units, and flush against what is near), turn it, or type where its middle
-  // goes; flush against a side of yours, propose an edge (both must agree: then it is there for both). What you
-  // place is kept by visit-client (with VISIT_STATE_FILE, across reloads and restarts); a room with an agreed edge
-  // is where the edge puts it. { element, open(), close(), release() }
+  // goes. Your layout is yours alone: nobody agrees to it, and each friend in it sees only where their own room
+  // sits. Pick a friend to see their view of the two of you (`v.seen`). What you place is kept by visit-client
+  // (with VISIT_STATE_FILE, across reloads and restarts). { element, open(), close(), release() }
   function map(v, { parent = document.body } = {}) {
     if (!document.getElementById("visit-map-css")) {
       const st = document.createElement("style"); st.id = "visit-map-css"; st.textContent = MAP_CSS; document.head.appendChild(st);
     }
     const root = document.createElement("div");
     root.className = "visit-map"; root.hidden = true;
-    root.innerHTML = `<div class="box"><div class="hd"><b>Your world</b><span class="grow muted">where your friends' rooms sit round yours: your layout (theirs is theirs)</span>`
+    root.innerHTML = `<div class="box"><div class="hd"><b>Your world</b><span class="grow muted">where your friends' rooms sit round yours: your layout, yours alone</span>`
       + `<button type="button" data-m="fit">Fit</button><button type="button" data-m="close">Close</button></div>`
       + `<div class="main"><canvas tabindex="0"></canvas><div class="side"></div></div>`
       + `<div class="ft">drag a room to move it · R turns it right (Shift+R left) · Delete: back to the ring · drag the ground to look about, the wheel to zoom</div></div>`;
     parent.appendChild(root);
     const canvas = root.querySelector("canvas"), side = root.querySelector(".side"), ctx = canvas.getContext("2d");
     const pending = new Map();   // key -> where you just put it, until the layout says so
-    const proposed = new Set();  // keys you proposed an edge to, waiting
     let view = null, sel = null, drag = null, pan = null, timer = 0, sideSig = "";
 
     // Your plot, and each friend's as the world lays it out now (what you just moved where you put it).
@@ -2707,11 +2689,10 @@
       }
       const mp = v._plot(), mine = [mp.center[0] - mp.size[0] / 2, mp.center[1] - mp.size[1] / 2, mp.center[0] + mp.size[0] / 2, mp.center[1] + mp.size[1] / 2];
       const list = w.list.map(x => {
-        const at = drag && drag.key === x.key ? drag.at : !x.edge && pending.get(x.key) || x.at;
-        return { key: x.key, name: x.name, at, rect: w._rect({ at, plot: x.plot, k: x.k }), seen: !!x.w, edge: x.edge, plot: x.plot, k: x.k,
-          placed: !x.edge && (pending.has(x.key) || v.layout.some(p => p.key === x.key)) };
+        const at = drag && drag.key === x.key ? drag.at : pending.get(x.key) || x.at;
+        return { key: x.key, name: x.name, at, rect: w._rect({ at, plot: x.plot, k: x.k }), plot: x.plot, k: x.k,
+          placed: pending.has(x.key) || v.layout.some(p => p.key === x.key) };
       });
-      for (const k of proposed) if (v.edges.some(e => e.key === k) || !list.some(p => p.key === k)) proposed.delete(k);
       return { mp, mine, list };
     }
 
@@ -2725,20 +2706,6 @@
       for (const p of d.list) { x0 = Math.min(x0, p.rect[0]); z0 = Math.min(z0, p.rect[1]); x1 = Math.max(x1, p.rect[2]); z1 = Math.max(z1, p.rect[3]); }
       const pad = Math.max(x1 - x0, z1 - z0) * 0.12 + 2;
       view = { s: Math.min(canvas.clientWidth / (x1 - x0 + 2 * pad), canvas.clientHeight / (z1 - z0 + 2 * pad)), ox: (x0 + x1) / 2, oz: (z0 + z1) / 2 };
-    }
-
-    // Which side of yours a room is flush against (and over), if any: where an edge can be proposed.
-    function flush(r, m) {
-      const e = 1e-3, oz = r[1] < m[3] - e && r[3] > m[1] + e, ox = r[0] < m[2] - e && r[2] > m[0] + e;
-      return oz && Math.abs(r[0] - m[2]) < e ? "east" : oz && Math.abs(r[2] - m[0]) < e ? "west" : ox && Math.abs(r[1] - m[3]) < e ? "south" : ox && Math.abs(r[3] - m[1]) < e ? "north" : null;
-    }
-    // That edge in its own terms (World._fromEdge, the other way): their side against yours, their middle `along`
-    // metres from yours, along your side turning left.
-    function edgeTerms(p, mine, mp) {
-      const n = SIDE_NORMAL[mine], t = turnXZ(n[0], n[1], Math.PI / 2);
-      const theirs = Object.keys(SIDE_NORMAL).find(s => { const [a, b] = turnXZ(SIDE_NORMAL[s][0], SIDE_NORMAL[s][1], p.at.turn * Math.PI / 2); return Math.abs(a + n[0]) < 1e-6 && Math.abs(b + n[1]) < 1e-6; });
-      const mid = [mp.center[0] + n[0] * mp.size[0] / 2, mp.center[1] + n[1] * mp.size[1] / 2];
-      return { mine, theirs, along: Math.round(((p.at.x - mid[0]) * t[0] + (p.at.z - mid[1]) * t[1]) * v._unit() * 1000) / 1000 };
     }
 
     // Where a room being dragged goes: on half units, then flush against a side near it (within 8 pixels).
@@ -2783,39 +2750,38 @@
       rect(d.mine, "rgba(63,185,80,.18)", "#3fb950");
       label(d.mine, "your room", v.office ? v.office.name : "");
       for (const p of d.list) {
-        const on = sel === p.key, f = flush(p.rect, d.mine);
-        rect(p.rect, p.seen ? (on ? "rgba(88,166,255,.32)" : "rgba(88,166,255,.16)") : null, p.edge ? "#e3b341" : on ? "#e6edf3" : p.seen ? "#58a6ff" : "#8b949e", p.seen ? null : [5, 4], on ? 2.5 : 1.5);
+        const on = sel === p.key;
+        rect(p.rect, on ? "rgba(88,166,255,.32)" : "rgba(88,166,255,.16)", on ? "#e6edf3" : "#58a6ff", null, on ? 2.5 : 1.5);
         // its own north: an arrow near that side, pointing out of it (how it is turned)
         const [nx, nz] = turnXZ(0, -1, p.at.turn * Math.PI / 2), hw = (p.rect[2] - p.rect[0]) / 2, hd = (p.rect[3] - p.rect[1]) / 2;
         const [ax, az] = toPx(p.at.x + nx * hw * 0.75, p.at.z + nz * hd * 0.75);
         ctx.fillStyle = "#8b949e"; ctx.beginPath(); ctx.moveTo(ax + nx * 6, az + nz * 6); ctx.lineTo(ax - nx * 3 - nz * 5, az - nz * 3 + nx * 5);
         ctx.lineTo(ax - nx * 3 + nz * 5, az - nz * 3 - nx * 5); ctx.closePath(); ctx.fill();
-        label(p.rect, p.name || "?", p.edge ? "edge agreed" : !p.seen ? "not seen now" : f ? `flush: your ${f}` : p.placed ? "placed" : "in the ring");
+        label(p.rect, p.name || "?", p.placed ? "placed" : "in the ring");
       }
       drawSide(d);
     }
 
     function drawSide(d) {
-      const p = d.list.find(q => q.key === sel);
-      const sig = p ? [p.key, p.at.x, p.at.z, p.at.turn, p.edge, p.seen, p.placed, flush(p.rect, d.mine), proposed.has(p.key)].join() : "list:" + d.list.map(q => q.key + q.name).join();
+      const p = d.list.find(q => q.key === sel), theirs = v.seen.find(q => q.key === sel), others = v.seen.filter(q => !d.list.some(p => p.key === q.key));
+      const sig = JSON.stringify(p ? [p.key, p.at, p.placed, theirs] : theirs ? ["only", theirs] : ["list", d.list.map(q => [q.key, q.name]), others]);
       if (sig === sideSig || (side.contains(document.activeElement) && document.activeElement.tagName === "INPUT")) return;
       sideSig = sig;
-      if (!p) {
+      const pick = (q, sub) => `<button type="button" class="pick" data-m="pick" data-k="${esc(q.key)}">${esc(q.name || "?")}${sub}</button>`;
+      if (!p && !theirs) {
         side.innerHTML = `<div class="muted">your room: ${d.mp.size.map(x => Math.round(x * 100) / 100).join(" × ")} units</div>`
-          + (d.list.length ? d.list.map(q => `<button type="button" class="pick" data-m="pick" data-k="${esc(q.key)}">${esc(q.name || "?")}${q.edge ? " · edge" : ""}</button>`).join("")
-            : `<div class="muted">no friends' rooms in your world yet: star a friend (a guest, with their door open to you), or put a link here</div>`);
+          + (d.list.length ? d.list.map(q => pick(q, "")).join("")
+            : `<div class="muted">no friends' rooms in your world yet: star a friend (a guest, with their door open to you), or put a link here</div>`)
+          + (others.length ? `<div class="muted">in their worlds, not in yours:</div>` + others.map(q => pick(q, "")).join("") : "");
         return;
       }
-      const f = !p.edge && p.seen ? flush(p.rect, d.mine) : null, terms = f && edgeTerms(p, f, d.mp), e = v.edges.find(x => x.key === p.key);
-      const r2 = x => Math.round(x * 100) / 100;
-      side.innerHTML = `<div><b>${esc(p.name || "?")}</b> <span class="muted">${p.seen ? "" : "(not seen now)"}</span></div>`
-        + (p.edge ? `<div>edge agreed: your ${esc(e ? e.mine : "?")}, their ${esc(e ? e.theirs : "?")}</div><button type="button" data-m="unedge">Take the edge back</button>`
-          : `<div class="row">x <input data-f="x" value="${r2(p.at.x)}"> z <input data-f="z" value="${r2(p.at.z)}"></div>`
+      const r2 = x => Math.round(x * 100) / 100, name = (p || theirs).name;
+      side.innerHTML = `<div><b>${esc(name || "?")}</b></div>`
+        + (p ? `<div class="row">x <input data-f="x" value="${r2(p.at.x)}"> z <input data-f="z" value="${r2(p.at.z)}"></div>`
           + `<div class="row">${["not turned", "turned a quarter left", "turned half round", "turned a quarter right"][p.at.turn]} <button type="button" data-m="ccw" title="a quarter turn left">⟲</button><button type="button" data-m="cw" title="a quarter turn right">⟳</button></div>`
           + `<div class="row"><button type="button" data-m="auto" title="where the world puts it by itself">Back to the ring</button></div>`
-          + (proposed.has(p.key) ? `<div class="muted">edge proposed: waiting for them</div>`
-            : terms && terms.theirs ? `<button type="button" class="go" data-m="edge">Propose an edge: your ${terms.mine} to their ${terms.theirs}</button>`
-            : `<div class="muted">${p.seen ? "flush against a side of yours, you can propose an edge" : "seen again, you can propose an edge"}</div>`))
+          : `<div class="muted">not in your world</div>`)
+        + (theirs ? theirView(theirs, v._plotMetres()) : `<div class="muted">you are not in their world (or they have not said)</div>`)
         + `<button type="button" data-m="unsel">All rooms</button>`;
     }
 
@@ -2832,7 +2798,8 @@
       canvas.setPointerCapture(e.pointerId);
       if (p) {
         sel = p.key;
-        if (!p.edge) { const [x, z] = toWorld(px, py); drag = { key: p.key, dx: x - p.at.x, dz: z - p.at.z, at: { ...p.at }, moved: false }; }
+        const [x, z] = toWorld(px, py);
+        drag = { key: p.key, dx: x - p.at.x, dz: z - p.at.z, at: { ...p.at }, moved: false };
       } else pan = { px, py, ox: view.ox, oz: view.oz };
       draw();
     });
@@ -2859,7 +2826,7 @@
       const [x2, z2] = toWorld(px, py); view.ox += x - x2; view.oz += z - z2;
       draw();
     }, { passive: false });
-    const turnSel = by => { const d = plots(), p = d && d.list.find(q => q.key === sel); if (p && !p.edge) put(p, { x: p.at.x, z: p.at.z, turn: (p.at.turn + by + 4) % 4 }); draw(); };
+    const turnSel = by => { const d = plots(), p = d && d.list.find(q => q.key === sel); if (p) put(p, { x: p.at.x, z: p.at.z, turn: (p.at.turn + by + 4) % 4 }); draw(); };
     canvas.addEventListener("keydown", e => {
       if (e.key === "r" || e.key === "R") { e.preventDefault(); turnSel(e.shiftKey ? 1 : -1); }   // R right, Shift+R left
       else if ((e.key === "Delete" || e.key === "Backspace") && sel) { e.preventDefault(); pending.delete(sel); v.unplace(sel); }
@@ -2876,8 +2843,6 @@
       else if (m === "unsel") { sel = null; draw(); }
       else if (m === "cw" || m === "ccw") turnSel(m === "cw" ? -1 : 1);   // a turn is a quarter turn left
       else if (m === "auto" && p) { pending.delete(p.key); v.unplace(p.key); }
-      else if (m === "edge" && p) { const f = flush(p.rect, d.mine), t = f && edgeTerms(p, f, d.mp); if (t && t.theirs) { v.proposeEdge(p.key, t); proposed.add(p.key); draw(); } }
-      else if (m === "unedge" && p) v.removeEdge(p.key);
     });
     side.addEventListener("change", e => {
       const f = e.target.dataset.f, d = plots(), p = d && d.list.find(q => q.key === sel), n = Number(e.target.value);

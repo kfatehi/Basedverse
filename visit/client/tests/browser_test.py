@@ -2,8 +2,9 @@
 """visit.js in real browsers: the real lobby (in-process), two visit-clients, the test room (room.html, three.js)
 open in two headless Chromes driven over the DevTools protocol, A's made with three.js r128 and B's with r160.
 B knocks on A, draws A's scene, walks around it with real key presses, sees what A changes, and both pages
-reload mid-visit. Then worlds: each draws the other's plot round its own, walks onto it and off, agrees an edge
-and walks across it, and sees an outline when the door shuts. Last, links: A sees B's room in a corner, goes
+reload mid-visit. Then worlds: each draws the other's plot round its own, walks onto it and off, sees where the
+other has put it (and nothing else of the other's world), puts the other flush against its own and walks across,
+and loses it when the door shuts. Last, links: A sees B's room in a corner, goes
 there, comes back, puts it in its world, and unlinks. Run by run-browser.sh, which starts the Chromes.
 
     python3 browser_test.py path/to/visit-client CDP_PORT_A CDP_PORT_B OUT_DIR
@@ -13,6 +14,7 @@ import base64
 import functools
 import http.server
 import json
+import math
 import os
 import secrets
 import sys
@@ -59,7 +61,8 @@ class Tab:
             if "id" in m and m["id"] in self.pending:
                 self.pending.pop(m["id"]).set_result(m.get("result", {"error": m.get("error")}))
             elif m.get("method") == "Runtime.exceptionThrown":
-                self.errors.append(m["params"]["exceptionDetails"].get("exception", {}).get("description", "?"))
+                d = m["params"]["exceptionDetails"]
+                self.errors.append(d.get("exception", {}).get("description") or "%s (line %s)" % (d.get("text", "?"), d.get("lineNumber")))
             elif m.get("method") == "Runtime.consoleAPICalled" and m["params"]["type"] == "error":
                 self.errors.append(" ".join(str(a.get("value", a.get("description", ""))) for a in m["params"]["args"]))
 
@@ -318,8 +321,8 @@ async def main():
         check("both rooms open as worlds", (bool(await a.until(up, 30)), bool(await b.until(up, 30))), (True, True))
         await a.js("v.addGuest(v.offices.find(o => o.name === 'B').key, 'B')")
         await b.js("v.addGuest(v.offices.find(o => o.name === 'A').key, 'A')")
-        seen = "room.world.plots.length === 1 && room.world.plots[0].seen && room.world.plots[0]"
-        pa_, pb_ = await a.until(seen, 20), await b.until(seen, 20)
+        inworld = "room.world.plots.length === 1 && room.world.plots[0]"
+        pa_, pb_ = await a.until(inworld, 20), await b.until(inworld, 20)
         check("guests both ways: each sees the other's plot, in its world", (pa_ and pa_["name"], pb_ and pb_["name"]), ("B", "A"))
         r = pa_["rect"]
         check("placed by itself round A's own, not on it", (round(r[2] - r[0], 3), round(r[3] - r[1], 3), not (r[0] < 10 and r[2] > 0 and r[1] < 8 and r[3] > 0)), (10, 8, True))
@@ -369,21 +372,29 @@ async def main():
         check("A walks back off B's plot: home again, and B's visitor gone", (await a.until("room.where === null && room.world.in === null"), await b.until("v.visitors.length === 0")), (True, True))
         check("A ends up west of B's plot, walking on in its own world", await a.js("room.me.x") < r[0], True)
 
-        print("\nan agreed edge")
-        await a.js("v.proposeEdge(v.offices.find(o => o.name === 'B').key, { mine: 'east', theirs: 'west', along: 0 })")
-        prop = await b.until("v.edgeProposals.length === 1 && v.edgeProposals[0]")
-        check("A proposes its east side against B's west: B is asked, in its own terms", (prop["name"], prop["mine"], prop["theirs"]), ("A", "west", "east"))
-        check("B's panel asks", await b.until("!!document.querySelector('.visit-panel button[data-v=edge_yes]')"), True)
-        await b.js("document.querySelector('.visit-panel button[data-v=edge_yes]').click()")
-        ea = await a.until("room.world.plots[0] && room.world.plots[0].edge && room.world.plots[0].rect")
-        eb = await b.until("room.world.plots[0] && room.world.plots[0].edge && room.world.plots[0].rect")
-        check("agreed: in A's world, B's plot against A's east side", [round(x, 3) for x in ea], [10, 0, 20, 8])
-        check("and in B's, A's against B's west side: the same for both", [round(x, 3) for x in eb], [-10, 0, 0, 8])
+        print("\neach one's view of the other: where the other has put it, nothing more")
+        ka, kb = await b.js("v.offices.find(o => o.name === 'A').key"), await a.js("v.offices.find(o => o.name === 'B').key")
+        theirs = await b.until("(p => p && [p.at.x - v._plot().center[0], p.at.z - v._plot().center[1], p.at.turn, ...v._plotMetres()].map(x => Math.round(x * 100) / 100))(room.world.plots[0])")
+        got = await a.until("(s => s && [s.at.dx, s.at.dz, s.at.turn, ...s.at.size])(v.seen.find(s => s.name === 'B'))")
+        check("A has where B's world puts A (from B's plot's middle, in metres), and B's plot's size", got, theirs)
+        check("and B where A's puts B: one each, by key", await b.until("v.seen.length === 1 && v.seen[0].key"), ka)
+        await b.js("v.place(%s, { x: 30, z: 4, turn: 1 })" % json.dumps(ka))
+        check("B moves A's room in its world: A sees it move (25 m east of B's middle, turned a quarter left)",
+              await a.until("(s => s && s.at.dx === 25 && s.at.dz === 0 && s.at.turn === 1 && s.at.dx)(v.seen.find(s => s.key === %s))" % json.dumps(kb)), 25)
+        check("A's own world is unchanged by it: nobody agrees, each has its own", await a.js("room.world.plots[0].rect"), r)
+
+        print("\nflush: walked straight across")
+        await a.js("v.place(%s, { x: 15, z: 4, turn: 0 })" % json.dumps(kb))
+        ea = await a.until("(p => p && p.at.x === 15 && p.rect)(room.world.plots[0])")
+        check("A puts B's room against its own east side", [round(x, 3) for x in ea], [10, 0, 20, 8])
         await walk(a, 8.5, 4, -3.14159 / 2, 1.8, "!!room.where")   # in A's room, facing its east doorway: straight through into B's
         check("A walks out of its own room's east door and straight into B's, by its west door", await a.until("room.where && room.where.name"), "B")
         check("B has A", await b.until("v.visitors.length === 1 && v.visitors[0].visitor.name"), "A")
-        await a.shot("a_across_edge.png")
-        await walk(a, await a.js("room.me.x"), await a.js("room.me.z"), 3.14159 / 2, 3.0, "room.where === null")   # (at most 9 s: under load, slower)
+        await a.shot("a_across.png")
+        # Back towards A's room's middle, through B's west doorway: from where B has A (a slow answer may have stepped it
+        # in again, and its spawn moved it off the doorway's line), sliding along B's wall into the doorway.
+        mx, mz = await a.js("room.me.x"), await a.js("room.me.z")
+        await walk(a, mx, mz, math.atan2(-(5 - mx), -(4 - mz)), 3.0, "room.where === null")   # (at most 9 s: under load, slower)
         home = (await a.until("room.where === null"), 0 < await a.js("room.me.x") < 10.01)
         if home != (True, True):
             r0 = await a.js("window.renders"); await asyncio.sleep(1); r1 = await a.js("window.renders")
@@ -392,7 +403,7 @@ async def main():
             print("      B's spawns:", await b.js("JSON.stringify((window.spawns || []).slice(-6))"))
         check("and back: home in A's own room", home, (True, True))
 
-        print("\nthe door shut: an outline")
+        print("\nthe door shut")
         await walk(a, 8.5, 4, -3.14159 / 2, 1.8, "!!room.where")   # into B's again, to be lifted there
         check("A in B's room again", (await a.until("room.where && room.where.name"), await b.until("v.visitors.length === 1")), ("B", True))
         await b.js("room.lift = 3")
@@ -400,22 +411,19 @@ async def main():
         await b.js("v.setDoor(false)")
         check("B shuts its door with A up there: A is home, at its own height", await a.until("room.where === null && Math.abs(room.atY) < 0.05"), True)
         await b.js("room.lift = null")
-        check("B shuts its door: A no longer sees B's plot, only where it is (agreed), and who",
-              await a.until("(p => p && !p.seen && p.edge && p.name)(room.world.plots[0])", 10), "B")
-        check("drawn as an outline with a name", await a.until("room.world.outlines.children.length === 2"), True)
-        await a.shot("a_outline.png")
+        check("B shuts its door: B's room leaves A's world, and B is told it is no longer in it",
+              (await a.until("room.world.plots.length === 0", 10), await b.until("v.seen.length === 0", 10)), (True, True))
         await b.js("v.setDoor(true)")
-        await b.js("v.removeEdge(v.offices.find(o => o.name === 'A').key)")
-        check("B takes the edge back: gone for A too", await a.until("v.edges.length === 0"), True)
 
         print("\nthe map: placing B's room exactly, from above")
         await a.js("document.querySelector('.visit-panel button[data-v=map]').click()")
         # (B's door was shut: A's watch was refused, and A asks again 20 s after that)
-        check("A's panel opens the map: A's room and B's, from above", await a.until("!!(v._mapView && v._mapView.shown && room.world.plots.some(p => p.name === 'B' && p.seen))", 40), True)
-        kb = await a.js("v.offices.find(o => o.name === 'B').key")
+        check("A's panel opens the map: A's room and B's, from above", await a.until("!!(v._mapView && v._mapView.shown && room.world.plots.some(p => p.name === 'B'))", 40), True)
         pick = "[...document.querySelectorAll('.visit-map button[data-m=pick]')].find(b => b.textContent.startsWith('B'))"
         await a.until("!!" + pick)
         await a.js(pick + ".click()")
+        check("picked, B's room shows B's view of the two: A's room east of B's, turned, drawn", await a.until(
+            "(s => s.textContent.includes('your room east of theirs, 25 m middle to middle, turned a quarter left') && s.querySelectorAll('svg rect').length)(document.querySelector('.visit-map .side'))"), 2)
         await a.until("!!document.querySelector('.visit-map input[data-f=x]')")
         await a.js("(i => { i.value = '-12'; i.dispatchEvent(new Event('change', { bubbles: true })); })(document.querySelector('.visit-map input[data-f=x]'))")
         await a.js("(i => { i.value = '-6'; i.dispatchEvent(new Event('change', { bubbles: true })); })(document.querySelector('.visit-map input[data-f=z]'))")
@@ -433,27 +441,21 @@ async def main():
         check("dragged right on the map: further east, on a half unit, the same z", (moved > -12, moved * 2 == int(moved * 2)), (True, True))
         await a.js("document.querySelector('.visit-map button[data-m=cw]').click()")
         check("turned a quarter right (three quarter turns left)", await a.until("(p => p && p.turn)(v.layout.find(p => p.key === %s))" % json.dumps(kb)), 3)
-        # Flush against A's east side (A's plot: x 0 to 10, z 0 to 8; B's, turned, 8 wide and 10 deep): an edge can be proposed.
         await a.js("(i => { i.value = '14'; i.dispatchEvent(new Event('change', { bubbles: true })); })(document.querySelector('.visit-map input[data-f=x]'))")
         await a.js("(i => { i.value = '4'; i.dispatchEvent(new Event('change', { bubbles: true })); })(document.querySelector('.visit-map input[data-f=z]'))")
-        offered = await a.until("(b => b && b.textContent)(document.querySelector('.visit-map button[data-m=edge]'))")
-        if not offered:
-            print("      layout:", await a.js("JSON.stringify(v.layout)"), "plot:", await a.js("JSON.stringify(room.world.plots.find(p => p.name === 'B'))"),
-                  "side:", await a.js("document.querySelector('.visit-map .side').innerText"), "focus:", await a.js("document.activeElement && document.activeElement.outerHTML.slice(0, 80)"))
-        check("flush against A's east side: the map offers an edge", offered, "Propose an edge: your east to their south")
-        await a.js("document.querySelector('.visit-map button[data-m=edge]').click()")
-        prop = await b.until("v.edgeProposals.length === 1 && v.edgeProposals[0]")
-        if not prop:
-            print("      A's errors:", await a.js("window.visitErrors"), "A's links:", await a.js("v._watches.size"), "button:", await a.js("(b => b && b.textContent)(document.querySelector('.visit-map button[data-m=edge]'))"))
-        prop = prop or {}
-        check("proposed from the map: B is asked, in B's own terms (its south against A's east, middles in line)", (prop.get("mine"), prop.get("theirs"), prop.get("along")), ("south", "east", 0))
-        await b.js("v.edgeProposals.forEach(p => v.declineEdge(p.key))")
+        check("typed again: B's room flush against A's east side", await a.until(
+            "(p => p && p.x === 14 && p.z === 4 && p.turn)(v.layout.find(p => p.key === %s))" % json.dumps(kb)), 3)
+        check("and B told where it is now in A's world: its middle 9 m east of A's, turned a quarter right", await b.until(
+            "(s => s && s.at.dx === 9 && s.at.dz === 0 && s.at.turn)(v.seen.find(s => s.key === %s))" % json.dumps(ka)), 3)
+        await a.shot("a_map.png")
         await a.js("document.querySelector('.visit-map button[data-m=close]').click()")
         await a.goto(world)
         check("A's page reloads: where A put B's room is kept", await a.until(
             "window.v && (p => p && p.x === 14 && p.z === 4 && p.turn === 3)(v.layout.find(p => p.key === %s))" % json.dumps(kb), 30), True)
-        await a.until("window.room && room.world && room.world.plots.some(p => p.name === 'B' && p.seen)", 30)
+        await a.until("window.room && room.world && room.world.plots.some(p => p.name === 'B')", 30)
+        check("and A has, again, where B has put it", await a.until("(s => s && s.at.dx)(v.seen.find(s => s.key === %s))" % json.dumps(kb), 20), 25)
         await a.js("v.unplace(%s)" % json.dumps(kb))
+        await b.js("v.unplace(%s)" % json.dumps(ka))
         await a.until("v.layout.length === 0")
         await a.js("v.removeGuest(v.guests[0].key)")
         await b.js("v.removeGuest(v.guests[0].key)")
@@ -495,11 +497,11 @@ async def main():
         await a.js("document.querySelector('.visit-stage').click()")
         await a.js("document.querySelector('.visit-stage .menu button[data-s=world]').click()")
         check("Put in my world: the corner empties, B's plot round A's room", await a.until(
-            "v.links[0].where === 'world' && document.querySelector('.visit-stage').hidden && (p => !!(p && p.seen && p.name === 'B'))(room.world.plots[0])"), True)
+            "v.links[0].where === 'world' && document.querySelector('.visit-stage').hidden && (p => !!(p && p.name === 'B'))(room.world.plots[0])"), True)
         check("read again with A's own three.js (r128)", await a.until("(w => !!(w && w.scene && w.scene.T.REVISION === '128'))([...v._watches.values()].find(w => w.link))"), True)
         await a.goto(world)
         check("A's page reloads: the link comes back in A's world, not the corner", await a.until(
-            "window.v && window.room && room.world && v.links.length === 1 && v.links[0].where === 'world' && room.world.plots.some(p => p.name === 'B' && p.seen) && document.querySelector('.visit-stage').hidden", 30), True)
+            "window.v && window.room && room.world && v.links.length === 1 && v.links[0].where === 'world' && room.world.plots.some(p => p.name === 'B') && document.querySelector('.visit-stage').hidden", 30), True)
         await a.shot("a_link_world.png")
         await a.js("document.querySelector('.visit-panel button[data-v=unlink]').click()")
         check("A unlinks from its panel: gone for both", (await a.until("v.links.length === 0 && room.world.plots.length === 0"), await b.until("v.watchers.length === 0")), (True, True))
@@ -542,18 +544,18 @@ async def main():
             "(s => !!s && s.frames > 50 && s.level > 0.01 && s.near)(v._voices.get(v.voices[0].key))"), True)
         check("and B hears A, from where B has A in its room", await b.until("(s => !!s && s.frames > 50 && s.level > 0.01 && s.near)(v._voices.get(v.voices[0].key))"), True)
         check("B's panel shows A near, speaking", await b.until("document.querySelector('.visit-panel').textContent.includes('🔊 A')"), True)
-        await b.js("v.voiceRange = 0.5")
-        await a.js("v.voiceRange = 0.5")
-        check("farther apart than the range: neither hears the other (A's voice still goes to B's room, which decides)", (await b.until("v.voices.length === 0 && [...v._voices.values()].every(s => !s.near)"),
-              await a.until("v.voices.length === 0 && [...v._voices.values()].every(s => !s.near) && v._voiceTo.length === 1")), (True, True))
-        await b.js("v.voiceRange = 15")
-        await a.js("v.voiceRange = 15")
-        # The room passes one visitor's voice on to another near them: here a second visitor stands in for one (on A's own visit's channel).
-        await b.js("""(() => { const h = [...v._hosted.values()][0]; window.fakeC = { id: 'vfake', channel: h.channel, visitor: { name: 'C', key: 'k-c' }, inside: true, pose: { ...h.pose }, sceneSent: true };
-          v._hosted.set(-1, window.fakeC); })()""")
-        check("B passes A's voice on to a visitor near A: A hears it, its speaker's body where B's room has A", await a.until(
-            "(s => !!s && s.frames > 20)(v._voices.get('relay:' + v.visiting.id))"), True)
-        await b.js("v._hosted.delete(-1)")
+        check("heard within 45 m, as both visit-clients say", (await a.js("v.voiceRange"), await b.js("v.voiceRange")), (45, 45))
+        bx0 = await b.js("room.me.x")
+        await b.js("room.me.x += 30")
+        far = "v.voices.length === 1 && v.voices[0].distance > 20 && v.voices[0].distance < 45"
+        check("B walks 30 m off: still near each other, as B's visit-client has it (the old 15 m would not have reached)", (await b.until(far), await a.until(far)), (True, True))
+        if not await b.js(far):
+            print("      B's near:", await b.js("JSON.stringify(v.voices)"), "A's:", await a.js("JSON.stringify(v.voices)"))
+        await b.js("room.me.x += 70")
+        check("100 m off: neither hears the other, and neither sends a thing (B's visit-client says nobody is near)", (await b.until("v.voices.length === 0 && [...v._voices.values()].every(s => !s.near) && v._voiceTo === 0"),
+              await a.until("v.voices.length === 0 && v._voiceTo === 0")), (True, True))
+        await b.js("room.me.x = %f" % bx0)
+        await a.until("v.voices.length === 1")
         await a.js("v.leave()")
         await b.until("v.visitors.length === 0")
         await a.js("v.setMic(false)")
@@ -577,16 +579,20 @@ async def main():
         ka = await b.js("v.calls[0].key")
         await b.js("v.phone(true, { at: { x: room.me.x + 1, y: 1, z: room.me.z } })")   # B's phone, a step from B
         await b.js("document.querySelector('.visit-panel button[data-v=speaker]').click()")
-        check("B puts it on speaker: A's voice from B's phone, heard where B stands, and B near it heard by A", await b.until(
-            "v.calls[0].speaker && (s => !!s && s.near && s.frames > 10)(v._voices.get(" + json.dumps(ka) + ")) && v._voiceTo.length === 1"), True)
-        # Someone near B's phone (a visitor stands in for one, on A's link's channel) hears the call from it.
-        await b.js("(() => { const h = [...v._hosted.values()][0]; window.fakeC = { id: 'vfake', channel: h.channel, visitor: { name: 'C', key: 'k-c' }, inside: true, pose: { x: room.me.x + 1, y: 1.6, z: room.me.z, yaw: 0, pitch: 0 }, sceneSent: true }; v._hosted.set(-1, window.fakeC); })()")
-        check("a visitor near B's phone hears the call from it: B passes A's voice on, as the phone's", await a.until("(s => !!s && s.frames > 20)(v._voices.get('call:phone'))"), True)
-        await b.js("v._hosted.delete(-1)")
+        check("B puts it on speaker: A's voice from B's phone, heard where B stands (its voice for the call only: its microphone is off)", await b.until(
+            "v.calls[0].speaker && (s => !!s && s.near && s.frames > 10)(v._voices.get(" + json.dumps(ka) + ")) && v._voiceTo === 2"), True)
+        heard = "(s => s ? s.frames : 0)(v._voices.get(v.calls[0].key))"
+        async def growing(tab):
+            f0 = await tab.js(heard)
+            await asyncio.sleep(1.0)
+            return await tab.js(heard) - f0 > 20
+        check("and B, near it, heard by A", await growing(a), True)
         await b.js("v.phone(true, { at: { x: room.me.x + 100, y: 1, z: room.me.z } })")
-        check("B far from its phone: B not heard in the call, nor hearing it", await b.until("v._voiceTo.length === 0 && !v._voices.get(" + json.dumps(ka) + ").near"), True)
+        await b.until("!v._voices.get(" + json.dumps(ka) + ").near")
+        await asyncio.sleep(0.5)
+        check("B far from its phone: B not hearing the call, and (B's visit-client deciding) not heard in it", await growing(a), False)
         await b.js("document.querySelector('.visit-panel button[data-v=speaker]').click()")
-        check("back to the handset: only B, to its ear", await b.until("!v.calls[0].speaker && v._voiceTo.length === 1"), True)
+        check("back to the handset: only B, to its ear, heard by A again", (await b.until("!v.calls[0].speaker && v._voiceTo === 2"), await growing(a)), (True, True))
         await a.js("v.hangUp(%s)" % json.dumps(kb))
         check("A hangs up: over for both, microphones off again", (await a.until("v.calls.length === 0 && !v._mic"), await b.until("v.calls.length === 0 && !v._mic")), (True, True))
         await a.js("v.unlink()")

@@ -16,7 +16,7 @@ use crate::{
     frames::{self, Frame},
     link::{LinkCmd, Links, Relays, Role},
     lobby::LobbyOut,
-    state::{self, Edge, Guest, Place, Saved},
+    state::{self, Guest, Place, Saved},
     VERSION,
 };
 
@@ -115,6 +115,22 @@ struct Visit {
     avatar_asked: bool,
     /// The other office's room has a phone (8.8): it takes calls.
     peer_phone: bool,
+    /// A call is on over this link (answered, one way or the other, and not hung up), and this office has it on
+    /// its phone's speaker (8.8; else to the ear).
+    call_on: bool,
+    speaker: bool,
+}
+
+/// Where everyone in this office's room is (8.7), in metres, as its page last said: its own user (none while they
+/// are elsewhere, or the page has not said), its phone, and each visitor in it, by channel. Who hears whom in the
+/// room goes by it: the room moves its visitors, so it is the room's word, not theirs.
+#[derive(Default)]
+struct VoiceRoom {
+    me: Option<[f64; 3]>,
+    phone: Option<[f64; 3]>,
+    visitors: HashMap<u16, [f64; 3]>,
+    /// Who each was last told is near it (by channel; 0, this office's page), and when.
+    told: HashMap<u16, (Value, Instant)>,
 }
 
 /// The most control messages a link's other side may send a second; more are dropped (a peer flooding
@@ -125,6 +141,12 @@ const RESYNC_EVERY: Duration = Duration::from_secs(2);
 /// The most inputs a second taken from a visitor (it sends one whenever its keys or look change, at most
 /// every 8 ms, and every 33 ms regardless).
 const INPUTS_PER_SECOND: u32 = 120;
+/// Voice (8.7): heard within VOICE_RANGE metres of whoever speaks, in the same room, fading to nothing there; sent
+/// VOICE_MARGIN farther, so a voice fades in rather than starts. Who is near whom: told when that changes, and
+/// their distances at most every NEAR_EVERY.
+const VOICE_RANGE: f64 = 45.0;
+const VOICE_MARGIN: f64 = 15.0;
+const NEAR_EVERY: Duration = Duration::from_secs(1);
 /// The most points a second taken from a visitor (a click at the middle of its view: 8.3); more are dropped.
 /// Its page sends at most one every 200 ms.
 const POINTS_PER_SECOND: u32 = 5;
@@ -171,11 +193,6 @@ pub struct Core {
     watch_order: VecDeque<String>,
     watch_knocks: HashMap<String, String>,
     watch_declined: HashMap<String, Instant>,
-    /// Edges proposed (../WORLD.md step 5), by the other office's key: by this office, waiting for an answer
-    /// (mine, theirs, along); and to it, waiting for its page (their name, their side, my side, along in my
-    /// terms, their size).
-    edges_out: HashMap<String, (String, String, f64)>,
-    edges_in: HashMap<String, (String, String, String, f64, [f64; 2])>,
     office: Value,
     status: String,
     max_visitors: u8,
@@ -184,6 +201,13 @@ pub struct Core {
     avatar: Option<Bytes>,
     /// This office's room has a phone (8.8), as its page said: every link is told.
     phone: bool,
+    /// Where everyone in this office's room is, for its voice (8.7).
+    voice: VoiceRoom,
+    /// Where this office's page has put others in its world (8.4), by key: each told over every link up with it.
+    seen_out: HashMap<String, Value>,
+    /// Where others have put this office in their worlds, by key: (their name, where), for a page that comes back;
+    /// forgotten with the last link to them.
+    seen_in: HashMap<String, (Value, Value)>,
     /// Knocks on this office's door still waiting, and when each came, for a page that connects later.
     knocks: BTreeMap<String, (Value, Instant)>,
     visits: HashMap<String, Visit>,
@@ -218,14 +242,15 @@ impl Core {
             watch_order: VecDeque::new(),
             watch_knocks: HashMap::new(),
             watch_declined: HashMap::new(),
-            edges_out: HashMap::new(),
-            edges_in: HashMap::new(),
             office: Value::Null,
             status: "available".into(),
             max_visitors,
             lobby_view: None,
             avatar: None,
             phone: false,
+            voice: VoiceRoom::default(),
+            seen_out: HashMap::new(),
+            seen_in: HashMap::new(),
             knocks: BTreeMap::new(),
             visits: HashMap::new(),
             next_channel: 1,
@@ -292,6 +317,8 @@ impl Core {
                     self.tell_hosted(json!({ "paused": true }));
                     self.set_hosting(None);   // no page, no room to show: not to be visited until one hosts again
                     self.set_phone(false);    // nor a phone to answer: the other side's calls end
+                    self.voice = VoiceRoom { told: std::mem::take(&mut self.voice.told), ..VoiceRoom::default() };   // nobody here to hear
+                    self.tell_near();
                 }
             }
             Ev::PageMsg { id, msg } => {
@@ -346,17 +373,8 @@ impl Core {
                     }
                 }
             }
-            Ev::LinkAudio { visit, data } => {
-                // To the page, which plays it if the other office is near (8.7); a page behind loses some (late is lost).
-                if let (Some(v), Some(p)) = (self.visits.get(&visit), &self.page) {
-                    let _ = p.frames.try_send(frames::audio_to_page(v.channel, &data));
-                }
-            }
-            Ev::LinkRelay { visit, data } => {
-                if let (Some(v), Some(p)) = (self.visits.get(&visit), &self.page) {
-                    let _ = p.frames.try_send(frames::relay_to_page(v.channel, &data));
-                }
-            }
+            Ev::LinkAudio { visit, data } => self.voice_in(&visit, data, false),
+            Ev::LinkRelay { visit, data } => self.voice_in(&visit, data, true),
             Ev::LinkAvatar { visit, json } => {
                 if let Some(v) = self.visits.get(&visit).filter(|v| v.role == Role::Host) {
                     // Already checked JSON: wrapped as it is, not parsed again.
@@ -390,7 +408,8 @@ impl Core {
         self.to_page(json!({
             "type": "ready", "version": VERSION, "office": self.office, "online": self.online, "away": self.saved.away, "status": self.status,
             "max_visitors": self.max_visitors, "visits": visits, "key": self.key, "door": self.door(), "guests": self.guests(),
-            "layout": self.saved.layout_json(), "edges": self.saved.edges_json(), "avatars": self.saved.avatars_json(),
+            "layout": self.saved.layout_json(), "avatars": self.saved.avatars_json(), "voice_range": VOICE_RANGE,
+            "seen": self.seen_in.iter().map(|(k, (name, at))| json!({ "key": k, "name": name, "at": at })).collect::<Vec<_>>(),
         }));
         if let Some(view) = self.lobby_view.clone() {
             self.to_page(view);
@@ -538,40 +557,25 @@ impl Core {
                 self.save_state();
                 self.tell_layout();
             }
-            // Edges agreed with friends (../WORLD.md step 5): over a link to them (a watch or a visit, either way).
-            "edge_propose" => {
-                let (Some(key), Some(mine), Some(theirs), Some(along), Some(size)) = (
-                    m.get("key").and_then(Value::as_str).map(str::to_string), state::side(m.get("mine")), state::side(m.get("theirs")),
-                    state::along_from(m.get("along")).or(Some(0.0)), state::size_from(m.get("size")),
-                ) else {
-                    return self.page_error("bad_message", "edge_propose needs a key, mine and theirs (north, east, south or west), along (m), size ([w, d] m)", Some("edge_propose"));
+            // Where this page has put an office in its world, beside its own room (8.4): told to that office alone, over
+            // a link with it either way (it sees where it is in your world, and nothing else of it); null: not in it.
+            "seen" => {
+                let Some(key) = m.get("key").and_then(Value::as_str).filter(|k| state::key_ok(k)).map(str::to_string) else {
+                    return self.page_error("bad_message", "key is an office's key", Some("seen"));
                 };
-                if !self.to_peer(&key, json!({ "edge": { "from": mine, "to": theirs, "along": along, "size": size } })) {
-                    return self.page_error("no_link", "an edge is proposed to an office this one is linked to (watching, or visiting, either way)", Some("edge_propose"));
+                let seen = match m.get("at").filter(|a| !a.is_null()).map(seen_from) {
+                    Some(Some(s)) => s,
+                    Some(None) => return self.page_error("bad_message", "at is { dx, dz (m, within 100 km), turn (0-3), size ([w, d] m) } or null", Some("seen")),
+                    None => Value::Null,
+                };
+                if seen.is_null() {
+                    self.seen_out.remove(&key);
+                } else if self.seen_out.len() >= state::MAX_PLACES && !self.seen_out.contains_key(&key) {
+                    return self.page_error("too_many", &format!("at most {} offices", state::MAX_PLACES), Some("seen"));
+                } else {
+                    self.seen_out.insert(key.clone(), seen.clone());
                 }
-                self.edges_out.insert(key, (mine, theirs, along));
-            }
-            "edge_accept" | "edge_decline" => {
-                let key = m.get("key").and_then(Value::as_str).unwrap_or("").to_string();
-                let Some((name, theirs, mine, along, their_size)) = self.edges_in.remove(&key) else {
-                    return self.page_error("not_found", "no edge proposed by that key, waiting", Some(&t));
-                };
-                if t == "edge_decline" {
-                    self.to_peer(&key, json!({ "edge_no": true }));
-                    return;
-                }
-                let Some(size) = state::size_from(m.get("size")) else {
-                    return self.page_error("bad_message", "edge_accept needs this plot's size ([w, d] m)", Some("edge_accept"));
-                };
-                self.to_peer(&key, json!({ "edge_ok": { "from": mine, "to": theirs, "along": -along, "size": size } }));
-                self.keep_edge(Edge { key, name, mine, theirs, along, size: their_size });
-            }
-            "edge_remove" => {
-                let key = m.get("key").and_then(Value::as_str).unwrap_or("").to_string();
-                self.to_peer(&key, json!({ "edge_off": true }));
-                self.saved.edges.retain(|e| e.key != key);
-                self.save_state();
-                self.tell_edges();
+                self.to_peer(&key, json!({ "seen": seen }));   // with no link now, the next one tells them
             }
             // Avatars (8.6). The page's own (its frame, or `avatar_clear`): kept in memory, to go to hosts that ask. A
             // host's page asks for a visitor's (`avatar_want`). Whose look visitors have here (`avatars`: by default;
@@ -587,11 +591,39 @@ impl Core {
                 let Some(act) = m.get("act").and_then(Value::as_str).filter(|a| ["ring", "answer", "hangup"].contains(a)).map(str::to_string) else {
                     return self.page_error("bad_message", "act is \"ring\", \"answer\" or \"hangup\"", Some("call"));
                 };
-                match self.visits.values().find(|v| v.channel == ch && v.up) {
-                    Some(v) if v.peer_phone || act != "ring" => { let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "call": act }))); }   // only ringing needs their phone
-                    Some(_) => self.page_error("no_phone", "their room has no phone", Some("call")),
-                    None => self.page_error("no_such_visit", "no visit on that channel", Some("call")),
+                match self.visits.values_mut().find(|v| v.channel == ch && v.up) {
+                    Some(v) if v.peer_phone || act != "ring" => {   // only ringing needs their phone
+                        let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "call": act })));
+                        call_state(v, &act);
+                    }
+                    Some(_) => return self.page_error("no_phone", "their room has no phone", Some("call")),
+                    None => return self.page_error("no_such_visit", "no visit on that channel", Some("call")),
                 }
+                self.tell_near();
+            }
+            // A call on this office's phone's speaker (everyone near the phone hears it, and is heard in it), or back
+            // to the ear (8.8).
+            "speaker" => {
+                let ch = m.get("channel").and_then(Value::as_u64).unwrap_or(0) as u16;
+                let Some(on) = m.get("on").and_then(Value::as_bool) else {
+                    return self.page_error("bad_message", "on must be true or false", Some("speaker"));
+                };
+                match self.visits.values_mut().find(|v| v.channel == ch && v.up && v.call_on) {
+                    Some(v) => v.speaker = on,
+                    None => return self.page_error("no_call", "no call on that channel", Some("speaker")),
+                }
+                self.tell_near();
+            }
+            // Where everyone in this office's room is (8.7), in metres, as its page has them: its own user (null:
+            // elsewhere), its phone, and each visitor in it ([channel, x, y, z]). Who hears whom here goes by it.
+            "voice_where" => {
+                self.voice.me = spot(m.get("me"));
+                self.voice.phone = spot(m.get("phone"));
+                self.voice.visitors = m.get("visitors").and_then(Value::as_array).into_iter().flatten().take(256).filter_map(|e| {
+                    let a = e.as_array().filter(|a| a.len() == 4)?;
+                    Some((u16::try_from(a[0].as_u64()?).ok()?, spot(Some(&json!(a[1..])))?))
+                }).collect();
+                self.tell_near();
             }
             "avatar_want" => {
                 let ch = m.get("channel").and_then(Value::as_u64).unwrap_or(0) as u16;
@@ -710,17 +742,8 @@ impl Core {
 
     /// A delta of this office's scene for one of its visitors, or an edit of it.
     fn page_frame(&mut self, data: &[u8]) {
-        if let Some((ch, data)) = frames::relay_from_page(data) {   // someone's voice, passed on (a visitor's, a call's)
-            if let Some(v) = self.visits.values().find(|v| v.channel == ch && v.up) {
-                let _ = v.cmd.try_send(LinkCmd::Relay(data));
-            }
-            return;
-        }
-        if let Some((ch, audio)) = frames::audio_from_page(data) {   // this office's voice, for the office near it on that visit
-            if let Some(v) = self.visits.values().find(|v| v.channel == ch && v.up) {
-                let _ = v.cmd.try_send(LinkCmd::Audio(audio));
-            }
-            return;
+        if let Some((to, audio)) = frames::audio_from_page(data) {   // this office's user's voice: this visit-client decides who hears it
+            return self.voice_out(to, audio);
         }
         if let Some(gz) = frames::avatar_from_page(data) {   // this office's avatar: to every host that asked for it
             for v in self.visits.values().filter(|v| v.role == Role::Visitor && v.up && v.avatar_asked) {
@@ -821,18 +844,139 @@ impl Core {
         self.to_page(json!({ "type": "layout", "layout": layout }));
     }
 
-    fn tell_edges(&mut self) {
-        let edges = self.saved.edges_json();
-        self.to_page(json!({ "type": "edges", "edges": edges }));
+    // ---------- voice (8.7) and phones (8.8): who hears whom in this office's room, decided here ----------
+
+    /// This office's user's voice, from its page, where it may go (`allowed`: the room, their calls): to the room
+    /// they are in (another's: to its owner, whose visit-client decides; their own: to each visitor near them), and
+    /// to a call (to the ear, always; on speaker, if they are near the phone).
+    fn voice_out(&mut self, allowed: u16, voice: Bytes) {
+        let away = self.visits.values().find(|v| v.up && v.role == Role::Visitor && v.inside).map(|v| v.channel);
+        let me = if away.is_some() { None } else { self.voice.me };
+        let mut to: Vec<u16> = Vec::new();
+        if allowed & frames::VOICE_ROOM != 0 {
+            to.extend(away);
+            if let Some(me) = me {
+                to.extend(self.within(me, VOICE_RANGE + VOICE_MARGIN, None));
+            }
+        }
+        if allowed & frames::VOICE_CALLS != 0 {
+            let by_phone = me.zip(self.voice.phone).is_some_and(|(me, p)| flat(me, p) <= VOICE_RANGE);
+            to.extend(self.visits.values().filter(|v| v.up && v.call_on && (!v.speaker || by_phone)).map(|v| v.channel));
+        }
+        to.sort_unstable();
+        to.dedup();
+        for v in self.visits.values().filter(|v| v.up && to.contains(&v.channel)) {
+            let _ = v.cmd.try_send(LinkCmd::Audio(voice.clone()));
+        }
     }
 
-    fn keep_edge(&mut self, e: Edge) {
-        self.saved.edges.retain(|x| x.key != e.key);
-        if self.saved.edges.len() < state::MAX_PLACES {
-            self.saved.edges.push(e);
+    /// A packet of voice over a link (`relayed`: someone else's, passed on, with who spoke). A call's: to the page;
+    /// on speaker, also to this room's visitors near the phone, as the phone's. A visitor's in this room: to the
+    /// page if this office's user is near them, to the other visitors near them, and to a call on speaker if they
+    /// are near the phone. The room this office's user is in: to the page (its owner decided). Else nowhere.
+    fn voice_in(&mut self, id: &str, data: Bytes, relayed: bool) {
+        let Some(v) = self.visits.get(id).filter(|v| v.up) else { return };
+        let (ch, role, inside, call_on, speaker, visit) = (v.channel, v.role, v.inside, v.call_on, v.speaker, v.id.clone());
+        let name = v.peer.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+        if call_on {
+            self.voice_to_page(ch, &data, relayed);
+            if let Some(phone) = self.voice.phone.filter(|_| speaker) {
+                let head = if relayed {
+                    let Some((who, said, voice)) = frames::relay_parts(&data) else { return };
+                    frames::relay_head(&format!("phone:{who}"), &said, voice)
+                } else {
+                    frames::relay_head("phone", &name, &data)
+                };
+                self.relay_to(&self.within(phone, VOICE_RANGE + VOICE_MARGIN, Some(ch)), head);
+            }
+            return;
         }
-        self.save_state();
-        self.tell_edges();
+        match role {
+            Role::Visitor if inside => self.voice_to_page(ch, &data, relayed),
+            Role::Host if inside && !relayed => {
+                let Some(at) = self.voice.visitors.get(&ch).copied() else { return };   // where the room has them: not said yet, nobody hears
+                if self.voice.me.is_some_and(|me| flat(me, at) <= VOICE_RANGE + VOICE_MARGIN) {
+                    self.voice_to_page(ch, &data, false);
+                }
+                let mut to = self.within(at, VOICE_RANGE + VOICE_MARGIN, Some(ch));
+                if self.voice.phone.is_some_and(|p| flat(p, at) <= VOICE_RANGE) {   // a call on speaker hears those near the phone
+                    to.extend(self.visits.values().filter(|c| c.up && c.call_on && c.speaker && c.channel != ch).map(|c| c.channel));
+                }
+                self.relay_to(&to, frames::relay_head(&visit, &name, &data));
+            }
+            _ => {}
+        }
+    }
+
+    fn voice_to_page(&self, ch: u16, data: &[u8], relayed: bool) {
+        if let Some(p) = &self.page {   // a page behind loses some: late is lost
+            let _ = p.frames.try_send(if relayed { frames::relay_to_page(ch, data) } else { frames::audio_to_page(ch, data) });
+        }
+    }
+
+    fn relay_to(&self, channels: &[u16], head: Bytes) {
+        for v in self.visits.values().filter(|v| v.up && channels.contains(&v.channel)) {
+            let _ = v.cmd.try_send(LinkCmd::Relay(head.clone()));
+        }
+    }
+
+    /// The channels of this room's visitors within `reach` metres of a spot (as the room has them), but one.
+    fn within(&self, at: [f64; 3], reach: f64, but: Option<u16>) -> Vec<u16> {
+        self.visits.values().filter(|v| v.up && v.role == Role::Host && v.inside && Some(v.channel) != but)
+            .filter(|v| self.voice.visitors.get(&v.channel).is_some_and(|p| flat(*p, at) <= reach))
+            .map(|v| v.channel).collect()
+    }
+
+    /// Who is near whom in this room (within VOICE_RANGE), for each to know: this office's page (`voice_near`)
+    /// and each visitor in it (`near`, over its link); with a call on speaker, its caller for those near the
+    /// phone. Told when it changes; their distances, at most every NEAR_EVERY.
+    fn tell_near(&mut self) {
+        let me_entry = json!({ "key": self.key, "name": self.office.get("name").cloned().unwrap_or(Value::Null) });
+        let mut people: Vec<(u16, [f64; 3], Value)> = self.voice.me.map(|me| (0, me, me_entry)).into_iter().collect();
+        for v in self.visits.values().filter(|v| v.up && v.role == Role::Host && v.inside) {
+            if let Some(at) = self.voice.visitors.get(&v.channel) {
+                people.push((v.channel, *at, json!({ "key": v.peer.get("key"), "name": v.peer.get("name"), "id": v.id })));
+            }
+        }
+        let caller = self.visits.values().find(|v| v.up && v.call_on && v.speaker).map(|v| v.peer.get("name").cloned().unwrap_or(Value::Null));
+        let mut lists: Vec<(u16, Vec<Value>)> = Vec::new();
+        for (ch, at, _) in &people {
+            let mut near: Vec<Value> = people.iter().filter(|(o, p, _)| o != ch && flat(*p, *at) <= VOICE_RANGE).map(|(_, p, e)| {
+                let mut e = e.clone();
+                e["distance"] = json!(flat(*p, *at).round());
+                e
+            }).collect();
+            if let (Some(name), Some(phone), true) = (&caller, self.voice.phone, *ch != 0) {
+                if flat(phone, *at) <= VOICE_RANGE {
+                    near.push(json!({ "key": "phone", "name": name, "phone": true, "distance": flat(phone, *at).round() }));
+                }
+            }
+            lists.push((*ch, near));
+        }
+        for ch in self.voice.told.keys().copied().collect::<Vec<_>>() {   // no longer in the room (or not said): nobody near
+            if !lists.iter().any(|(c, _)| *c == ch) {
+                lists.push((ch, Vec::new()));
+            }
+        }
+        for (ch, near) in lists {
+            let near = Value::Array(near);
+            let who = |l: &Value| l.as_array().map(|a| a.iter().map(|e| (e["key"].clone(), e["id"].clone())).collect::<Vec<_>>()).unwrap_or_default();
+            if let Some((was, at)) = self.voice.told.get(&ch) {
+                if *was == near || (who(was) == who(&near) && at.elapsed() < NEAR_EVERY) {
+                    continue;
+                }
+            }
+            if ch == 0 {
+                self.to_page(json!({ "type": "voice_near", "near": near }));
+            } else if let Some(v) = self.visits.values().find(|v| v.up && v.channel == ch) {
+                let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "near": near })));
+            }
+            if near.as_array().is_some_and(Vec::is_empty) && (ch != 0 && !self.voice.visitors.contains_key(&ch)) {
+                self.voice.told.remove(&ch);   // gone: told once, then forgotten
+            } else {
+                self.voice.told.insert(ch, (near, Instant::now()));
+            }
+        }
     }
 
     /// A control message to the office with this key, over any link up with it; false if there is none.
@@ -841,39 +985,6 @@ impl Core {
             Some(v) => v.cmd.try_send(LinkCmd::Ctl(ctl)).is_ok(),
             None => false,
         }
-    }
-
-    /// An edge message from the other side of a link (../WORLD.md step 5), whichever way the link goes: true
-    /// if it was one. Sides and lengths are in the sender's terms: `from` its side, `to` this office's.
-    fn link_edge(&mut self, id: &str, m: &Value) -> bool {
-        let Some(v) = self.visits.get(id) else { return false };
-        let (key, name) = (v.peer.get("key").and_then(Value::as_str).unwrap_or("").to_string(), v.peer.get("name").and_then(Value::as_str).unwrap_or("").to_string());
-        if let Some(e) = m.get("edge") {
-            let (Some(from), Some(to), Some(along), Some(size)) = (state::side(e.get("from")), state::side(e.get("to")), state::along_from(e.get("along")), state::size_from(e.get("size"))) else {
-                return true;
-            };
-            // Facing each other, their sides turn the other way along the line they share: along, in my terms, is minus theirs.
-            self.edges_in.insert(key.clone(), (name.clone(), from.clone(), to.clone(), -along, size));
-            self.to_page(json!({ "type": "edge_proposed", "key": key, "name": name, "mine": to, "theirs": from, "along": -along, "size": size }));
-        } else if let Some(e) = m.get("edge_ok") {
-            let size = state::size_from(e.get("size"));
-            if let (Some((mine, theirs, along)), Some(size)) = (self.edges_out.remove(&key), size) {
-                self.keep_edge(Edge { key, name, mine, theirs, along, size });
-            }
-        } else if m.get("edge_no").is_some() {
-            if self.edges_out.remove(&key).is_some() {
-                self.to_page(json!({ "type": "edge_declined", "key": key }));
-            }
-        } else if m.get("edge_off").is_some() {
-            if self.saved.edges.iter().any(|e| e.key == key) {
-                self.saved.edges.retain(|e| e.key != key);
-                self.save_state();
-                self.tell_edges();
-            }
-        } else {
-            return false;
-        }
-        true
     }
 
     /// This room has a phone, or no longer: every link told (and each new one, while it has).
@@ -1112,6 +1223,7 @@ impl Core {
                     id: id.to_string(), channel, role, peer, up: false, cmd,
                     last_seq: 0, inputs: (Instant::now(), 0), want_key: false, host_state: None, ctl: (Instant::now(), 0), key_asked: None, resync_asked: None, resync_due: false,
                     points: (Instant::now(), 0), guest, watch, inside: !watch, shared_adds: false, link, in_world: false, avatar_asked: false, peer_phone: false,
+                    call_on: false, speaker: false,
                 });
             }
             Err(e) => {
@@ -1138,8 +1250,18 @@ impl Core {
             links.forget(id);
         }
         info!(visit = id, reason, "visit ended");
+        if v.role == Role::Host && v.inside {
+            self.voice.visitors.remove(&v.channel);
+            self.tell_near();
+        }
         if v.up {
             self.to_page(json!({ "type": "visit_ended", "id": id, "channel": v.channel, "reason": reason }));
+        }
+        // Their last link gone: where they had put this office is no longer told, nor known.
+        if let Some(key) = v.peer.get("key").and_then(Value::as_str) {
+            if !self.visits.values().any(|o| o.peer.get("key").and_then(Value::as_str) == Some(key)) && self.seen_in.remove(key).is_some() {
+                self.to_page(json!({ "type": "seen", "key": key, "name": v.peer.get("name"), "at": null }));
+            }
         }
     }
 
@@ -1254,6 +1376,9 @@ impl Core {
         if phone {   // this room has a phone: the other side hears of it, as every link does
             let _ = cmd.try_send(LinkCmd::Ctl(json!({ "phone": true })));
         }
+        if let Some(at) = v.peer.get("key").and_then(Value::as_str).and_then(|k| self.seen_out.get(k)) {   // where they are in this world
+            let _ = cmd.try_send(LinkCmd::Ctl(json!({ "seen": at })));
+        }
         let started = started(v);
         match role {
             Role::Visitor => {
@@ -1295,10 +1420,20 @@ impl Core {
         }
         if let Some(act) = m.get("call").and_then(Value::as_str).filter(|a| ["ring", "answer", "hangup"].contains(a)) {
             let act = act.to_string();
-            return self.to_page(json!({ "type": "call", "channel": ch, "act": act }));
+            call_state(v, &act);
+            self.to_page(json!({ "type": "call", "channel": ch, "act": act }));
+            return self.tell_near();
         }
-        if self.link_edge(id, &m) {
-            return;
+        if let Some(at) = m.get("seen") {   // where the other office has put this one in its world (or nowhere): to the page
+            let Some(key) = v.peer.get("key").and_then(Value::as_str).map(str::to_string) else { return };
+            let name = v.peer.get("name").cloned().unwrap_or(Value::Null);
+            let at = seen_from(at).unwrap_or(Value::Null);
+            if at.is_null() {
+                self.seen_in.remove(&key);
+            } else {
+                self.seen_in.insert(key.clone(), (name.clone(), at.clone()));
+            }
+            return self.to_page(json!({ "type": "seen", "key": key, "name": name, "at": at }));
         }
         let Some(v) = self.visits.get_mut(id) else { return };
         match v.role {
@@ -1326,6 +1461,8 @@ impl Core {
                 if v.inside {
                     v.inside = false;
                     self.to_page(json!({ "type": "exit", "channel": ch }));
+                    self.voice.visitors.remove(&ch);
+                    self.tell_near();
                 }
             }
             // From the visitor.
@@ -1363,6 +1500,8 @@ impl Core {
                     }
                 } else if let Some(p) = m.get("paused").and_then(Value::as_bool) {
                     self.to_page(json!({ "type": if p { "host_paused" } else { "host_resumed" }, "channel": ch }));
+                } else if let Some(near) = m.get("near").filter(|_| v.inside) {   // who is near this office's user in the host's room (8.7)
+                    self.to_page(json!({ "type": "voice_near", "channel": ch, "near": near_from(near) }));
                 } else if let Some(reason) = m.get("enter_refused").filter(|_| v.watch && v.inside) {
                     v.inside = false;
                     let reason = reason.as_str().unwrap_or("refused").chars().take(40).collect::<String>();
@@ -1454,6 +1593,52 @@ fn clamp_point(m: &Value) -> Value {
     json!({ "yaw": angle("yaw", 1e6), "pitch": angle("pitch", 1.4) })
 }
 
+/// A call's state on a link, by what passed either way: on when answered, over when hung up.
+fn call_state(v: &mut Visit, act: &str) {
+    match act {
+        "answer" => v.call_on = true,
+        "hangup" => (v.call_on, v.speaker) = (false, false),
+        _ => {}
+    }
+}
+
+/// A spot in a room, in metres: [x, y, z], each finite and within 100 km; null or anything else, none.
+fn spot(v: Option<&Value>) -> Option<[f64; 3]> {
+    let a = v?.as_array().filter(|a| a.len() == 3)?;
+    let n = |i: usize| a[i].as_f64().filter(|x| x.is_finite() && x.abs() <= 1e5);
+    Some([n(0)?, n(1)?, n(2)?])
+}
+
+/// How far apart two spots are across the floor (height aside), in metres.
+fn flat(a: [f64; 3], b: [f64; 3]) -> f64 {
+    (a[0] - b[0]).hypot(a[2] - b[2])
+}
+
+/// Who a host says is near this office's user (8.7), checked: at most 64, each with a key, a name, a distance and
+/// (a visitor) the id of its visit there, or (a call on the room's speaker) `phone`.
+fn near_from(v: &Value) -> Value {
+    let s = |x: &Value, n: usize| x.as_str().map(|s| s.chars().take(n).collect::<String>());
+    Value::Array(v.as_array().into_iter().flatten().take(64).filter_map(|e| {
+        let mut out = json!({ "key": s(&e["key"], 100)?, "name": s(&e["name"], 24).unwrap_or_default(),
+            "distance": e["distance"].as_f64().filter(|d| d.is_finite() && *d >= 0.0 && *d <= 1e5)? });
+        if let Some(id) = s(&e["id"], 40) {
+            out["id"] = json!(id);
+        }
+        if e["phone"] == json!(true) {
+            out["phone"] = json!(true);
+        }
+        Some(out)
+    }).collect())
+}
+
+/// Where an office has put another's plot in its world, beside its own (8.4), as sent and passed on: `dx`, `dz`
+/// metres from its own plot's middle (within 100 km), `turn` quarter turns left (0-3), and its own plot's `size`.
+fn seen_from(v: &Value) -> Option<Value> {
+    let n = |k: &str| v.get(k).and_then(Value::as_f64).filter(|x| x.is_finite() && x.abs() <= 1e5);
+    let turn = v.get("turn").and_then(Value::as_u64).filter(|t| *t < 4)?;
+    Some(json!({ "dx": n("dx")?, "dz": n("dz")?, "turn": turn, "size": state::size_from(v.get("size"))? }))
+}
+
 /// A three.js revision, as `THREE.REVISION` says it: digits.
 fn revision(r: &str) -> bool {
     (1..=4).contains(&r.len()) && r.bytes().all(|b| b.is_ascii_digit())
@@ -1479,6 +1664,26 @@ mod tests {
     fn revisions_are_digits() {
         assert!(revision("128") && revision("186"));
         assert!(!revision("r128") && !revision("") && !revision("12345") && !revision("1.2"));
+    }
+
+    #[test]
+    fn where_voices_are_and_who_is_near() {
+        assert_eq!(spot(Some(&json!([1, 1.6, -2.5]))), Some([1.0, 1.6, -2.5]));
+        assert!(spot(Some(&json!([1, 2]))).is_none() && spot(Some(&json!([1e6, 0, 0]))).is_none() && spot(Some(&Value::Null)).is_none() && spot(None).is_none());
+        assert_eq!(flat([0.0, 0.0, 0.0], [3.0, 9.0, 4.0]), 5.0);   // across the floor: height aside
+        let near = near_from(&json!([{ "key": "k1", "name": "Ada", "distance": 12, "id": "v1", "evil": 1 },
+            { "key": "phone", "name": "Bo", "distance": 2, "phone": true }, { "name": "no key", "distance": 1 }, { "key": "k3", "distance": -1 }]));
+        assert_eq!(near, json!([{ "key": "k1", "name": "Ada", "distance": 12.0, "id": "v1" }, { "key": "phone", "name": "Bo", "distance": 2.0, "phone": true }]));
+        assert_eq!(near_from(&json!("nobody")), json!([]));
+    }
+
+    #[test]
+    fn where_one_is_seen_is_bare() {
+        let s = seen_from(&json!({ "dx": 22.5, "dz": -4, "turn": 1, "size": [12, 9], "others": [{ "key": "x" }] }));
+        assert_eq!(s, Some(json!({ "dx": 22.5, "dz": -4.0, "turn": 1, "size": [12.0, 9.0] })));
+        assert!(seen_from(&json!({ "dx": 1, "dz": 1, "turn": 4, "size": [1, 1] })).is_none());
+        assert!(seen_from(&json!({ "dx": 1e6, "dz": 1, "turn": 0, "size": [1, 1] })).is_none());
+        assert!(seen_from(&json!({ "dx": 1, "dz": 1, "turn": 0 })).is_none());
     }
 
     #[test]

@@ -62,8 +62,8 @@ visit-clients talk to each other**. A page reload breaks nothing but the localho
 - **World** (8.4): an office's own room with its friends' rooms round it, each on its **plot** (the rectangle
   of its floor that is its land), drawn by the office's own page. **Watch**: a visit that sees a plot from
   outside it, sending nothing, until the watcher **steps in** (`enter`) and is in the room as a visitor is,
-  and **steps out** (`exit`). **Layout**: where an office has put each friend's plot in its world, by key.
-  **Edge**: a side of two plots agreed by both offices to touch.
+  and **steps out** (`exit`). **Layout**: where an office has put each friend's plot in its world, by key: its
+  own, agreed with nobody. **Seen**: where a friend's layout has put this office's plot, as that friend said.
 - **Linking** (8.5): what the panel offers on an office that takes it: a knock that, let in, starts a watch its
   knocker sees in a corner, from outside, and goes into, puts in its world, or ends. That watch is "a link" to
   people (`link: true` in messages); every visit, linked or not, also has a link in the sense above, its QUIC
@@ -119,8 +119,8 @@ program listening on their machine.
     its page; anyone else's is declined. Shutting the door ends every watch of the plot; taking a guest off
     ends theirs. A watcher's input and points count only while it has stepped in, and stepping in counts toward
     `max_visitors`.
-12. **Edges travel only over a link,** between the two offices it proves, and each keeps its own: an office
-    cannot be put against another's side without that office's page agreeing.
+12. **A layout is told to nobody whole.** Each friend in it hears where its own plot sits, over a link between
+    the two offices (which proves who it is), and nothing of anyone else's.
 
 Visitors get the host's whole scene: a sim that shows issue titles or agent activity in its room shows them
 to its visitors, wherever they stand and whether they look or not. Letting someone in is the host's
@@ -146,7 +146,7 @@ visit-client --lobby wss://lobby.example/ --name "Magic Room" --sim my-sim/1.0 \
 | `--idle-exit` | `VISIT_IDLE_EXIT` | 0 | exit after this many seconds with no page connected (0: never) |
 | `--origins` | `VISIT_ORIGINS` | none | the page origins allowed to connect (`http://localhost:3000`, comma-separated); none: any page with the token (section 3, point 4) |
 | `--relays` | `VISIT_RELAYS` | the lobby's | the relays for links: `none`, `default` (iroh's own), or URLs, comma-separated |
-| `--state-file` | `VISIT_STATE_FILE` | none | a file where it keeps what outlasts a run: whether the office is away (`leave_lobby`, 5.2), so a restart stays away; its key (section 2), so it is the same office to its guests' hosts; its door and its guests; its world's layout and edges (8.4); whose look its visitors have (8.6). Readable by its owner only (section 3, point 10). None: every start joins the lobby, with a new key and no guests. A launcher SHOULD give one |
+| `--state-file` | `VISIT_STATE_FILE` | none | a file where it keeps what outlasts a run: whether the office is away (`leave_lobby`, 5.2), so a restart stays away; its key (section 2), so it is the same office to its guests' hosts; its door and its guests; its world's layout (8.4); whose look its visitors have (8.6). Readable by its owner only (section 3, point 10). None: every start joins the lobby, with a new key and no guests. A launcher SHOULD give one |
 
 A flag wins over its environment variable, and a variable set but blank counts as unset (its default), as a
 `.env` file has it. [`../.env.example`](../.env.example) is the template of them all.
@@ -216,7 +216,7 @@ The visit-client answers `ready` (or closes: 4401 bad token, 4400 bad `proto`):
 {"type": "ready", "version": "0.7.0", "office": {"id": "o1a2b3c4", "name": "Magic Room"},
  "online": true, "away": false, "status": "available", "max_visitors": 3,
  "key": "7f3a…", "door": "open", "guests": [{"key": "c41e…", "name": "Ada"}],
- "layout": [{"key": "c41e…", "x": 22, "z": 4, "turn": 0}], "edges": [],
+ "layout": [{"key": "c41e…", "x": 22, "z": 4, "turn": 0}], "seen": [],
  "visits": [{"id": "v…", "channel": 1, "role": "host", "peer": {"id": "o…", "name": "Ada", "sim": {…}, "key": "c41e…"}, "guest": true}]}
 ```
 
@@ -239,9 +239,7 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `enter` | `channel` (a watch's), `pose` {`x`, `y`, `z`, `yaw`} (in the watched room's terms) | step into the room watched (8.4): out of any other room first (a visit there ends); refused by its host when full (`enter_refused`) |
 | `exit` | `channel` | step out of it again: the watch goes on |
 | `place` / `unplace` | `key`, `x`, `z` (within 100 km), `turn` (0–3) / `key` | put a friend's plot in this office's world: its middle there, turned so many quarter turns (8.4); kept in the state file. At most 256 |
-| `edge_propose` | `key`, `mine`, `theirs` (`"north"`, `"east"`, `"south"`, `"west"`), `along` (m)?, `size` ([w, d] m: this plot's) | propose that this plot's side `mine` touch theirs (8.4), over a link to that office (`no_link` if there is none) |
-| `edge_accept` / `edge_decline` | `key`, `size` (this plot's, to accept) | answer an edge proposed to this office |
-| `edge_remove` | `key` | take an agreed edge back: for both |
+| `seen` | `key`, `at` {`dx`, `dz` (m, within 100 km), `turn` (0–3), `size` ([w, d] m: this plot's)} \| null | where this office's world has that office's plot (8.4): its middle `dx`, `dz` metres from this plot's middle, turned `turn` quarter turns left; null, not in it. Told to that office over any link with it, and again over each new one (kept in memory, not in the state file). At most 256 |
 | `link_where` | `channel`, `where` (`"world"` \| `"corner"`) | where the page put a link (8.5): kept, and said again in `visit_started` to a page that reloads |
 | `avatar_clear` | — | this office has no avatar (8.6) from now on (its own goes as a binary frame, 5.4) |
 | `avatar_want` | `channel` | ask a visitor for its avatar (host side, 8.6): its visit-client sends it, now and whenever its page gives a new one |
@@ -249,6 +247,8 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `avatar_use` | `key`, `use` (`"mine"` \| `"theirs"` \| null: the default) | the same for one office, apart from the default; kept in the state file |
 | `phone` | `on` (bool) | this room has a phone (8.8), or no longer: every link is told |
 | `call` | `channel`, `act` (`"ring"` \| `"answer"` \| `"hangup"`) | a call on that visit (8.8): ring their phone (refused `no_phone` if their room has none), answer it, end it |
+| `speaker` | `channel`, `on` (bool) | a call on this office's phone's speaker (8.8), or back to the ear (`no_call` if none is on there) |
+| `voice_where` | `me` [x, y, z] \| null, `phone` [x, y, z] \| null, `visitors` [[`channel`, x, y, z], …] (metres, this room's terms) | where everyone in this office's room is (8.7): its own user (null: not in it), its phone, each visitor in it. Who hears whom in the room goes by it. Sent when it changes, at most 10 a second |
 | `knock` | `to` (office id), `message`? (≤ 280), `link`? (true: a link, 8.5) | ask to visit an office, or to link with it (refused `not_hosting` before `host`) |
 | `answer` | `knock`, `accept` (bool), `message`? | let a knocker in, or not |
 | `end` | `visit` | end a visit: yours as a visitor (leave), or a visitor's to you (kick) |
@@ -265,13 +265,13 @@ followed by a `lobby` snapshot and any pending `knock`s.
 |---|---|---|
 | `ready` | 5.1 | after `hello` |
 | `guests` | `door` (`"open"` \| `"closed"`), `guests`: [{`key`, `name`}] | after `door`, `guest_add` or `guest_remove` |
-| `layout` / `edges` | `layout`: [{`key`, `x`, `z`, `turn`}] / `edges`: [{`key`, `name`, `mine`, `theirs`, `along`, `size`}] | after a change (an edge also when the other office agrees, or takes it back) |
-| `edge_proposed` | `key`, `name`, `mine`, `theirs`, `along`, `size` (theirs), all in this office's terms | a friend proposes an edge: answer with `edge_accept` or `edge_decline` |
-| `edge_declined` | `key` | your proposal was declined |
+| `layout` | `layout`: [{`key`, `x`, `z`, `turn`}] | after a change |
+| `seen` | `key`, `name`, `at` (as the page message `seen`'s, their plot's `size`) \| null | where a friend's world has this office's plot (8.4), as they said; null: not in it, or their last link gone. `ready` has every one known: `seen`: [{`key`, `name`, `at`}] |
 | `avatars` | `default`, `by`: [{`key`, `use`}] | whose look visitors have here (also in `ready`), after `avatars` or `avatar_use` |
 | `avatar` | `channel`, `avatar` {`unit`, `json`} | a visitor's avatar, which this page asked for (host side, 8.6): unpacked and checked as a scene edit is |
 | `phone` | `channel`, `on` | the other office's room has a phone now (8.8), or no longer (also `phone` in `visit_started`) |
 | `call` | `channel`, `act` | a call on that visit (8.8): they ring, answer, or hang up |
+| `voice_near` | `channel`?, `near`: [{`key`, `name`, `distance` (m), `id`?, `phone`?}] | who is near this office's user (8.7), within `voice_range`: in its own room (no `channel`: as its visit-client has it), or in the room it is in (that visit's `channel`: as its owner's says). `id`: a visitor's, by its visit there; `phone`: a call on that room's speaker. When it changes; distances at most every second. `ready` has `voice_range` (45) |
 | `enter` / `exit` | `channel`, `pose`? {`x`, `y`, `z`, `yaw`} (for `enter`) | a watcher stepped into this room, there (host side: spawn it, as a visitor), or out of it; no `pose`: a link going there, spawned where newcomers go |
 | `enter_refused` | `channel`, `reason` (`"full"`, or `"moved"`: a visit to a room began, and this office stepped out) | stepping into a watched room was refused, or undone: outside it |
 | `online` / `offline` | `office`, `knocking` / `away`? | the lobby session came up (after a drop: the same office if it resumed), with this office's own knocks still waiting ([{`id`, `to`, `link`?}]) / went down: `away: true` when the page took it out (`leave_lobby`), `false` when it is on its way back (`join_lobby`), absent when the lobby is out of reach |
@@ -299,7 +299,7 @@ Both directions, one scene delta (or, from the host's page, one scene edit) per 
 | bytes | field |
 |---|---|
 | 0–1 | `channel`, u16 big-endian |
-| 2 | flags: bit 0 = a key delta (everything that has moved, 8.1); bit 1 = a scene edit (host page to visit-client only, alone); bit 2 = this office's avatar (8.6: page to visit-client only, alone, its channel 0); bit 3 = a packet of voice (8.7: from the page, its own, on the visit it goes on; to it, the other office's, on the visit's channel); bit 4 = someone else's voice passed on (8.7, 8.8: who spoke, then the packet; either way, on the visit's channel) |
+| 2 | flags: bit 0 = a key delta (everything that has moved, 8.1); bit 1 = a scene edit (host page to visit-client only, alone); bit 2 = this office's avatar (8.6: page to visit-client only, alone, its channel 0); bit 3 = a packet of voice (8.7: from the page, its own user's, its channel saying where it may go: 1 the room they are in, 2 their calls, 3 both; to it, another office's, on the visit's channel); bit 4 = someone else's voice passed on (8.7, 8.8: to the page only, on the visit's channel it came by: who spoke, then the packet) |
 | 3–10 | timestamp, u64 big-endian, microseconds: the host page's clock when it took the delta (unused for an edit) |
 | 11… | the delta (8.1), or the edit, gzipped JSON |
 
@@ -439,14 +439,13 @@ Messages are JSON, each prefixed by its length (u32 big-endian). In order, relia
 | visitor | `{"point": {"yaw", "pitch"}}` | a point (8.3): passed to the host's page with only those two, clamped, at most 5 a second |
 | either | `{"phone": true}` / `{"phone": false}` | this side's room has a phone, or no longer (8.8): sent on every link, and on each new one while it has |
 | either | `{"call": "ring" \| "answer" \| "hangup"}` | a call (8.8), passed to the page as `call` |
+| host | `{"near": [{"key", "name", "distance", "id"?, "phone"?}]}` | who is near the visitor in the host's room (8.7), as the host's visit-client has it: checked, passed to the page as `voice_near` |
 | host | `{"avatar_want": true}` | send this office's avatar (8.6): now, on a stream of its own (7.4), and again whenever its page gives a new one |
 | visitor | `{"shared_adds": true}` | its page reads an `add` that names what it already has by uuid only (8.3; Visit 0.7 on): sent each time the link is up, passed to the host's page once as `shared_adds` |
 | host | `{"paused": true}` / `{"paused": false}` | the host's page went away / came back |
 | watcher | `{"enter": {"x", "y", "z", "yaw"} \| null}` / `{"exit": true}` | stepping into the room watched, there (clamped, passed to the host's page as `enter`; null: a link going there, spawned where newcomers go), or out (8.4, 8.5); in, it counts toward `max_visitors` |
 | host | `{"enter_refused": "full"}` | the room is full: the watcher stays outside |
-| either | `{"edge": {"from", "to", "along", "size"}}` | an edge proposed (8.4): the sender's side `from` against the receiver's `to`, the receiver's middle `along` metres from the sender's, the sender's plot `size` |
-| either | `{"edge_ok": {"from", "to", "along", "size"}}` / `{"edge_no": true}` | the proposal agreed (in the agreeing side's terms, with its plot's size) / declined |
-| either | `{"edge_off": true}` | an agreed edge taken back |
+| either | `{"seen": {"dx", "dz", "turn", "size"} \| null}` | where the sender's world has the receiver's plot (8.4), or not; sent when it changes and each time a link comes up. Passed to the page as `seen` with only those fields |
 | either | `{"bye": "<reason>"}` | ending the visit (also sent to the lobby as `end`) |
 
 ### 7.3 Inputs
@@ -481,9 +480,9 @@ And visitor to host, once its host asked (`avatar_want`):
   finished. The host's visit-client takes at most one every 2 s, unpacks it to at most 16 MiB of one JSON object
   nested at most 256 deep, and passes it to its page as `avatar`. A host on an older Visit never asks.
 
-Datagrams (unreliable): the visitor's input (7.3), JSON, so starting with `{`; either side's voice (8.7), one
-byte 0xA0 then one Opus packet (at most 100 a second taken, each at most 1 000 bytes); and someone else's voice
-passed on (8.7, 8.8), one byte 0xA1 then who spoke and the packet (at most 400 a second).
+Datagrams (unreliable): the visitor's input (7.3), JSON, so starting with `{`; either side's own user's voice (8.7),
+one byte 0xA0 then one Opus packet (at most 100 a second taken, each at most 1 000 bytes); and someone else's voice
+passed on by a room's visit-client (8.7, 8.8), one byte 0xA1 then who spoke and the packet (at most 400 a second).
 
 ### 7.5 Blips
 
@@ -613,10 +612,11 @@ An office's world is its own room with its friends' plots round it, drawn by its
   nothing from the watcher: the host sends it the scene and its deltas (version 2) and does not spawn it.
 - **Plots.** A host says its plot (`plot`, `unit`: 8.1); one that does not is taken to be what its scene covers
   (at most 200 units a side). An office's own plot sits at home, in its own room's coordinates.
-- **Layout**, for each plot watched, and each agreed neighbour: an agreed edge puts it there; else where the
-  office placed it (`place`: its middle at `x`, `z`, turned `turn` quarter turns left); else it goes by itself in
-  a ring round the office's own, in the first of eight places (from one its key picks) where it overlaps
-  nothing, `gap` (4 units) apart. A plot is scaled by its `unit` against the office's own.
+- **Layout**, for each plot watched: where the office placed it (`place`: its middle at `x`, `z`, turned `turn`
+  quarter turns left); else it goes by itself in a ring round the office's own, in the first of eight places
+  (from one its key picks) where it overlaps nothing, `gap` (4 units) apart. A plot is scaled by its `unit`
+  against the office's own. Nobody agrees to it: it is the office's alone (Visit 0.7 to 0.9 also had edges, a
+  side agreed by both; gone in 0.10, and an older office's edge messages go unanswered).
 - **Drawing.** The office's room is drawn clipped to its plot; then the ground between plots; then each plot,
   its scene read with the office's own three.js release (not its own), clipped to its rectangle, into the same
   depth buffer, lit by its own lights only (each plot a scene of its own), with its fog. A plot lit before r155's
@@ -629,11 +629,11 @@ An office's world is its own room with its friends' plots round it, drawn by its
   arrival: the host's `yaw0` for a watch is 0); the page walks them at once by the host's `walk` and takes its
   answers (8.1). When the host has them off its plot (by more than 0.3 of the office's units), they step out
   (`exit`) and walk on at home from there. Refused, or no answer within 3 s: back where they were before.
-- **Edges.** An edge is proposed and agreed over any link between the two offices (7.2), and each keeps it in
-  its own terms (its side `mine`, theirs `theirs`, their middle `along` metres from its own middle, measured
-  along its side turning left; facing each other, the two `along`s are opposite). While agreed, each layout puts
-  the other's plot against that side, facing it. An agreed neighbour not watched (its door shut to you, or it is
-  away) is drawn as an outline of its plot, with its name.
+- **Seen.** The page tells each friend in its world where their plot sits (`seen`: their middle from its own,
+  in metres, their turn, and its own plot's size), when that changes, and that they are no longer in it when
+  they leave it; nothing else of its world, nor who else is in it. Its visit-client keeps the latest for each,
+  tells it over any link with them, and again over each new one. A friend's page has where it is in each world
+  that has told it (`v.seen`), until their last link goes. A plot whose door shuts on the world leaves it.
 
 ### 8.5 Links
 
@@ -683,27 +683,33 @@ visitor as the visitor's own body instead.
 ### 8.7 Voice
 
 Voice goes by where people are, in the same room: nothing to join. Those in one room hear each other the nearer
-the louder, from where each stands (the listener's page pans it), and nobody farther than `voiceRange` (15 m) away.
-Nobody hears into another room: not next door in a world, not across a plot's edge.
+the louder, from where each stands, and nobody farther than 45 m away (`voice_range`). Nobody hears into another
+room: not next door in a world, not across a plot's side.
 
 - **The microphone** is each user's to turn on (`v.setMic`, the panel's 🎙), remembered in their browser (on again
   at the next load, once permission is given); off, they still hear. It is asked for with echo cancellation, noise
-  suppression and gain control. Nothing is sent while nobody is near.
-- **Where people are.** A room keeps an empty object named `visit:me` in its scene where its own user stands
-  while they are at home (where its world, or `v.listener`, has them; hidden while they are away), so that whoever
-  is in the room hears them from there. A visitor is where its host has it. A page hears from where its user is:
-  in a room they went to, where that room has them; at home (in their own room, or a plot they walked onto in their
-  world), where their world has them.
-- **Who hears whom.** At home, a page sends its user's voice to each of its visitors near them, and hears them by
-  where it has them. In another's room, a visitor sends its voice to that room's owner, who hears it by where it
-  has the visitor, and passes it on to its other visitors near them (`relay`: who spoke, by that visit's id and
-  name); a visitor hears the owner from `visit:me`, and the voices passed on from where the room has their bodies
-  (`userData.visitor`). Visitors need no link to each other.
-- **The voice**: 48 kHz mono, 20 ms a packet, Opus at about 24 kbps (WebCodecs), as a binary frame (5.4, bit 3,
-  on the visit it goes on; bit 4, passed on, with who spoke) to the visit-client, which sends each as a QUIC
-  datagram on that link (7.4: unreliable, so late is lost), and passes the other side's to its page on the visit's
-  channel. The page decodes each speaker's in order and plays it a little behind now (60 ms, to ride out the
-  network's unevenness; past 400 ms behind, it catches up).
+  suppression and gain control. Nothing is encoded or sent while nobody is near.
+- **Where people are.** Each room's page tells its own visit-client where everyone in it stands (`voice_where`): its
+  own user while they are at home (where its world, or `v.listener`, has them), its phone, and each visitor (where
+  the room has them: it moves them, so it is the room's word, not the visitor's). It also keeps an empty object
+  named `visit:me` in its scene where its own user stands at home (hidden while they are away), and marks each
+  visitor's body (`userData.visitor`), so that a visitor's page knows where each voice comes from.
+- **Who hears whom is decided by the room's visit-client**, the same for every room, not by its page. A page sends
+  its user's voice once, to its own visit-client (where it may go: the room, calls). Their visit-client sends it to
+  the room they are in: another's (that room's owner's visit-client decides) or their own. There, the room's
+  visit-client sends a voice on to whoever is within 45 m of the speaker, plus a 15 m margin (so it fades in rather
+  than starts): its own page, if its user is; and each visitor, the owner's as it is, another visitor's passed on
+  (`relay`: who spoke, by their visit's id there, and their name). It tells each in the room who is near them
+  (`voice_near`, `near`), so a page with nobody near encodes nothing.
+- **Hearing.** A page plays each voice from where the speaker is (Web Audio's HRTF panner, linear to nothing at 45
+  m): at home, its visitors where it has them; in another's room, its owner from `visit:me` and the voices passed on
+  from their bodies.
+- **The voice**: 48 kHz mono, 20 ms a packet, Opus at about 24 kbps (WebCodecs), as a binary frame (5.4, bit 3) to
+  the visit-client, sent on as a QUIC datagram (7.4: unreliable, so late is lost); the page decodes each speaker's
+  in order and plays it a little behind now (60 ms, to ride out the network's unevenness; past 400 ms behind, it
+  catches up).
+- **Older offices** (Visit 0.9) decided in their pages, by 15 m: a 0.9 room's visitor on 0.10 sends to it and hears
+  what it sends, and a 0.9 visitor in a 0.10 room is heard and hears as the 0.10 room decides.
 
 ### 8.8 Phones
 
@@ -717,10 +723,11 @@ carries calls, and the room shows the phone (where it stands, its ringing, picki
   between them; unanswered, it stops ringing after 30 s. While on, each sends its voice on that visit (the
   microphone runs for the call, on or off otherwise).
 - **The handset** (as a call starts): only the user, to their ear, sounding as a telephone does.
-- **Speaker** (`v.speaker(key, true)`, each side its own): the call's voice comes from the phone, heard by
-  everyone near it in that room by distance (the room passes it on to its visitors near the phone, as the phone's,
-  `relay` id `phone`), and everyone near the phone is heard on the call (the room passes its visitors' voices
-  there); the user, only while near it. The other side hears them all, each apart.
+- **Speaker** (`v.speaker(key, true)`, each side its own; the page tells its visit-client, `speaker`): the call's
+  voice comes from the phone, heard by everyone within 45 m of it in that room by distance (the room's visit-client
+  passes it on to its visitors near the phone, as the phone's, `relay` id `phone`), and everyone that near the
+  phone is heard on the call (the room's visit-client passes its visitors' voices there); the user, only while
+  near it. The other side hears them all, each apart.
 
 ## 9. The library: `visit.js`
 
@@ -748,8 +755,8 @@ v.status       // "available" | "busy"
 v.maxVisitors  // number
 v.offices      // [{ id, name, status, sim, maxVisitors, visitors, visiting, ready, key, links }], you included
 v.layout       // [{ key, x, z, turn }]: where you have put friends' plots (8.4)
-v.edges        // [{ key, name, mine, theirs, along, size }]: edges you have agreed
-v.edgeProposals // [{ key, name, mine, theirs, along, size }]: edges proposed to you, waiting
+v.seen         // [{ key, name, at: { dx, dz, turn, size } }]: where friends' worlds have your room (8.4): metres from
+               //   their plot's middle (north -z), quarter turns left, and their plot's size
 v.watchers     // [{ id, visitor, inside, link }]: who sees your room from outside it (your guests' worlds; links, 8.5)
 v.knocks       // knocks on your door: [{ id, from: { id, name, sim, key }, message, until (ms epoch), link }]
 v.knocking     // your knocks still waiting: [{ id, to, link }]
@@ -772,7 +779,7 @@ v.unlink(id)       // end a link
 v.watching(officeId)        // whether a plot of theirs is in your world (a guest's, or a link put there)
 v.avatar(object, { unit })  // your own body, for rooms that show their visitors' own looks (8.6); null: none
 v.setMic(on); v.mic         // your microphone (8.7): on, those near your user in the same room hear them (remembered)
-v.voices; v.voiceRange      // who your user can hear, near them: [{ key, name, distance (m), speaking }]; metres (15)
+v.voices; v.voiceRange      // who your user can hear, near them (as the room's visit-client says): [{ key, name, distance (m), speaking }]; metres (45)
 v.listener({ x, y, z, yaw })   // where your user is in your room, for a room that draws no world (a world says it)
 v.phone(on, { at })         // a phone in your room (8.8), at that spot (your units)
 v.phones; v.calls           // those linked to you whose rooms have phones: [{ key, name }]; your calls: [{ key, name,
@@ -811,10 +818,10 @@ v.host({
 const world = v.world({ scene, renderer, ground, gap, clipOwn });   // your whole scene and its renderer (host()'s by default)
 const me = world.frame(dt, { x, y, z, yaw, pitch }, { forward, strafe, run });
 world.render(camera);
-world.plots        // [{ key, name, at: { x, z, turn }, rect: [x0, z0, x1, z1], seen, edge, inside }]
+world.plots        // [{ key, name, at: { x, z, turn }, rect: [x0, z0, x1, z1], inside }]
 world.inside; world.point(); world.leave(); world.release()
-v.place(key, { x, z, turn }); v.unplace(key)
-v.proposeEdge(key, { mine, theirs, along }); v.acceptEdge(key); v.declineEdge(key); v.removeEdge(key)
+v.place(key, { x, z, turn }); v.unplace(key)   // yours alone: each friend in it is told where it is, nothing more
+v.on("seen", ({ key, name, at }) => …)          // a friend's world has your room somewhere new (at), or not (null)
 
 // hosting: what visitors may click (8.3), by type: things marked userData.visitPoint = "<type>". A type not
 // named does nothing. One not cosmetic throws unless agreed: true (your user agreed to it, by name).
@@ -840,7 +847,7 @@ Visit.panel(element, v)                          // an optional ready-made lobby
                                                  //   stars, door, status, Go offline / online:
                                                  //   { element, release() }
 Visit.map(v)                                     // an optional ready-made map of your world from above (the panel's Map): drag,
-                                                 //   turn or type where friends' rooms sit; propose an edge when flush;
+                                                 //   turn or type where friends' rooms sit; pick one: their view of you two;
                                                  //   { element, open(), close(), shown, release() }
 Visit.stage(v)                                   // an optional ready-made visit view: the room visited full-window (with the
                                                  //   link's numbers, Back to my room, Leave), or in a corner; a link starts in the
@@ -898,7 +905,7 @@ slowly while its tab is hidden.
 | knock wait | 60 s |
 | watches | 8 watchers of a plot, 8 plots watched; 30 knocks to watch a minute; one declined tried again after 20 s |
 | world | a plot not said: what its scene covers, at most 200 units a side; 4 units between plots in a ring; out of a plot 0.3 units past it; stepping in answered within 3 s |
-| layout, edges | 256 each |
+| layout, seen | 256 each |
 
 ## 11. Errors
 
@@ -908,8 +915,8 @@ codes 4400 bad `hello`, 4401 bad or missing token, 4409 replaced by a newer page
 **`error` codes the page can get** (from the visit-client, or passed through from the lobby): those of
 section 6.4 (`not_found`, `self_knock`, `not_available`, `full`, `not_ready`, `already_visiting`,
 `knock_pending`, `rate_limited`), `message_too_long`, `name_invalid`, `name_taken` (on `rename`; the
-office keeps its name), `too_many_guests` (256 at most), `no_link` (an edge proposed to an office with no link
-up to it), `not_supported`, `too_many`, `already_watching` (knocks to watch, which a page never sees), `not_yours` (answering a knock that is not yours), `not_hosting` (knocking before
+office keeps its name), `too_many_guests` (256 at most), `no_phone` (ringing a room with no phone), `no_call`
+(`speaker` with no call on), `not_supported`, `too_many`, `already_watching` (knocks to watch, which a page never sees), `not_yours` (answering a knock that is not yours), `not_hosting` (knocking before
 the page hosts its scene, 4.2), `no_such_visit` (`end`, `keyframe` or `scene_resync` for a visit you are not
 in), `offline` (an action while the lobby is down), `away` (an action
 while the office is out of the lobby on purpose: `join_lobby` first), `bad_message`.

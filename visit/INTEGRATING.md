@@ -308,10 +308,12 @@ visit.host({
   clips named `idle` and `walk` in `body.animations` if you have them; at most 4 MiB gzipped, 300 000 vertices).
   It goes only to a room that asks for it. Whose look your own visitors have is your user's to choose: the panel's
   "visitors look like", and "their look" / "your model" by each visitor (or `visit.useAvatars`, `useAvatar`).
-- **Voice**: in a room, people hear each other by distance, from where each stands; nothing to join, and nobody
-  hears into another room. Your user turns their microphone on (the panel's 🎙, or `visit.setMic(true)` from a
-  click: browsers ask for the microphone only then); it stays on across reloads. Visit needs to know where your
-  user stands: with a world (step 9) it knows; without one, call `visit.listener({ x, y, z, yaw })` each frame. A
+- **Voice**: in a room, people hear each other by distance, from where each stands, within 45 m; nothing to join,
+  and nobody hears into another room. Your user turns their microphone on (the panel's 🎙, or `visit.setMic(true)`
+  from a click: browsers ask for the microphone only then); it stays on across reloads. Who hears whom is decided by
+  each room's visit-client, the same for every room: your page only says where everyone in your room stands, which
+  Visit does for you. It needs to know where your user stands: with a world (step 9) it knows; without one, call
+  `visit.listener({ x, y, z, yaw })` each frame. Your visitors it takes from where your room has them. A
   page's Content-Security-Policy needs `blob:` for worklets too (as for the ticker's Worker), and the browser
   WebCodecs (Chrome, Edge, Safari, recent Firefox). Headphones keep your user's speakers out of their microphone.
 - **A phone** (optional): for your user to talk with a friend in another room, wherever each stands.
@@ -490,15 +492,16 @@ walks onto your plot from their world may have no way back out.
 
    `world.render` draws your room clipped to your plot: anything of yours outside it (a sky dome, a huge ground)
    is cut there; use `scene.background` for a sky. A post-processing chain (`EffectComposer`) does not fit it.
-5. **Where they sit, and edges.** The panel's **Map** (`Visit.map(visit).open()`) shows your world from above:
-   drag a friend's room where you want it, turn it, or type where its middle goes; kept by visit-client, across
-   reloads. Put flush against a side of yours, it offers to propose an edge: the friend's panel asks them, and once
-   they agree it is there for both. (In code: `visit.place`, `visit.proposeEdge(friend.key, { mine: "east", theirs:
-   "west" })`, `visit.edgeProposals`, `acceptEdge` / `declineEdge`.)
+5. **Where they sit.** The panel's **Map** (`Visit.map(visit).open()`) shows your world from above: drag a
+   friend's room where you want it, turn it, or type where its middle goes; kept by visit-client, across reloads.
+   Your layout is yours alone, nobody agrees to it: each friend is told only where their own room sits in it, and
+   picking a friend on the Map shows their view of the two of you (where their world has your room). Nothing to
+   do for that beyond `visit.world`. (In code: `visit.place`, `visit.seen`, `visit.on("seen", …)`.)
 
 **Check:** with step 8's two rooms, each starring the other in the panel, each sees the other's plot; walking
-onto it puts you in its room (its `visit.visitors` lists you), walking off brings you home; with an edge agreed,
-walking out of your door goes straight into theirs.
+onto it puts you in its room (its `visit.visitors` lists you), walking off brings you home; put flush against yours
+on the Map, walking out of your door goes straight into theirs; and picking the other on the Map shows where
+they have put you.
 
 ## Checklist
 

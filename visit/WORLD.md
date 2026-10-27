@@ -18,8 +18,9 @@ What we agreed on, and what we did not need to:
 - **Nobody has to agree on a map.** Where your friends' plots sit round yours is your choice (by yourself: a
   ring round yours; or where you put them), and theirs is theirs. Walking from one to another can look odd to
   someone whose layout differs: you leave by one wall and come in by another. That is fine.
-- **Two friends who care agree an edge**: "my east side to your west side". Then it is the same for both, and
-  walking across it is seamless; with their door shut, you still see where they are, as an outline.
+- **You can see where a friend has put you**: each friend's world tells you where your room sits in it (on the
+  Map, pick them: their view of the two of you), and nothing else of it. Put each other flush, if you like, and
+  walking across is seamless; nobody has to agree to it. (Visit 0.7 to 0.9 had edges, agreed by both: gone.)
 - **Someone you are not guests with** can still be in your world for a while: link with them (Visit 0.8, SPEC
   8.5), and once they say yes, their room shows in your corner; **Put in my world** makes it a plot round yours
   until the link ends.
@@ -37,13 +38,14 @@ What we agreed on, and what we did not need to:
 4. **Walking.** At home your page walks you. Step onto a plot and its host has you, as a visitor (its `spawn`
    hears where you stepped in, its `move` and walls decide where you go, its scene draws you for others); your
    page draws you as yourself. Walk off it and you are home again.
-5. **Edges** are proposed and agreed over the link the two already have, each keeping its own terms.
+5. **Where you are in theirs.** Each page tells each friend in its world, over the link the two already have,
+   where that friend's plot sits beside its own: just the two of them.
 
 ## Still to come
 
 - **A friend's friends.** A world holds your own friends' plots. Drawing a plot beyond the next one (Cliff, who
-  is your friend's friend) would need your friend to share its edges; nothing does yet.
+  is your friend's friend) would need your friend to share its layout, and on purpose it does not: each friend
+  hears only where they are in it.
 - **The host's own user.** In a world your page draws you; a host's own user, at home in its room, is not drawn
   for its visitors unless its room does so itself.
-- **Moving plots about.** `v.place` puts a plot where you say; there is no ready-made UI for dragging one.
 - **Between machines.** Tested on one machine with real links; not yet between two over the internet.
