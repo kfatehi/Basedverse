@@ -413,6 +413,7 @@ async def main():
         await b.js("clearInterval(highT)")
         await walk(a, await a.js("room.me.x"), await a.js("room.me.z"), 3.14159 / 2, 2.0, "room.where === null")
         check("and A walks off again, home on the ground (not back up where it crossed)", (await b.until("v.visitors.length === 0"), abs(await a.js("room.me.y")) < 0.05), (True, True))
+        await a.js("room.me.y = 0")   # on the ground again whatever the case above found, so what follows starts as it always has
 
         print("\neach one's view of the other: where the other has put it, nothing more")
         ka, kb = await b.js("v.offices.find(o => o.name === 'A').key"), await a.js("v.offices.find(o => o.name === 'B').key")
