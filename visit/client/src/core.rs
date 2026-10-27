@@ -153,6 +153,8 @@ struct Visit {
     /// Who the host says is near this office's user in its room (visitor side, 8.7), by key: they are heard in
     /// person, and a call or a room voice with them goes quiet.
     near_keys: Vec<String>,
+    /// The name the other office's user goes by (8.9: `user`, as their page said), if they gave one.
+    peer_user: Option<String>,
 }
 
 /// Where everyone in this office's room is (8.7), in metres, as its page last said: its own user (none while they
@@ -268,6 +270,8 @@ pub struct Core {
     media_waiting: HashMap<String, Vec<MediaTo>>,
     /// The last pictures kept (MEDIA_RECENT): one asked for while still on its way into the database is had here.
     media_recent: VecDeque<(String, String, Bytes)>,
+    /// The name this office's user goes by (8.9), as its page said (`user`): shown to others with what they say.
+    user_name: Option<String>,
     /// The room voice this office's user is in (8.7), by its room's owner's key (this office's own: its own room's);
     /// and who else is in this office's own room's voice, by key (their names).
     room_voice: Option<String>,
@@ -331,6 +335,7 @@ impl Core {
             media_asked: HashMap::new(),
             media_waiting: HashMap::new(),
             media_recent: VecDeque::new(),
+            user_name: None,
             room_voice: None,
             voice_members: BTreeMap::new(),
             banned_by: HashMap::new(),
@@ -514,6 +519,7 @@ impl Core {
             "max_visitors": self.max_visitors, "visits": visits, "key": self.key, "door": self.door(), "guests": self.guests(),
             "layout": self.saved.layout_json(), "avatars": self.saved.avatars_json(), "voice_range": VOICE_RANGE, "kept": self.lands.kept_json(),
             "seen": self.seen_in.iter().map(|(k, (name, at))| json!({ "key": k, "name": name, "at": at })).collect::<Vec<_>>(),
+            "users": self.users_json(),
             "bans": self.saved.bans_json(), "banned_by": self.banned_by_json(), "room_voice": self.room_voice_json(), "voice_members": self.voice_members_json(),
         }));
         if let Some(view) = self.lobby_view.clone() {
@@ -825,7 +831,7 @@ impl Core {
                 }
                 // As it goes (its pictures and links with it), and as it is kept (a lobby line comes back from the
                 // lobby, and is kept then).
-                let mut line = json!({ "key": self.key, "name": self.office.get("name"), "text": text });
+                let mut line = json!({ "key": self.key, "name": self.my_name(), "text": text });
                 attach(&mut line, media, links);
                 let mut mine = line.clone();
                 mine["type"] = json!("chat");
@@ -866,6 +872,20 @@ impl Core {
                     self.say_out(line);
                 }
                 self.keep_chat(mine);
+            }
+            // The name this office's user goes by (8.9; null: none, this office's own): told to every office linked
+            // with it, and to each that links.
+            "user" => {
+                let name = m.get("name").and_then(Value::as_str).map(state::clip_name).map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+                if name == self.user_name {
+                    return;
+                }
+                self.user_name = name.clone();
+                for v in self.visits.values().filter(|v| v.up) {
+                    let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "user": { "name": name } })));
+                }
+                self.tell_near();
+                self.tell_voice_members();
             }
             // A picture the page would show (8.12): sent to it (a binary message, never dropped) once this office has
             // it, or `media_none`.
@@ -1400,7 +1420,7 @@ impl Core {
         }
         if allowed & frames::VOICE_CHANNEL != 0 {
             let Some(room) = self.room_voice.clone() else { return };
-            let head = frames::relay_head(&self.key, self.office.get("name").and_then(Value::as_str).unwrap_or(""), &voice);
+            let head = frames::relay_head(&self.key, self.my_name().as_str().unwrap_or(""), &voice);
             if room == self.key {   // this office's own room's voice: to everyone in it
                 for key in self.voice_members.keys() {
                     self.voice_to(key, false, &head);
@@ -1420,7 +1440,7 @@ impl Core {
     fn voice_in(&mut self, id: &str, data: Bytes, relayed: bool) {
         let Some(v) = self.visits.get(id).filter(|v| v.up) else { return };
         let (ch, role, inside, call_on, speaker, visit) = (v.channel, v.role, v.inside, v.call_on, v.speaker, v.id.clone());
-        let name = v.peer.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+        let name = person(v).as_str().unwrap_or("").to_string();
         let key = v.peer.get("key").and_then(Value::as_str).unwrap_or("").to_string();
         let near = !relayed && self.in_person(&key);
         if role == Role::Visitor && inside {   // the room this office's user is in: its owner's voice, or one passed on
@@ -1463,7 +1483,7 @@ impl Core {
         let Some(v) = self.visits.get(id).filter(|v| v.up) else { return };
         let ch = v.channel;
         let key = v.peer.get("key").and_then(Value::as_str).unwrap_or("").to_string();
-        let name = v.peer.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+        let name = person(v).as_str().unwrap_or("").to_string();
         let Some((who, _, voice)) = frames::relay_parts(&data) else { return };
         if up {
             if !self.voice_members.contains_key(&key) || self.voice_banned(&key) {
@@ -1584,7 +1604,7 @@ impl Core {
     fn voice_members_json(&self) -> Value {
         let mut list: Vec<Value> = Vec::new();
         if self.room_voice.as_deref() == Some(self.key.as_str()) {
-            list.push(json!({ "key": self.key, "name": self.office.get("name") }));
+            list.push(json!({ "key": self.key, "name": self.my_name() }));
         }
         list.extend(self.voice_members.iter().map(|(k, n)| json!({ "key": k, "name": n })));
         json!(list)
@@ -1629,14 +1649,14 @@ impl Core {
     /// and each visitor in it (`near`, over its link); with a call on speaker, its caller for those near the
     /// phone. Told when it changes; their distances, at most every NEAR_EVERY.
     fn tell_near(&mut self) {
-        let me_entry = json!({ "key": self.key, "name": self.office.get("name").cloned().unwrap_or(Value::Null) });
+        let me_entry = json!({ "key": self.key, "name": self.my_name() });
         let mut people: Vec<(u16, [f64; 3], Value)> = self.voice.me.map(|me| (0, me, me_entry)).into_iter().collect();
         for v in self.visits.values().filter(|v| v.up && v.role == Role::Host && v.inside && !self.voice_banned(v.peer.get("key").and_then(Value::as_str).unwrap_or(""))) {
             if let Some(at) = self.voice.visitors.get(&v.channel) {
-                people.push((v.channel, *at, json!({ "key": v.peer.get("key"), "name": v.peer.get("name"), "id": v.id })));
+                people.push((v.channel, *at, json!({ "key": v.peer.get("key"), "name": person(v), "id": v.id })));
             }
         }
-        let caller = self.visits.values().find(|v| v.up && v.call_on && v.speaker).map(|v| v.peer.get("name").cloned().unwrap_or(Value::Null));
+        let caller = self.visits.values().find(|v| v.up && v.call_on && v.speaker).map(person);
         let mut lists: Vec<(u16, Vec<Value>)> = Vec::new();
         for (ch, at, _) in &people {
             let mut near: Vec<Value> = people.iter().filter(|(o, p, _)| o != ch && flat(*p, *at) <= VOICE_RANGE).map(|(_, p, e)| {
@@ -1654,7 +1674,7 @@ impl Core {
         if let Some(me) = self.voice.me {   // across a plot's side (8.7): friends near in both worlds, for this office's page
             if let Some((_, near)) = lists.iter_mut().find(|(c, _)| *c == 0) {
                 for (key, p) in self.voice.world.iter().filter(|(k, p)| self.seam(k) && flat(**p, me) <= VOICE_RANGE) {
-                    let name = self.visits.values().find(|v| v.peer.get("key").and_then(Value::as_str) == Some(key.as_str())).and_then(|v| v.peer.get("name").cloned());
+                    let name = self.visits.values().find(|v| v.peer.get("key").and_then(Value::as_str) == Some(key.as_str())).map(person);
                     near.push(json!({ "key": key, "name": name, "distance": flat(*p, me).round(), "world": true }));
                 }
             }
@@ -1939,7 +1959,10 @@ impl Core {
                 if let (Some(text), Some(id)) = (m.get("text").and_then(Value::as_str).and_then(said), s(&from["id"], 40)) {
                     let key = s(&from["key"], 100).filter(|k| state::key_ok(k));
                     let scope = if t == "whisper" { "whisper" } else { "lobby" };
-                    self.to_page(json!({ "type": "chat", "scope": scope, "id": id, "key": key, "name": s(&from["name"], 24).unwrap_or_default(), "text": text }));
+                    // By the name they go by, if a link with them says it (the lobby knows offices only)
+                    let user = key.as_deref().and_then(|k| self.visits.values().find(|v| v.peer.get("key").and_then(Value::as_str) == Some(k) && v.peer_user.is_some())).map(person);
+                    let name = user.unwrap_or_else(|| json!(s(&from["name"], 24).unwrap_or_default()));
+                    self.to_page(json!({ "type": "chat", "scope": scope, "id": id, "key": key, "name": name, "text": text }));
                 }
             }
             "knock_cancelled" => {
@@ -2042,7 +2065,7 @@ impl Core {
                     last_seq: 0, inputs: (Instant::now(), 0), want_key: false, host_state: None, ctl: (Instant::now(), 0), key_asked: None, resync_asked: None, resync_due: false,
                     points: (Instant::now(), 0), guest, watch, inside: !watch, shared_adds: false, link, in_world: false, avatar_asked: false, possessions_asked: Vec::new(), peer_possessions: json!([]), peer_phone: false,
                     call_on: false, speaker: false, says: (Instant::now(), 0),
-                    landscapes: false, land_sent: None, land_hash: None, near_keys: Vec::new(),
+                    landscapes: false, land_sent: None, land_hash: None, near_keys: Vec::new(), peer_user: None,
                 });
             }
             Err(e) => {
@@ -2115,6 +2138,19 @@ impl Core {
     /// The visit whose room this office is in: where its input and points go.
     fn visiting(&self) -> Option<&Visit> {
         self.visits.values().find(|v| v.role == Role::Visitor && v.up && v.inside)
+    }
+
+    /// The name this office's user goes by (8.9): theirs, as their page said, else this office's.
+    fn my_name(&self) -> Value {
+        self.user_name.clone().map_or_else(|| self.office.get("name").cloned().unwrap_or(Value::Null), Value::from)
+    }
+
+    /// The names the users of offices linked with this one go by, for a page that connects (8.9).
+    fn users_json(&self) -> Value {
+        let mut seen = HashSet::new();
+        json!(self.visits.values().filter(|v| v.up && v.peer_user.is_some())
+            .filter_map(|v| v.peer.get("key").and_then(Value::as_str).filter(|k| seen.insert(k.to_string())).map(|k| json!({ "key": k, "name": v.peer_user })))
+            .collect::<Vec<_>>())
     }
 
     /// The lobby's id of the office with this key, if it is in the lobby.
@@ -2237,6 +2273,9 @@ impl Core {
         if let Some(b) = self.saved.bans.iter().find(|b| b.key == key) {   // kept out of this room's voice or chat (8.9)
             let _ = cmd.try_send(LinkCmd::Ctl(json!({ "banned": { "voice": b.voice, "chat": b.chat } })));
         }
+        if let Some(name) = &self.user_name {   // the name this office's user goes by (8.9)
+            let _ = cmd.try_send(LinkCmd::Ctl(json!({ "user": { "name": name } })));
+        }
         if self.room_voice.as_deref() == Some(key.as_str()) {   // in its room's voice: still
             let _ = cmd.try_send(LinkCmd::Ctl(json!({ "voice_join": true })));
         }
@@ -2294,7 +2333,7 @@ impl Core {
             if (text.is_empty() && media.is_empty() && links.is_empty()) || !counted(&mut v.says) {
                 return;
             }
-            let (key, name) = (v.peer.get("key").cloned().unwrap_or(Value::Null), v.peer.get("name").cloned().unwrap_or(Value::Null));
+            let (key, name) = (v.peer.get("key").cloned().unwrap_or(Value::Null), person(v));
             if self.chat_banned(key.as_str().unwrap_or("")) {   // kept out of this room's chat
                 return;
             }
@@ -2315,7 +2354,7 @@ impl Core {
             if (text.is_empty() && media.is_empty() && links.is_empty()) || !counted(&mut v.says) {
                 return;
             }
-            let (key, name) = (v.peer.get("key").and_then(Value::as_str).unwrap_or("").to_string(), v.peer.get("name").cloned().unwrap_or(Value::Null));
+            let (key, name) = (v.peer.get("key").and_then(Value::as_str).unwrap_or("").to_string(), person(v));
             let mut line = json!({ "type": "chat", "scope": "whisper", "id": self.office_id_of(&key), "key": key, "name": name, "text": text });
             attach(&mut line, media, links);
             self.want_media(&line, id);
@@ -2331,7 +2370,17 @@ impl Core {
             }
             return;
         }
-        let (key, name) = (v.peer.get("key").and_then(Value::as_str).unwrap_or("").to_string(), v.peer.get("name").cloned().unwrap_or(Value::Null));
+        if let Some(u) = m.get("user") {   // the name the other office's user goes by (8.9), or none now
+            v.peer_user = u.get("name").and_then(Value::as_str).map(state::clip_name).map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+            let (key, user) = (v.peer.get("key").and_then(Value::as_str).unwrap_or("").to_string(), person(v));
+            if let Some(n) = self.voice_members.get_mut(&key) {
+                *n = user.clone();
+                self.tell_voice_members();
+            }
+            self.to_page(json!({ "type": "user", "key": key, "name": user }));
+            return self.tell_near();
+        }
+        let (key, name, user) = (v.peer.get("key").and_then(Value::as_str).unwrap_or("").to_string(), v.peer.get("name").cloned().unwrap_or(Value::Null), person(v));
         if let Some(near) = m.get("world_near").and_then(Value::as_bool) {   // the other office has this one within reach in its world, both at home (8.7)
             if near { self.voice.world_heard.insert(key) } else { self.voice.world_heard.remove(&key) };
             return self.tell_near();
@@ -2341,7 +2390,7 @@ impl Core {
                 self.to_peer(&key, json!({ "voice_out": "banned" }));
                 return;
             }
-            let changed = if on { self.voice_members.insert(key, name).is_none() } else { self.voice_members.remove(&key).is_some() };
+            let changed = if on { self.voice_members.insert(key, user).is_none() } else { self.voice_members.remove(&key).is_some() };
             if changed || on {
                 self.tell_voice_members();
             }
@@ -2457,7 +2506,7 @@ impl Core {
                 } else if let Some(text) = m.get("say").filter(|_| v.inside).and_then(Value::as_str).map(said_text) {
                     let (media, links) = media::attachments(&m);
                     if (!text.is_empty() || !media.is_empty() || !links.is_empty()) && counted(&mut v.says) {
-                        let mut line = json!({ "key": v.peer.get("key"), "name": v.peer.get("name"), "id": v.id, "text": text });
+                        let mut line = json!({ "key": v.peer.get("key"), "name": person(v), "id": v.id, "text": text });
                         attach(&mut line, media, links);
                         self.want_media(&line, id);
                         self.say_in(ch, line);
@@ -2638,6 +2687,11 @@ fn said(text: &str) -> Option<String> {
 fn said_text(text: &str) -> String {
     let t: String = text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().trim().chars().take(SAY_LEN).collect();
     t.trim_end().to_string()
+}
+
+/// The name the other office's user goes by (8.9): theirs, if they said one (`user`), else their office's.
+fn person(v: &Visit) -> Value {
+    v.peer_user.clone().map_or_else(|| v.peer.get("name").cloned().unwrap_or(Value::Null), Value::from)
 }
 
 /// A line's pictures and links (8.12), set on it if it has any.

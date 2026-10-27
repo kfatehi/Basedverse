@@ -694,6 +694,11 @@ async def main():
         check("A hears B: B's voice decoded and played at A, from where B stands (the fake microphone's tone)", await a.until(
             "(s => !!s && s.frames > 50 && s.level > 0.01 && s.near)(v._voices.get(v.voices[0].key))"), True)
         check("and B hears A, from where B has A in its room", await b.until("(s => !!s && s.frames > 50 && s.level > 0.01 && s.near)(v._voices.get(v.voices[0].key))"), True)
+        await a.js("v.setName('Ann')")
+        check("A gives the name its user goes by: B's panel row and who is near B say it", (await b.until(
+            "[...document.querySelectorAll('.visit-panel button.who')].some(b => b.textContent.includes('Ann (A)'))"), await b.until("v.voices.some(x => x.name === 'Ann')")), (True, True))
+        await a.js("v.setName(null)")
+        await b.until("v.voices.some(x => x.name === 'A')")
         check("B's panel shows A near, speaking", await b.until("document.querySelector('.visit-panel').textContent.includes('🔊 A')"), True)
         check("A's view of B's room draws a 🔊 over B, as A hears B (Visit's own, by default)", await a.until(
             "(b => !!b && [...b.by.keys()].some(k => k.startsWith('speak:')))(v._viewer && v._viewer.scene && v._viewer.scene.bubbles)"), True)
@@ -782,13 +787,22 @@ async def main():
         check("B, with A linked (visiting): its own room's chat among the choices", await b.js(f"[...{cw}.querySelector('select').options].map(o => o.textContent)"),
               ["Say:", "Tell A:", "To your room:", "To A's room:", "Lobby:"])
         await b.call("Input.insertText", text="/w ")
-        check("/w and a space: the names it could be, over the box", await b.until(f"{cw}.querySelector('.names').textContent"), "Tab: A")
+        check("/w and a space: the names it could be, over the box, to pick", await b.until(f"[...{cw}.querySelectorAll('.names button')].map(b => b.textContent).join()"), "A")
         await b.key("Tab", "Tab", 9, True)
         await b.key("Tab", "Tab", 9, False)
         check("Tab finishes the name, not yet taken (a longer one could follow)", await b.until(f"(c => c.querySelector('input').value === '/w A' && c.dataset.scope)({cw})"), "lobby")
         await b.call("Input.insertText", text=" ")
         check("then a space: the box whispers to A, the names gone", await b.until(
             f"(c => c.dataset.scope === 'whisper' && c.querySelector('select').selectedOptions[0].textContent === 'Tell A:' && c.querySelector('input').value === '' && c.querySelector('.names').textContent)({cw})"), "")
+        await b.call("Input.insertText", text="hey @")
+        check("@ in a line: whom it could mention, over the box", await b.until(f"[...{cw}.querySelectorAll('.names button')].map(b => b.textContent).join()"), "A")
+        await b.key("Enter", "Enter", 13, True)
+        await b.key("Enter", "Enter", 13, False)
+        check("Enter takes it: the name in the line, nothing said yet", await b.until(
+            f"(c => c.querySelector('input').value === 'hey @A ' && c.classList.contains('typing') && !c.querySelector('.names button'))({cw})"), True)
+        check("a line that mentions A (@A), however it comes: A's window shows it apart, and the line says so; @Ab is no mention", await a.js(
+            "(v._chatMsg({ type: 'chat', scope: 'lobby', id: 'o-test', key: 'k', name: 'Zed', text: 'look, @A' }, false), v._chatMsg({ type: 'chat', scope: 'lobby', id: 'o-test', key: 'k', name: 'Zed', text: 'hey @Ab' }, false),"
+            f" (l => [v.chatLog.at(-2).mention, v.chatLog.at(-1).mention, l.at(-2).classList.contains('mention'), l.at(-1).classList.contains('mention')])([...{cw}.querySelectorAll('.log .line')]))"), [True, False, True, False])
         await b.key("Escape", "Escape", 27, True)
         await b.key("Escape", "Escape", 27, False)
         await enter(a)

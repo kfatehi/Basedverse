@@ -382,6 +382,9 @@ visit.host({
   (`Visit.bubble(THREE, text, unit)` makes one). Make sure your room's keys ignore a text box (WASD there is typing,
   not walking), and leave Enter and `/` to the chat window. Something of yours bottom left: move the window
   (`--visit-chat-left`, `--visit-chat-bottom` in your CSS).
+- **Your user's name** (if your room knows it): `visit.setName(name)`, now and whenever it changes. Others then see
+  it with what your user says, over their voice, and in their panel ("Ann (Duckroom)"); without it, your office's
+  name.
 - **Positions and bodies** ([MODELS.md](MODELS.md): read it first, and follow it). Where someone is, is where
   their **feet** are: your `spawn` and `move` return that, never their eyes. Give your user's body with
   `visit.avatar(model)`: a model of its own, its feet at its origin, facing −z, in metres, with an `eyes` point and

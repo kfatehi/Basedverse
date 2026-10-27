@@ -9,6 +9,23 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.20.1 — 2026-10-27
+
+**People go by their own names.** What you say showed as your office's name ("[Duckroom] says: …"), never yours.
+Now a room tells Visit its user's name, and everyone linked with you sees it: with your lines and whispers, over your
+voice, in a room's voice, and in their panel ("thinger burgoon (Duckroom)"). A room is still named by its office
+("Gooshy's room"). A lobby line shows your name to those linked with you, your office's to the rest (the lobby knows
+offices only). An older Visit shows your office's name, as before.
+
+**@ mentions.** Type `@` in the chat box and pick whom you mean from the names over it (up and down, Tab or Enter,
+or a click); the same list now shows after `/w` and `/room`. A line that mentions you (`@` and your name) stands
+out in your chat window and chimes, whatever its scope; the `chat` event's line says so (`mention`).
+
+### What an integration does
+
+1. Get visit-client 0.20.1 (then `visit-client migrate`, as after every upgrade: nothing new to migrate this time).
+2. If your room knows its user's name: `visit.setName(name)`, once connected and whenever it changes.
+
 ## v0.20.0 — 2026-10-27
 
 **visit-client needs a database now: Postgres, beside it.** It keeps your chat there (every line, yours too: a

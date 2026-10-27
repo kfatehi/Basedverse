@@ -13,7 +13,7 @@
 // visitor's page walks at once and the host corrects it), and a host renders and encodes nothing for anyone.
 "use strict";
 (function () {
-  const VERSION = "0.20.0", PROTO = "basedverse-visit-local/2";
+  const VERSION = "0.20.1", PROTO = "basedverse-visit-local/2";
   const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, LOOK = 0.0025;
   const POINT_MS = 200, AIM_MS = 125;   // a visitor's points, at most one this often; what it aims at, looked for this often
   // A visitor's up and down (SPEC 8.2: its input's `up`), as WoW flies: what they do is the room's (its move).
@@ -681,6 +681,8 @@
       this.voiceMembers = [];  // who is in your own room's voice, you too if you are: [{ key, name, speaking }]
       this.bans = [];          // whom you keep out of your room's voice or chat (8.9): [{ key, name, voice, chat }]
       this.bannedBy = [];      // rooms that keep you out of their voice or chat: [{ key, name, voice, chat }]
+      this._userName = null;      // the name your user goes by (8.9), as setName gave it
+      this._users = new Map();    // the names linked offices' users go by, by key (8.9)
       this._asks = new Map();     // what the page asked its visit-client and waits for (history, shared, preview), by req
       this._reqN = 0;
       this._puts = new Map();     // pictures being kept (8.12), by slot: { resolve, reject, t }
@@ -805,6 +807,7 @@
       this._nearHome = []; this._nearBy.clear(); this._whereTold.sig = "";
       this.seen = (Array.isArray(m.seen) ? m.seen : []).filter(x => isObj(x) && isObj(x.at)).map(x => ({ key: String(x.key), name: String(x.name || ""), at: x.at }));
       this.bans = bansFrom(m.bans); this.bannedBy = bansFrom(m.banned_by); this.voiceMembers = membersFrom(m.voice_members);
+      this._users = new Map((Array.isArray(m.users) ? m.users : []).filter(u => isObj(u) && typeof u.key === "string" && typeof u.name === "string").map(u => [u.key, u.name]));
       this._roomVoiceFrom(m.room_voice);
       this.knocks = []; this.knocking = [];
       this._avatarsFrom(m.avatars);
@@ -819,6 +822,7 @@
           .then(p => { if (p.state === "granted") return this.setMic(true); }).catch(e => console.warn("visit: the microphone did not come back on", e));
       }
       if (this._own.length) this._possessionsSend();   // nor its possessions
+      if (this._userName) this._send({ type: "user", name: this._userName });   // nor the name your user goes by
       if (this._avatarOwn) this._avatarSend();   // a visit-client that came back has no avatar of this office's
       if (this._hooks) this._sendHost();   // a visit-client that came back: this page hosts, again
       if (this._world) this._send({ type: "world", on: true });
@@ -872,6 +876,7 @@
         case "media_none": { const w = this._mediaWait.get(m.id); this._mediaWait.delete(m.id); this._media.delete(m.id); if (w) w(null); break; }
         case "preview": case "history": case "shared": { const a = this._asks.get(m.req); if (a) { this._asks.delete(m.req); a.resolve(m); } break; }
         case "bans": this.bans = bansFrom(m.bans); this._changed(); break;
+        case "user": if (typeof m.name === "string" && m.name) this._users.set(String(m.key), m.name); else this._users.delete(String(m.key)); this._changed(); break;
         case "banned": {   // a room that keeps your user out of its voice or its chat (8.9), or no longer
           const b = bansFrom([m])[0];
           if (!b) break;
@@ -1694,6 +1699,20 @@
       return "room:" + (r.kind === "home" ? this.key || "" : ((r.w && r.w.host) || (this.visiting && this.visiting.host) || {}).key || "");
     }
 
+    // ---------- who you are (8.9) ----------
+    // The name your user goes by (1 to 24 characters; null: your office's), shown to others with what they say, over
+    // their voice, in a room's voice, and in their panel: told to everyone linked with you, now and as they link.
+    setName(name) {
+      const n = name == null ? null : [...String(name).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim()].slice(0, 24).join("").trim() || null;
+      if (n === this._userName) return;
+      this._userName = n;
+      this._send({ type: "user", name: n });
+      this._changed();
+    }
+    get userName() { return this._userName; }
+    // The name the user of the office with this key goes by, if they said one (else null: their office's name).
+    userOf(key) { return this._users.get(key) || null; }
+
     // ---------- pictures and links in chat (8.12) ----------
     // Share a picture (a Blob or File, as pasted or dropped: PNG, JPEG, WebP or GIF; a bigger one, or another kind, is
     // made smaller as WebP first): kept by your visit-client, in its database. Resolves to { id, mime, size }, for
@@ -1817,7 +1836,14 @@
     _hasContent(c) { return !!c.text || (c.media && c.media.length > 0) || (c.links && c.links.length > 0); }
     _lineOf(c, old) {
       return { scope: c.scope || "say", key: c.key, name: c.name, text: c.text, mine: !!c.mine, owner: !!c.owner, id: c.id || null, channel: c.channel, to: c.to || null,
-        media: c.media || [], links: c.links || [], conversation: c.conversation || null, at: old ? c.at : Date.now(), ...(old ? { old: true } : {}) };
+        media: c.media || [], links: c.links || [], conversation: c.conversation || null, mention: !c.mine && this._mentions(c.text),
+        at: old ? c.at : Date.now(), ...(old ? { old: true } : {}) };
+    }
+    // Whether a line mentions your user (8.9): @ and the name they go by, or your office's, as a word of its own.
+    _mentions(text) {
+      const t = String(text || "");
+      return t.includes("@") && [this._userName, this.office && this.office.name].filter(Boolean)
+        .some(n => new RegExp("(^|[\\s([{\"'])@" + n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "(?![\\p{L}\\p{N}_])", "iu").test(t));
     }
     _chatIn(c, old) {
       if (!this._hasContent(c)) return;
@@ -3947,14 +3973,16 @@
           const k = p.key || p.id, open = opened.has(k), inside = p.links.find(l => l.inside && l.where === "corner");
           const state = p.visit ? "in your room" : p.there || inside ? "you are in their room" : "linked";
           const back = p.there ? `<button data-v="leave">Leave</button>` : inside ? `<button data-v="step_out" data-x="${esc(inside.id)}" title="your own room; theirs back in the corner">Back to my room</button>` : "";
-          rows.push(`<div class="row">${dot}${star(p.key, p.name)}<button class="who grow" data-v="more" data-p="${esc(k)}" title="${open ? "less" : "more: where you see each other, their look, Unlink"}"><b>${esc(p.name)}</b> <span class="muted">· ${state}</span></button>${back}<button class="caret" data-v="more" data-p="${esc(k)}">${open ? "▾" : "▸"}</button></div>`);
+          const who = (p.key && v.userOf(p.key)) || p.name, room = who !== p.name ? ` <span class="muted">(${esc(p.name)})</span>` : "";   // the name they go by, their office's after it
+          rows.push(`<div class="row">${dot}${star(p.key, p.name)}<button class="who grow" data-v="more" data-p="${esc(k)}" title="${open ? "less" : "more: where you see each other, their look, Unlink"}"><b>${esc(who)}</b>${room} <span class="muted">· ${state}</span></button>${back}<button class="caret" data-v="more" data-p="${esc(k)}">${open ? "▾" : "▸"}</button></div>`);
           if (open) rows.push(more(p));
           continue;
         }
         if (!o) continue;
         const word = o.links ? "Link" : "Knock", asking = v.knocking.some(k => k.to === o.id);
         const why = !o.ready ? "not ready" : o.status !== "available" ? o.status : !o.links && o.visitors >= o.maxVisitors ? "full" : asking ? "asking…" : "";
-        rows.push(`<div class="row">${dot}${star(o.key, o.name)}<span class="grow" title="${esc(o.name)}">${esc(o.name)} <span class="muted">${esc(o.sim.name || "")} ${o.visitors}/${o.maxVisitors}</span></span>
+        const ou = o.key && v.userOf(o.key);
+        rows.push(`<div class="row">${dot}${star(o.key, o.name)}<span class="grow" title="${esc(o.name)}">${ou ? `<b>${esc(ou)}</b> <span class="muted">(${esc(o.name)})</span>` : esc(o.name)} <span class="muted">${esc(o.sim.name || "")} ${o.visitors}/${o.maxVisitors}</span></span>
           <button data-v="knock" data-o="${esc(o.id)}" ${why ? `disabled title="${esc(why)}"` : `title="${o.links ? "see their room in a corner, once they say yes: then go there, or put it in your world" : "an older Visit: you walk into their room once they say yes"}"`}>${asking ? `${word}ing…` : word}</button></div>`);
         if (composing === o.id) rows.push(`<form class="row" data-o="${esc(o.id)}"><input maxlength="280" placeholder="a message for ${esc(o.name)}"><button class="go">${word}</button></form>`);
       }
@@ -4092,8 +4120,11 @@
 .visit-chat .line.sim, .visit-chat[data-scope=sim] form { color: #aaaaff; }
 .visit-chat .line.lobby, .visit-chat[data-scope=lobby] form { color: #ffc864; }
 .visit-chat .line.note { color: #ffff00; }
-.visit-chat .names { margin-top: 4px; padding: 0 8px; font-size: 85%; color: #c9d1d9; text-shadow: 0 1px 2px #000, 0 0 4px #000; }
+.visit-chat .names { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; padding: 0 8px; font-size: 85%; }
 .visit-chat .names:empty { display: none; }
+.visit-chat .names button { font: inherit; color: #c9d1d9; background: rgba(22,27,34,.92); border: 1px solid #30363d; border-radius: 4px; padding: 0 6px; cursor: pointer; }
+.visit-chat .names button.on { color: #fff; background: #1f2a44; border-color: #aaaaff; }
+.visit-chat .line.mention { background: rgba(255,200,100,.16); border-left: 3px solid #ffc864; padding-left: 5px; border-radius: 3px; }
 .visit-chat form { display: none; align-items: center; gap: 4px; margin-top: 4px; padding: 3px 6px; background: rgba(0,0,0,.7); border: 1px solid #6e7681; border-radius: 6px; }
 .visit-chat.typing form { display: flex; }
 .visit-chat select { font: inherit; color: inherit; background: none; border: 0; padding: 0; max-width: 45%; cursor: pointer; }
@@ -4146,7 +4177,7 @@
     const bellSay = () => { bell.textContent = quiet ? "🔕" : "🔔"; bell.title = quiet ? "no sound with a line (click: a sound)" : "a sound with each line (click: none)"; };
     bellSay();
     bell.addEventListener("click", () => { quiet = !quiet; try { localStorage.setItem("visit:chat-quiet", quiet ? "1" : "0"); } catch (e) { /* not kept */ } bellSay(); input.focus(); });
-    let to = { scope: "say" }, choices = [], typing = false, last = null, told = null, tab = null, fadeTimer = null, intro = null;
+    let to = { scope: "say" }, choices = [], typing = false, last = null, told = null, fadeTimer = null, intro = null;
     try {   // where lines went before a reload (this tab)
       const t = JSON.parse(sessionStorage.getItem("visit:chat-to") || "null");
       if (isObj(t) && ["say", "whisper", "sim", "lobby"].includes(t.scope)) to = { scope: t.scope, ...["key", "id", "name"].reduce((o, k) => (typeof t[k] === "string" ? { ...o, [k]: t[k] } : o), {}) };
@@ -4196,7 +4227,7 @@
     };
     const lineEl = l => {   // a line: its text, then its pictures and its links' previews
       const d = document.createElement("div");
-      d.className = "line " + l.scope; d.textContent = shown(l);
+      d.className = "line " + l.scope + (l.mention ? " mention" : ""); d.textContent = shown(l);
       if (l.at) d.dataset.at = String(l.at);
       for (const p of l.media || []) d.appendChild(picture(p.id, "pic"));
       for (const c of l.links || []) d.appendChild(card(c));
@@ -4241,7 +4272,7 @@
       typing = true; root.classList.add("typing"); fill(); wake();
       input.value = start; input.focus();
     };
-    const close = () => { typing = false; root.classList.remove("typing"); input.value = ""; names.textContent = ""; tab = null; pending = []; linkCard = null; linkSkip.clear(); drawAttach(); if (root.contains(document.activeElement)) document.activeElement.blur(); wake(); };
+    const close = () => { typing = false; root.classList.remove("typing"); input.value = ""; picker = null; picked = null; drawPicker(); pending = []; linkCard = null; linkSkip.clear(); drawAttach(); if (root.contains(document.activeElement)) document.activeElement.blur(); wake(); };
     // The one of `list` whose name starts `rest`, then a space (the longest), or, on Enter (`done`), is all of it or
     // the one name it starts.
     const named = (list, rest, done) => {
@@ -4255,11 +4286,47 @@
     const naming = () => {
       const m = /^\/(w|t|whisper|tell|room|sim)\s([\s\S]*)$/i.exec(input.value);
       if (!m) return null;
-      const stem = tab ? tab.stem : m[2].toLowerCase(), rooms = /^(room|sim)$/i.test(m[1]);
+      const stem = m[2].toLowerCase(), rooms = /^(room|sim)$/i.test(m[1]);
       return { cmd: m[1], stem, names: (rooms ? v.chatTargets : v.whisperTargets).map(o => o.name).filter(n => n && n.toLowerCase().startsWith(stem)) };
     };
-    const hint = () => { const n = naming(); names.textContent = n && n.names.length ? `Tab: ${n.names.slice(0, 8).join(" · ")}${n.names.length > 8 ? " …" : ""}` : ""; };
-    const help = "/s say (everyone who can see you) · /w name (a whisper) · /r reply · /room (your room's chat) · /room name (a linked room's) · /1 the lobby · /voice (🎧) · Tab finishes a name";
+    // Whom a line may mention (@): those linked with you, your visitors, those in the lobby; by the names they go by.
+    const people = () => {
+      const by = new Map(), put = (key, name) => { if (key && key !== v.key && name && !by.has(key)) by.set(key, v.userOf(key) || name); };
+      for (const o of v.chatTargets) put(o.key, o.name);
+      for (const x of v.visitors) put(x.visitor.key, x.visitor.name);
+      for (const o of v.offices) if (!v.office || o.id !== v.office.id) put(o.key, o.name);
+      return [...new Set(by.values())].sort((a, b) => a.localeCompare(b));
+    };
+    // The names the box could take where it is typed (over it, to pick: up and down, Tab or Enter, or a click): after
+    // /w or /room, the name it is to; after @, someone the line mentions. Picked, it stays shut until the box changes.
+    let picker = null, picked = null;
+    const pickerFor = () => {
+      if (input.value === picked) return null;
+      const n = naming();
+      if (n) return n.names.length ? { items: n.names.slice(0, 8), take: name => { input.value = `/${n.cmd} ${name}`; } } : null;
+      const caret = input.selectionStart == null ? input.value.length : input.selectionStart, m = /(^|\s)@([^@\n]{0,24})$/.exec(input.value.slice(0, caret));
+      if (!m) return null;
+      const items = people().filter(p => p.toLowerCase().startsWith(m[2].toLowerCase())).slice(0, 8);
+      return items.length ? { items, take: name => {
+        const from = caret - m[2].length, at = from + name.length + 1;
+        input.value = input.value.slice(0, from) + name + " " + input.value.slice(caret);
+        input.setSelectionRange(at, at);
+      } } : null;
+    };
+    const drawPicker = () => { names.innerHTML = picker ? picker.items.map((n, i) => `<button type="button" data-i="${i}" class="${i === picker.at ? "on" : ""}">${esc(n)}</button>`).join("") : ""; };
+    const hint = () => {
+      const p = pickerFor(), same = p && picker && p.items.join("\n") === picker.items.join("\n");
+      picker = p ? Object.assign(p, { at: same ? picker.at : 0 }) : null;
+      drawPicker();
+    };
+    const take = i => {
+      if (!picker || !picker.items[i]) return;
+      picker.take(picker.items[i]);
+      picked = input.value; picker = null;
+      drawPicker();
+    };
+    names.addEventListener("mousedown", e => { const b = e.target.closest("button[data-i]"); if (b) { e.preventDefault(); take(Number(b.dataset.i)); input.focus(); } });
+    const help = "/s say (everyone who can see you) · /w name (a whisper) · /r reply · /room (your room's chat) · /room name (a linked room's) · /1 the lobby · /voice (🎧) · @ a name: mention them";
     // Pictures for the next line (pasted, or dropped on the window: each kept by the visit-client at once, `media`
     // once kept), and a link's preview (made as the link is typed; ✕: none for it).
     let pending = [], linkCard = null, linkTimer = null;
@@ -4393,18 +4460,17 @@
       if (done) input.value = "";
       return false;
     };
-    input.addEventListener("input", () => { tab = null; command(false); hint(); clearTimeout(linkTimer); linkTimer = setTimeout(linkLook, 500); });
+    input.addEventListener("input", () => { command(false); hint(); clearTimeout(linkTimer); linkTimer = setTimeout(linkLook, 500); });
+    input.addEventListener("click", hint);
+    input.addEventListener("keyup", e => { if (/^(ArrowLeft|ArrowRight|Home|End)$/.test(e.key)) hint(); });
     input.addEventListener("keydown", e => {
       e.stopPropagation();   // the page's own keys (walking) are not for this box
-      if (e.key === "Escape") { e.preventDefault(); close(); }
-      else if (e.key === "Tab" && !e.shiftKey) {   // the name being typed, finished (again: the next it could be)
-        const n = naming();
-        if (!n || !n.names.length) return;
+      if (e.key === "Escape") { e.preventDefault(); if (picker) { picked = input.value; picker = null; drawPicker(); } else close(); }
+      else if (picker && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
         e.preventDefault();
-        tab = { stem: n.stem, at: tab ? (tab.at + 1) % n.names.length : 0 };
-        input.value = `/${n.cmd} ${n.names[tab.at]}`;
-        hint();
-      }
+        picker.at = (picker.at + (e.key === "ArrowDown" ? 1 : picker.items.length - 1)) % picker.items.length;
+        drawPicker();
+      } else if (picker && (e.key === "Tab" || e.key === "Enter") && !e.shiftKey) { e.preventDefault(); take(picker.at); }
     });
     pick.addEventListener("change", () => { to = choices[Number(pick.value)] || { scope: "say" }; fill(); input.focus(); });
     // A line said where the box talks to: false (and why, said) if it could not be.
@@ -4438,7 +4504,7 @@
     };
     const onChat = l => {
       add(l);
-      if (!quiet && !l.mine && !l.old && l.scope !== "note") chatSound(l.scope);
+      if (!quiet && !l.mine && !l.old && l.scope !== "note") chatSound(l.mention ? "whisper" : l.scope);   // a mention chimes as a whisper does
       heard(l);
     };
     const heard = l => {   // whom /r answers: who last whispered to you, else whom you last whispered
@@ -4460,7 +4526,7 @@
     voiceIn = v.roomVoice && !v.roomVoice.joining ? v.roomVoice.key : null;
     voiceLine();
     for (const l of v.chatLog) { add(l); heard(l); }
-    intro = note("Enter to chat · paste a picture · 🖼 shared · 🎧 voice · /s say · /w whisper · /r reply · /room yours, /room name · /1 lobby · Tab finishes a name");
+    intro = note("Enter to chat · @ mention · paste a picture · 🖼 shared · 🎧 voice · /s say · /w whisper · /r reply · /room yours, /room name · /1 lobby");
     return {
       element: root, open, close,
       release() {

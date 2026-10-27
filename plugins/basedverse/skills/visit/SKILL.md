@@ -92,6 +92,7 @@ feature in a workroom's code. If the changelog has something newer than the tabl
 | 🔊 over who is speaking | 0.13 | vanilla | `visit.world(` (unless `speaking: false`) |
 | phone | 0.9, 0.13 | step 5 | `visit.phone(` (`model: false`: their own) |
 | chat bubbles | 0.11 | step 5 | `visit.say(`, `bubbles` |
+| your user's name, shown to others (chat, voice, panel) | 0.20.1 | step 5 | `visit.setName(` |
 | chat window, scopes (say, whisper, a room's chat, the lobby); a room's voice (🎧), bans (panel) | 0.15, 0.16, 0.20 | vanilla | the panel's chat window (`chat: false`: their own), `visit.say(text, to)` |
 | one panel row a person (their look, Kick, Unlink in it) | 0.16 | vanilla | the panel; visitors' own look by default (`visit.useAvatars(`) |
 | landscapes, offline plots | 0.12 | step 5 | `userData.visitStatic`, `visit.landscapeChanged(` |
