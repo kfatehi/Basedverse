@@ -13,7 +13,7 @@
 // visitor's page walks at once and the host corrects it), and a host renders and encodes nothing for anyone.
 "use strict";
 (function () {
-  const VERSION = "0.13.0", PROTO = "basedverse-visit-local/2";
+  const VERSION = "0.14.0", PROTO = "basedverse-visit-local/2";
   const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, LOOK = 0.0025;
   const POINT_MS = 200, AIM_MS = 125;   // a visitor's points, at most one this often; what it aims at, looked for this often
   // What the host hears many times a second: none of it changes what the page shows, so none fires "change".
@@ -44,6 +44,8 @@
   const LAND_QUIET = 1000;
   // A visitor starting gets the whole room once its visit-client says it reads landscapes, or after this long.
   const LAND_WAIT = 400;
+  // A canvas texture redrawn is encoded again in the background, and sent, at most this often (ms).
+  const TEX_EVERY = 1000;
   // Voice (SPEC 8.7): 20 ms of 48 kHz mono a packet, Opus at 24 kbps; played this far behind, to ride out jitter.
   // Heard within v.voiceRange metres (as visit-client says: VOICE_RANGE until it has), fading to nothing there. Who
   // hears whom the room's visit-client decides; a page's voice says where it may go: the room its user is in, their
@@ -340,7 +342,7 @@
       // `shared`: every visitor this round's edit goes to reads an added object that names what it has by uuid.
       // `statics`: the landscape (8.10), [object, its parent's record] in the scene's order; `landAt`, when it last changed.
       Object.assign(this, { cfg, objs: new Map(), next: 1, mats: new Map(), geos: new Map(), texs: new Map(), dynamic: new Set(), sent: new Set(), shared: false,
-        statics: [], staticSig: null, landDirty: false, landAt: 0,
+        statics: [], staticSig: null, landDirty: false, landAt: 0, enc: new Map(), perf: null,
         keyAt: 0, sceneSig: null, inter: [], interSig: null, tmp: { p: new t.Vector3(), q: new t.Quaternion(), s: new t.Vector3() } });
       this.scan(0);   // where everything is now: what the first whole scene shows
     }
@@ -401,7 +403,11 @@
       };
       for (const g of usedGeos) again(this.geos, g, Object.values(g.attributes || {}).map(a => a.version).join() + "|" + (g.index ? g.index.version : ""), 250, "geometry");
       if (root.background && root.background.isTexture) usedTexs.add(root.background);
-      for (const t of usedTexs) again(this.texs, t, t.version, 500, "texture");
+      for (const t of usedTexs) {   // a canvas redrawn: encoded in the background (_encode); anything else as it is
+        const c = t.image;
+        if (this.texs.has(t.uuid) && typeof HTMLCanvasElement !== "undefined" && c instanceof HTMLCanvasElement) this._encode(t, c, now, res);
+        else again(this.texs, t, t.version, 500, "texture");
+      }
       // What the scene no longer uses, a visitor's page lets go of (_sceneGc): it counts as unsent again, and
       // goes with whatever uses it next.
       const used = new Set([...usedMats, ...usedGeos, ...usedTexs].map(x => x.uuid));
@@ -504,15 +510,49 @@
       return { parent: parent ? parent.idx : 0, json, ids, targets: this.targets(r.o) };
     }
 
-    // Geometries, materials and textures to send again (or for the first time), as three.js's toJSON makes them.
+    // A canvas texture redrawn: its picture encoded by the browser in the background (WebP: toBlob, off this page's
+    // main thread), and sent once it is ready, at most every TEX_EVERY. A room that redraws a canvas every second (a
+    // board, a screen) then never stops to encode it while it has visitors.
+    _encode(t, c, now, res) {
+      const rec = this.texs.get(t.uuid), job = this.enc.get(t.uuid);
+      if (job && job.url) {   // ready: it goes now, as the picture it was then
+        Object.assign(rec, { ver: job.ver, at: now });
+        res.set(t.uuid, ["texture", t, job.url]);
+        this.enc.delete(t.uuid);
+        if (this.perf) this.perf("textures", performance.now() - job.t0);
+        return;
+      }
+      if (rec.ver === t.version || (job && job.busy) || now - rec.at < TEX_EVERY) return;
+      const j = { ver: t.version, busy: true, url: null, t0: performance.now() }, fail = () => { this.enc.delete(t.uuid); Object.assign(rec, { ver: j.ver, at: now }); res.set(t.uuid, ["texture", t]); };
+      this.enc.set(t.uuid, j);
+      try {
+        c.toBlob(b => {
+          if (!b) return this.enc.delete(t.uuid);
+          const r = new FileReader();
+          r.onload = () => { j.url = String(r.result); j.busy = false; };
+          r.onerror = () => this.enc.delete(t.uuid);
+          r.readAsDataURL(b);
+        }, "image/webp", 0.85);
+      } catch (e) { fail(); }   // (a canvas the browser will not encode this way: as before, at once)
+    }
+
+    // Geometries, materials and textures to send again (or for the first time), as three.js's toJSON makes them; a
+    // texture encoded already (_encode), with that picture, not one made now.
     _resources(items) {
       const meta = { geometries: {}, materials: {}, textures: {}, images: {}, shapes: {}, skeletons: {}, animations: {}, nodes: {} };
-      for (const [kind, x] of items) {
+      for (const [kind, x, url] of items) {
         if (kind === "geometry") {
           meta.geometries[x.uuid] = x.toJSON();
           for (const sh of list(x.parameters && x.parameters.shapes)) meta.shapes[sh.uuid] = sh.toJSON();
         } else if (kind === "material") meta.materials[x.uuid] = x.toJSON(meta);
-        else meta.textures[x.uuid] = x.toJSON(meta);
+        else if (url) {
+          const img = x.image, tiny = document.createElement("canvas");
+          tiny.width = tiny.height = 1;
+          x.image = tiny;   // (so that toJSON encodes nothing big)
+          try { meta.textures[x.uuid] = x.toJSON(meta); } finally { x.image = img; }
+          const im = meta.images[meta.textures[x.uuid].image];
+          if (im) im.url = url;
+        } else meta.textures[x.uuid] = x.toJSON(meta);
       }
       const out = {};
       for (const k of ["geometries", "materials", "textures", "images", "shapes"]) {
@@ -695,6 +735,12 @@
       this._kept = new Map((Array.isArray(m.kept) ? m.kept : []).filter(k => isObj(k) && typeof k.key === "string" && isObj(k.plot))
         .map(k => [k.key, { key: k.key, name: String(k.name || ""), plot: k.plot, unit: Number(k.unit) > 0 ? Number(k.unit) : 1, json: null, asked: false, built: null }]));
       this._landText = null;   // this room's landscape: to visit-client again (it may be a new one)
+      if (!this._perfAsked) {   // telemetry on, if it was on in this browser (or ?visit-perf=1)
+        this._perfAsked = true;
+        let on = /[?&]visit-perf=1\b/.test(location.search);
+        try { on = on || localStorage.getItem("visit:perf") === "on"; } catch (e) { /* not kept */ }
+        if (on) this.perf(true);
+      }
       if (this._sync) Object.assign(this._sync, { landDirty: true, landAt: 0 });
       this._nearHome = []; this._nearBy.clear(); this._whereTold.sig = "";
       this.seen = (Array.isArray(m.seen) ? m.seen : []).filter(x => isObj(x) && isObj(x.at)).map(x => ({ key: String(x.key), name: String(x.name || ""), at: x.at }));
@@ -1291,6 +1337,63 @@
       return w ? (w.host || (this.visiting && this.visiting.host)) : null;
     }
 
+    // ---------- telemetry: how this page is doing (v.perf) ----------
+    // On (the panel's ⏱, or v.perf(true); remembered in this browser), a second at a time: this page's frames (how
+    // many, the slowest), long tasks (the page stopped 50 ms or more: a stutter), and Visit's own work by part, in ms
+    // (scan: this room's scene looked over for changes; send: its edits made ready; whole: rooms sent whole to visitors
+    // starting; landscape: made again; world: your world walked and drawn; voice; textures: canvases encoded in the
+    // background, and how long they waited), with how much it had to do. Shown in a corner of the page; nothing leaves
+    // it. v.perfReport(): the last two minutes, a row a second, to copy.
+    perf(on = true) {
+      try { localStorage.setItem("visit:perf", on ? "on" : "off"); } catch (e) { /* not kept */ }
+      if (!on) { if (this._perf) { this._perf.stop(); this._perf = null; } return this._changed(); }
+      if (this._perf) return;
+      const p = this._perf = { at: performance.now(), cur: {}, rows: [], frames: [], last: performance.now(), long: [], running: true, el: null, obs: null };
+      const frame = t => { if (!p.running) return; p.frames.push(t - p.last); p.last = t; requestAnimationFrame(frame); };
+      requestAnimationFrame(frame);
+      try { p.obs = new PerformanceObserver(l => { for (const e of l.getEntries()) p.long.push(e.duration); }); p.obs.observe({ type: "longtask" }); } catch (e) { p.obs = null; }
+      const el = p.el = document.createElement("div");
+      el.className = "visit-perf";
+      el.style.cssText = "position:fixed;left:8px;bottom:8px;z-index:30;max-width:min(560px,calc(100vw - 16px));padding:6px 8px;border-radius:8px;" +
+        "font:11px/1.45 ui-monospace,Consolas,monospace;color:#e6edf3;background:rgba(13,17,23,.88);border:1px solid #2d333b;white-space:pre-wrap";
+      el.addEventListener("click", e => {
+        const b = e.target.closest("button[data-p]");
+        if (b && b.dataset.p === "copy") navigator.clipboard.writeText(JSON.stringify(this.perfReport(), null, 1)).then(() => { b.textContent = "copied"; }, () => { b.textContent = "could not copy"; });
+        else if (b) this.perf(false);
+      });
+      document.body.appendChild(el);
+      p.stop = () => { p.running = false; if (p.obs) p.obs.disconnect(); el.remove(); };
+      el.textContent = "⏱ measuring…";
+      this._changed();
+    }
+    perfReport() { return this._perf ? this._perf.rows.slice() : []; }
+    _pt(part, ms) {
+      const p = this._perf;
+      if (!p) return;
+      const x = p.cur[part] || (p.cur[part] = { n: 0, ms: 0, max: 0 });
+      x.n++; x.ms += ms; if (ms > x.max) x.max = ms;
+    }
+    _perfRoll(now) {
+      const p = this._perf, secs = (now - p.at) / 1000, r1 = x => Math.round(x * 10) / 10, sync = this._sync, w = this._world;
+      const gaps = p.frames.splice(0).sort((a, b) => a - b), long = p.long.splice(0);
+      const parts = Object.fromEntries(Object.entries(p.cur).map(([k, x]) => [k, { n: x.n, ms: r1(x.ms / secs), max: r1(x.max) }]));
+      const row = { t: Date.now(), fps: Math.round(gaps.length / secs), frame_p95_ms: gaps.length ? r1(gaps[Math.floor(gaps.length * 0.95)]) : null,
+        frame_max_ms: gaps.length ? r1(gaps[gaps.length - 1]) : null, long_tasks: long.length, long_max_ms: long.length ? r1(Math.max(...long)) : 0, parts,
+        counts: { visitors: [...this._hosted.values()].filter(h => h.inside).length, watchers: [...this._hosted.values()].filter(h => h.watch && !h.inside).length,
+          plots: w ? w.plots.length : 0, offline: w ? w.plots.filter(x => x.offline).length : 0, objects: sync ? sync.objs.size : 0,
+          landscape: sync ? sync.statics.length : 0, voices: this.voices.length, visiting: !!(this.visiting && this.visiting.inside) } };
+      p.rows.push(row); if (p.rows.length > 120) p.rows.shift();
+      p.cur = {}; p.at = now;
+      const all = Object.values(parts).reduce((n, x) => n + (x.n && x.ms), 0), c = row.counts;
+      const line = k => parts[k] ? `${k} ${parts[k].ms}${parts[k].max >= 8 ? ` (slowest ${parts[k].max})` : ""}` : null;
+      p.el.innerHTML = `<b>⏱ ${row.fps} fps</b> · slowest frame ${row.frame_max_ms ?? "–"} ms · ${row.long_tasks ? `<span style="color:#f85149">${row.long_tasks} stall${row.long_tasks > 1 ? "s" : ""} (${row.long_max_ms} ms)</span>` : "no stalls"}\n`
+        + `Visit ${r1(all)} ms a second: ${["scan", "send", "whole", "landscape", "world", "voice"].map(line).filter(Boolean).join(" · ") || "idle"}`
+        + (parts.textures ? `\npictures sent: ${parts.textures.n} (encoded in the background, ${parts.textures.max} ms at most)` : "")
+        + `\n${c.visitors} visitor${c.visitors === 1 ? "" : "s"} · ${c.watchers} watching · ${c.plots} plot${c.plots === 1 ? "" : "s"}${c.offline ? ` (${c.offline} offline)` : ""} · ${c.objects} objects`
+        + `${c.landscape ? ` + ${c.landscape} landscape` : ""}${c.voices ? ` · ${c.voices} near` : ""}\n`
+        + `<button data-p="copy" style="font:inherit;color:inherit;background:#161b22;border:1px solid #2d333b;border-radius:5px;padding:1px 6px;cursor:pointer">copy report</button> <button data-p="off" style="font:inherit;color:inherit;background:#161b22;border:1px solid #2d333b;border-radius:5px;padding:1px 6px;cursor:pointer">off</button>`;
+    }
+
     // ---------- chat (8.9) ----------
     // Say a line: everyone in the room your user is in sees it over their head for a few seconds (you too, over
     // yours), and nobody else, not even next door in a world. Plain text, at most 200 characters, 5 lines every 10 s
@@ -1602,12 +1705,14 @@
       try {
         if (!this._sync || this._sync.cfg !== this._hooks.scene) {   // a new scene, or numbered anew: everyone gets it whole
           this._sync = new SceneSync(this._hooks.scene);
+          this._sync.perf = (part, ms) => this._pt(part, ms);
           for (const h of hs) h.sceneSent = false;
         }
         const sync = this._sync, ready = hs.filter(h => h.sceneSent);
         sync.inter = this._interList();
         sync.shared = ready.every(h => h.sharedAdds);   // one visitor on an older Visit: every add whole, as it reads them
-        const { edit, moved } = sync.scan(now);
+        const t0 = this._perf ? performance.now() : 0, { edit, moved } = sync.scan(now);
+        if (this._perf) this._pt("scan", performance.now() - t0);
         if (edit && ready.length) this._sendScene(ready, edit);
         if (edit && edit.landscape) for (const h of ready) if (!h.landscapes) h.sceneSent = false;   // an older visitor: the whole room again, its landscape in it
         if (sync.landDirty && now - sync.landAt >= LAND_QUIET) this._landSend(sync);
@@ -1620,7 +1725,9 @@
         }
         for (const h of hs) {   // the whole room to a visitor starting: once its visit-client said it reads landscapes (8.10), or a moment on (an older one never says)
           if (h.sceneSent || (!h.landscapes && sync.statics.length && now - h.since < LAND_WAIT)) continue;
-          this._sendScene([h], sync.snapshot(h, this._hooks)); h.sceneSent = true; h.keyNext = true;
+          const t1 = this._perf ? performance.now() : 0, whole = sync.snapshot(h, this._hooks);
+          this._sendScene([h], whole, "whole"); h.sceneSent = true; h.keyNext = true;
+          if (this._perf) this._pt("whole", performance.now() - t1);
         }
       } catch (e) { console.error("visit: could not send the scene", e); }
     }
@@ -1631,7 +1738,9 @@
       sync.landDirty = false;
       if (!sync.statics.length) return;
       let text;
+      const t0 = this._perf ? performance.now() : 0;
       try { text = JSON.stringify(sync.landscape()); } catch (e) { return console.warn("visit: a landscape that does not turn into JSON", e); }
+      if (this._perf) this._pt("landscape", performance.now() - t0);
       if (text === this._landText) return;
       this._landText = text;
       this._sceneOut = (this._sceneOut || Promise.resolve()).then(async () => {
@@ -1649,9 +1758,11 @@
     landscapeChanged() { this._landText = null; if (this._sync) Object.assign(this._sync, { landDirty: true, landAt: 0 }); }
 
     // A scene edit to these visitors, gzipped, after any before it (SPEC 5.4: flags EDIT).
-    _sendScene(hs, edit) {
+    _sendScene(hs, edit, part = "send") {
       let text;
+      const t0 = this._perf ? performance.now() : 0;
       try { text = JSON.stringify(edit); } catch (e) { return console.warn("visit: a scene edit that does not turn into JSON", e); }
+      if (this._perf && part === "send") this._pt("send", performance.now() - t0);
       const channels = hs.map(h => h.channel);
       this._sceneOut = (this._sceneOut || Promise.resolve()).then(async () => {
         const gz = new Uint8Array(await new Response(new Blob([text]).stream().pipeThrough(new CompressionStream("gzip"))).arrayBuffer());
@@ -2169,6 +2280,7 @@
     // changed in this room's scene sent; once a second the stats.
     _tick() {
       const now = performance.now();
+      if (this._perf && now - this._perf.at >= 1000) this._perfRoll(now);
       if (this._view) this._sendInput(now, this._view.pending);
       const w = this._viewer;
       if (w && !w.scene && !w.loading && !w.failed && now - (w.askedAt || w.since) > 3000) { w.askedAt = now; this._sceneResync(w); }   // no scene yet: ask again
@@ -2185,7 +2297,9 @@
         const pm = this._phoneMark, pa = this._phoneAt;
         if (pm) { pm.visible = !!(this._phone && pa); if (pa) pm.position.set(pa.x, pa.y, pa.z); }
         this._phoneTick(now);
+        const t0 = this._perf ? performance.now() : 0;
         this._voiceTick();
+        if (this._perf) this._pt("voice", performance.now() - t0);
       }
       if (!this._hooks || !this._hosted.size) return;
       for (const h of [...this._hosted.values()]) if (h.inside) this._step(h, now);
@@ -2794,7 +2908,12 @@
 
     // Where your user is now: at home, where your page says (stepping onto a plot takes them in); in a plot, where
     // its host has them (walked at once as it walks, put right by its answers), until it has them off it.
-    frame(dt, me, input = {}) { return (this.me = this._frame(dt, me, input)); }
+    frame(dt, me, input = {}) {
+      const t0 = this.v._perf ? performance.now() : 0;
+      this.me = this._frame(dt, me, input);
+      if (this.v._perf) this.v._pt("world", performance.now() - t0);
+      return this.me;
+    }
     _frame(dt, me, input) {
       const v = this.v, T = this.T, now = performance.now();
       dt = Math.min(0.1, Math.max(0, Number(dt) || 0));
@@ -2885,6 +3004,10 @@
     // Your room (clipped to your plot), the ground between plots, then each plot (clipped to its own), into one
     // depth buffer: what is nearer hides what is behind, across plots. Each plot lit by its own lights.
     render(camera) {
+      const t0 = this.v._perf ? performance.now() : 0;
+      try { this._render(camera); } finally { if (this.v._perf) this.v._pt("world", performance.now() - t0); }
+    }
+    _render(camera) {
       const r = this.renderer, auto = r.autoClear, planes = r.clippingPlanes, now = performance.now(), v = this.v;
       const list = this._layout(), mine = v._plot();
       try {
@@ -3009,7 +3132,7 @@
     function draw() {
       if (root.contains(document.activeElement) && document.activeElement.tagName === "INPUT") return;   // never under a typing hand
       const me = v.office, rows = [];
-      rows.push(`<div class="row hd"><span class="dot ${v.state === "online" ? esc(v.status) : ""}"></span><span class="grow">Visit${me ? " · " + esc(me.name) : ""}</span><span class="muted">${esc(v.state)}</span>${v.state === "online" ? `<button data-v="away" title="leave the lobby: nobody sees you or can link until you come back">Go offline</button>` : ""}</div>`);
+      rows.push(`<div class="row hd"><span class="dot ${v.state === "online" ? esc(v.status) : ""}"></span><span class="grow">Visit${me ? " · " + esc(me.name) : ""}</span><span class="muted">${esc(v.state)}</span><button data-v="perf" class="${v._perf ? "go" : ""}" title="how this page is doing: frames, stalls, and what Visit does (on or off)">⏱</button>${v.state === "online" ? `<button data-v="away" title="leave the lobby: nobody sees you or can link until you come back">Go offline</button>` : ""}</div>`);
       if (v.state === "away") rows.push(`<div class="row"><span class="grow muted">out of the lobby: nobody sees you or can link</span><button class="go" data-v="back">Go online</button></div>`);
       for (const n of notes) if (n.until > Date.now()) rows.push(`<div class="row note">${esc(n.text)}</div>`);
       if (v.state === "online") {
@@ -3095,6 +3218,7 @@
       }
       else if (act === "leave") v.leave();
       else if (act === "map") (v._mapView || (v._mapView = map(v))).open();
+      else if (act === "perf") v.perf(!v._perf);
       else if (act === "mic") v.setMic(!v.mic).catch(x => v._emit("error", { code: "mic", message: String(x.message || x) }));
       else if (act === "call") { try { v.call(b.dataset.key); } catch (x) { note(String(x.message || x)); } }
       else if (act === "pick_up") v.pickUp(b.dataset.key).catch(x => v._emit("error", { code: "mic", message: String(x.message || x) }));

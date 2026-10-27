@@ -82,6 +82,7 @@ feature in a workroom's code. If the changelog has something newer than the tabl
 | phone | 0.9, 0.13 | step 5 | `visit.phone(` (`model: false`: their own) |
 | chat bubbles | 0.11 | step 5 | `visit.say(`, the panel's Say box, `bubbles` |
 | landscapes, offline plots | 0.12 | step 5 | `userData.visitStatic`, `visit.landscapeChanged(` |
+| telemetry (⏱) | 0.14 | troubleshooting | the panel's ⏱, `visit.perf(`: nothing to integrate, a tool for when a room feels slow |
 
 ## List
 

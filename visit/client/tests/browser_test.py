@@ -209,6 +209,14 @@ async def main():
         v0 = await b.js("v._viewer.scene.root.getObjectByProperty('uuid', %s).material.map.version" % sign)
         await a.js("room.write('changed')")
         check("A redraws its sign: B's sign is redrawn", await b.until("v._viewer.scene.root.getObjectByProperty('uuid', %s).material.map.version > %d" % (sign, v0)), True)
+        await a.js("document.querySelector('.visit-panel button[data-v=perf]').click()")
+        check("A turns on the telemetry from its panel (⏱): a corner of the page says how it is doing", await a.until(
+            "(e => !!e && e.textContent.includes('fps') && e.textContent.includes('Visit'))(document.querySelector('.visit-perf'))", 10), True)
+        rep = await a.until("(r => r.length >= 2 && r[r.length - 1])(v.perfReport())", 10)
+        check("…a row a second: frames, stalls, Visit's work by part (A has a visitor: its scene scanned), what it had to do",
+              (rep["fps"] > 0, "scan" in rep["parts"], rep["counts"]["visitors"], "long_tasks" in rep), (True, True, 1, True)) if rep else check("a telemetry row", None, "a row")
+        await a.js("document.querySelector('.visit-perf button[data-p=off]').click()")
+        check("and off again: the corner goes, remembered off", await a.until("!document.querySelector('.visit-perf') && localStorage.getItem('visit:perf') === 'off'"), True)
         await a.js("room.scene.background.setHex(0x334455)")
         check("A's background changes: B's too", await b.until("v._viewer.scene.root.background.getHex() === 0x334455"), True)
         su = await a.js("room.shader()")

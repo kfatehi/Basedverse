@@ -39,7 +39,7 @@ take them unless your user asks for something else. The defaults are Visit's own
 
 - **the panel** (`Visit.panel`): the lobby, links and knocks, your door and guests, your visitors and their looks,
   your world's Map, the microphone and who is near, calls (📞 call, Pick up, speaker / handset, Hang up), notes (where
-  a friend's world put your room), and the Say box;
+  a friend's world put your room), the Say box, and ⏱ (how this page is doing);
 - **the stage** (`Visit.stage`): the room you visit, full-window or in the corner;
 - **the Map** (`Visit.map`, from the panel): your world from above;
 - **in your world** (`visit.world`): chat bubbles over whoever said something, and a 🔊 over whoever you hear
@@ -358,7 +358,8 @@ visit.host({
   `visit.speaker(key, true)` puts the call on speaker: everyone near your phone, your visitors too, hears it and
   is heard in it. How it looks and works in your room (lifting the handset, a button for speaker) is yours.
 - **What carries**: objects moving, appearing and going, materials' colours and opacity, canvas textures you
-  redraw (`texture.needsUpdate = true`), the background and the fog. **What does not**: custom shaders (a
+  redraw (`texture.needsUpdate = true`: encoded again in the background and sent at most once a second, so mark one
+  changed only when its picture did), the background and the fog. **What does not**: custom shaders (a
   `ShaderMaterial` is code: it arrives plain grey), HTML overlays, post-processing (an `EffectComposer`), and
   anything drawn outside the scene.
 - **What it costs you**: under 1 ms of your page's time 30 times a second while you have visitors (Visit reads
@@ -604,6 +605,7 @@ marked offline, walked into but not through its walls; start it again, and the p
 | the visitor's view says "walking into …'s room" and stays | the host's page is not sending its scene (its console says why), or the visitor's page could not load three.js: see the next row |
 | the visitor's view says "cannot draw …'s room" | its page could not load the host's three.js (a Content-Security-Policy blocking cdn.jsdelivr.net or `blob:` scripts, step 6; or no network to the CDN), or its browser has no WebGL 2 |
 | visitors walk through walls | your `blocked` does not cover them, or your `move` ignores it |
+| your room or a visit feels slow, or stutters | turn on the panel's ⏱ (`visit.perf(true)`): each second it shows frames, stalls (long tasks), and Visit's own work by part; "copy report" gives the last two minutes. A stall with "send" or "whole" in it is your scene's size; frames slow with Visit idle is your room's own drawing (or the machine: a video call takes its share) |
 | a visit feels laggy | read the stage's numbers (`visit.stats`): input to screen is the visitor's own drawing (a frame's time, or its machine is busy drawing); frames a second low means the host's room is heavy for the visitor's machine. Walking that lags behind the keys means the host gave no `walk`; things in the room moving late, a high link round trip, or `relay` (a relay is slower and rate-limited) are the network |
 | visitors see their own body from inside | mark each body `userData.visitor = entry.id` (step 5) |
 | visitors drift back as they walk | your `walk.speed` is not the speed your `move` gives `Visit.walk`, or your `move` is not `Visit.walk` (leave `walk` out) |

@@ -848,6 +848,9 @@ v.setMic(on); v.mic         // your microphone (8.7): on, those near your user i
 v.voices; v.voiceRange      // who your user can hear, near them (as the room's visit-client says): [{ key, name, distance (m), speaking }]; metres (45)
 v.listener({ x, y, z, yaw })   // where your user is in your room, for a room that draws no world (a world says it)
 v.landscapeChanged()        // something marked userData.visitStatic (8.10) changed in itself: its landscape goes again
+v.perf(on); v.perfReport()  // telemetry (the panel's ⏱; remembered in this browser; ?visit-perf=1): a corner of the page,
+                            //   each second, this page's frames and stalls (long tasks) and Visit's own work by part (ms);
+                            //   perfReport(): the last two minutes, a row a second. Nothing leaves the page
 v.say(text)                 // a line (8.9), over your user's head for everyone in the room they are in: true if said
 v.chats                     // the lines still showing where you are and in your room: [{ key, name, text, mine, owner, id, channel }]
                             //   and the "chat" event, each as it is said
@@ -920,8 +923,8 @@ Visit.panel(element, v)                          // an optional ready-made lobby
                                                  //   look like (default); your world (Map); voice (🎙, who is near); calls (Pick up,
                                                  //   speaker / handset, Hang up), 📞 call (those linked with phones); a say box (8.9);
                                                  //   notes a while (where a friend's world put your room, 8.4, once it
-                                                 //   settles; a call that ended other than hung up); stars, door, status,
-                                                 //   Go offline / online:
+                                                 //   settles; a call that ended other than hung up); ⏱ telemetry on or
+                                                 //   off; stars, door, status, Go offline / online:
                                                  //   { element, release(), say() (the say box focused: for a key of yours) }
 Visit.map(v)                                     // an optional ready-made map of your world from above (the panel's Map): drag,
                                                  //   turn or type where friends' rooms sit; pick one: their view of you two;

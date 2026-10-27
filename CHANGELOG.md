@@ -9,6 +9,27 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.14.0 — 2026-10-26
+
+**Telemetry, and no more stutter from redrawn canvases.** A room that redrew a canvas texture (a board, a screen)
+while it had visitors or watchers stopped its page to encode that picture each time it went out: some 200 ms, every
+second, for three boards. Now:
+
+- **A canvas redrawn is encoded in the background** (by the browser, as WebP, off the page's main thread) and sent
+  once it is ready, at most once a second. Mark a texture changed only when its picture did: every change still costs
+  your visitors a download.
+- **Telemetry, toggled from the panel's ⏱** (or `v.perf(true)`, remembered in the browser, or `?visit-perf=1`): a
+  corner of the page shows, each second, its frames (how many, the slowest), its stalls (long tasks: 50 ms or
+  more), and Visit's own work by part in ms (scan, send, whole, landscape, world, voice; pictures encoded in the
+  background), with how much it had to do (visitors, watchers, plots, objects, landscape). "copy report" (or
+  `v.perfReport()`) gives the last two minutes, a row a second, to share. Nothing leaves the page.
+
+### What an integration does
+
+1. Get visit-client 0.14.0 (`bin/setup` again, download; or this release).
+2. If your room redraws a canvas texture on a timer, set `needsUpdate` only when the picture changed (compare its
+   pixels, or what you drew): it is sent to every visitor each time.
+
 ## v0.13.0 — 2026-10-26
 
 **The vanilla experience: what every room got by hand, Visit now gives.** Rooms that take the defaults look and work
