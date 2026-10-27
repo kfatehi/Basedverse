@@ -76,7 +76,8 @@ from that section if not, and keep it out of version control), and fill in:
 - `VISIT_STATE_FILE`: a file of the user's own (outside your repository, e.g.
   `~/.local/state/basedverse/<office>.json`) where visit-client keeps whether your user has gone offline, so
   a restart does not put them back in the lobby, and the office's key, door and guests, so friends stay
-  friends across restarts. It holds a secret key: never commit it, never copy it elsewhere.
+  friends across restarts. It holds a secret key: never commit it, never copy it elsewhere. Friends'
+  landscapes (step 5) are kept beside it, in `landscapes/` (or where `VISIT_CACHE_DIR` says).
 
 The rest can stay blank, meaning their defaults (port 7401, 3 visitors at once). `VISIT_TOKEN_FILE` is
 for your launcher to set (step 2). Never put real values in `.env.example` itself: it is basedverse's
@@ -338,8 +339,9 @@ visit.host({
   `ShaderMaterial` is code: it arrives plain grey), HTML overlays, post-processing (an `EffectComposer`), and
   anything drawn outside the scene.
 - **What it costs you**: under 1 ms of your page's time 30 times a second while you have visitors (Visit reads
-  the scene for changes), and the whole scene once as each visitor starts (`toJSON`: some tens of ms for a
-  room of a few hundred objects). You render nothing for them: their browsers do.
+  the scene for changes, your landscape aside), and the whole scene once as each visitor starts (`toJSON`: some
+  tens of ms for a room of a few hundred objects; your landscape apart, once, to visitors who do not have it).
+  You render nothing for them: their browsers do.
 
 **`Visit.walk`** does first-person walking for you: speed in your world's units per second (Shift runs
 at twice that), sliding along walls when `blocked(x, z)` says the way is shut. Its pose is
@@ -413,7 +415,8 @@ your user **link** with one (with a message): once they say yes, their room show
 and your user chooses to go there, put it in their world, or unlink. It shows links asked of you with **Link** /
 **Not now** and **★ always** (make them a guest as you say yes), your links, your visitors and who is linked to
 you (with **Kick** / **Unlink**, and **their look** / **your model**), whose look your visitors have by default,
-**Map** (your world, from above: step 9), sets your status and max visitors, and has **Go offline** / **Go online**. A
+**Map** (your world, from above: step 9), the microphone (🎙) and who is near, calls, a **Say** box (chat), sets your
+status and max visitors, and has **Go offline** / **Go online**. A
 star (☆) by each office makes it a **guest**: while your door is open (the panel's "your door"), a guest's link
 is let in at once, without asking your user. An office on an older Visit gets **Knock** instead: let in, your
 user walks straight into its room, as before.
@@ -466,8 +469,12 @@ Then, in order:
 5. **Reload B's page.** It comes back still linked with A, without asking again (in the corner: Go there).
 6. In B, **Back to my room**: A's room in the corner again, A's visitors list empty. Then **Unlink**: B's corner
    goes, and A's watchers list empties.
-7. Set A's status to busy: B's link is refused.
-8. Stop B's visit-client: B disappears from A's lobby.
+7. Turn both microphones on (🎙) with B in A's room: each hears the other (headphones on one, or the other
+   page's speakers echo). Type a line in B's **Say** box: it shows over B's head in A's room, and in B's view.
+8. With your landscape marked (step 5), reload B's page while it is in A's room: A's walls and floor are there
+   again at once (B's visit-client kept them).
+9. Set A's status to busy: B's link is refused.
+10. Stop B's visit-client: B disappears from A's lobby.
 
 ## Step 9 — Your world: friends' plots round your room
 
@@ -512,7 +519,8 @@ walks onto your plot from their world may have no way back out.
 **Check:** with step 8's two rooms, each starring the other in the panel, each sees the other's plot; walking
 onto it puts you in its room (its `visit.visitors` lists you), walking off brings you home; put flush against yours
 on the Map, walking out of your door goes straight into theirs; and picking the other on the Map shows where
-they have put you.
+they have put you. With your landscapes marked: stop one visit-client, and the other's world keeps its plot,
+marked offline, walked into but not through its walls; start it again, and the plot is live.
 
 ## Checklist
 
@@ -537,6 +545,10 @@ they have put you.
       (`visit.avatar`), if you like.
 - [ ] Voice: with the microphone on, a visitor near your user hears them, and they the visitor; farther, neither.
 - [ ] A phone, if you have one: a call rings, is picked up, heard on the handset; on speaker, by those near it.
+- [ ] Chat: a line typed (the panel's Say box, or `visit.say`) shows over its speaker's head for everyone in the
+      room; your own keys ignore a text box (typing "w" there does not walk).
+- [ ] Your landscape (what never changes) marked `userData.visitStatic`; nothing that moves or changes under it,
+      or `visit.landscapeChanged()` when it does.
 - [ ] Visiting: the host's room fills the window (`Visit.stage`, or your own view); WASD, Shift and the
       mouse work; Esc frees the pointer; there is a way to leave, and back to your room; your own keys wait
       while `visit.viewFocused`.
@@ -573,6 +585,9 @@ they have put you.
 | visitors see their own body from inside | mark each body `userData.visitor = entry.id` (step 5) |
 | visitors drift back as they walk | your `walk.speed` is not the speed your `move` gives `Visit.walk`, or your `move` is not `Visit.walk` (leave `walk` out) |
 | something in your room is missing from a visitor's view of it | it is drawn outside `root`, with a custom shader, as HTML, or in post-processing (step 5) |
+| typing in the Say box walks your user | your room's own keys do not ignore a text box: skip keys whose target is an `INPUT`, `TEXTAREA` or editable element |
+| a visitor does not see a change to something you marked static | the landscape is not looked at for changes: call `visit.landscapeChanged()` after changing it, or do not mark what changes |
+| a friend's room vanishes from your world when they go offline | their room marks no landscape (`userData.visitStatic`), or they shut their door to you or un-starred you (then it is forgotten on purpose) |
 | your visitors stop moving while your tab is in the background | your page's Content-Security-Policy forbids `blob:` workers, so the library's timer is the page's own (slowed in the background): allow `worker-src blob:` |
 
 ## Upgrading
