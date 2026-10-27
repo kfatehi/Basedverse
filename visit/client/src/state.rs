@@ -19,6 +19,16 @@ pub struct Guest {
     pub name: String,
 }
 
+/// Someone this office's user keeps out of their room's voice, or its chat, or both (../SPEC.md 8.9): their key and
+/// name. Kept until lifted.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ban {
+    pub key: String,
+    pub name: String,
+    pub voice: bool,
+    pub chat: bool,
+}
+
 /// Where this office has put a friend's plot in its world: its centre, and how many quarter turns it is turned.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Place {
@@ -40,6 +50,9 @@ pub struct Saved {
     pub avatars_theirs: bool,
     pub avatars_set: bool,
     pub avatars_by: Vec<(String, bool)>,
+    /// Whom this office's room keeps out (../SPEC.md 8.9): kept in its database (Visit 0.20); a state file of the
+    /// release before kept them here, and they move there once.
+    pub bans: Vec<Ban>,
 }
 
 impl Saved {
@@ -67,6 +80,11 @@ impl Saved {
             .filter(|(_, t)| *t != avatars_theirs)   // the same as the default: not apart
             .take(MAX_GUESTS)
             .collect();
+        let bans = list("bans").iter().filter_map(|b| {
+            let (voice, chat) = (b.get("voice") == Some(&json!(true)), b.get("chat") == Some(&json!(true)));
+            let key = b.get("key").and_then(Value::as_str).filter(|k| key_ok(k) && (voice || chat))?;
+            Some(Ban { key: key.to_string(), name: clip_name(b.get("name").and_then(Value::as_str).unwrap_or("")), voice, chat })
+        }).take(MAX_GUESTS).collect();
         let saved = Saved {
             away: v.get("away").and_then(Value::as_bool).unwrap_or(false),
             key: key.unwrap_or_else(SecretKey::generate),
@@ -76,6 +94,7 @@ impl Saved {
             avatars_theirs,
             avatars_set,
             avatars_by,
+            bans,
         };
         (saved, fresh)
     }
@@ -86,6 +105,10 @@ impl Saved {
             "guests": self.guests.iter().map(|g| json!({ "key": g.key, "name": g.name })).collect::<Vec<_>>(),
             "layout": self.layout_json(), "avatars": self.avatars_json(),
         })
+    }
+
+    pub fn bans_json(&self) -> Value {
+        json!(self.bans.iter().map(|b| json!({ "key": b.key, "name": b.name, "voice": b.voice, "chat": b.chat })).collect::<Vec<_>>())
     }
 
     pub fn avatars_json(&self) -> Value {
@@ -213,6 +236,26 @@ mod tests {
         std::fs::write(&path, json!({ "avatars": { "default": "mine", "set": true, "by": [{ "key": k, "use": "theirs" }] } }).to_string()).unwrap();
         let (s, _) = Saved::load(Some(&path));
         assert!(!s.avatars_theirs && s.avatars_set && s.avatars_by == vec![(k, true)]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_older_file_s_bans_are_read_not_written() {
+        let dir = std::env::temp_dir().join(format!("visit-state-bans-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.json");
+        let k = SecretKey::generate().public().to_string();
+        // Read (to move into the database), and no longer written: the database keeps them.
+        std::fs::write(&path, json!({ "bans": [{ "key": k, "name": "Ann", "voice": true }] }).to_string()).unwrap();
+        let mut s = Saved::load(Some(&path)).0;
+        assert_eq!(s.bans, vec![Ban { key: k.clone(), name: "Ann".into(), voice: true, chat: false }]);
+        s.save(&path).unwrap();
+        assert!(Saved::load(Some(&path)).0.bans.is_empty());
+        // Not a key, or kept out of nothing: dropped. A name cut to 24 characters, without control characters.
+        std::fs::write(&path, json!({ "bans": [{ "key": "nope", "voice": true }, { "key": k, "voice": false, "chat": false },
+            { "key": k, "name": format!("a\u{7}{}", "b".repeat(40)), "chat": true }] }).to_string()).unwrap();
+        let bans = Saved::load(Some(&path)).0.bans;
+        assert_eq!(bans, vec![Ban { key: k, name: format!("a{}", "b".repeat(23)), voice: false, chat: true }]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

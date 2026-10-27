@@ -21,6 +21,9 @@ tests/perf/run-perf.sh         # performance under simulated networks (netem), i
 Releases are built for every platform by `../../.github/workflows/release.yml`, on a tag (the top README,
 "Releasing visit-client").
 
+It needs Postgres beside it (`--database`, ../SPEC.md 8.12); `visit-client migrate` makes the database ready. The
+test scripts start a throwaway one in Docker.
+
 `tests/room.html` is a small workroom to try it with: its room is a floor plan, each visitor an arrow.
 
 | file | what |

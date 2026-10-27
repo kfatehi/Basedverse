@@ -9,6 +9,86 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.20.0 — 2026-10-27
+
+**visit-client needs a database now: Postgres, beside it.** It keeps your chat there (every line, yours too: a
+restart or a reload keeps it, and the chat window's log scrolls back through all of it), the pictures and links
+shared in it, and whom your room keeps out. Its schema comes with each visit-client: `visit-client migrate` makes the
+database ready, and brings it up to date after every upgrade. A start checks it, and says what to run if it is not.
+
+**Pictures and links in chat**, as messaging apps have them:
+
+- **Paste a screenshot** (or drop a picture) into the chat box: it goes with your line, to a room, a room's chat,
+  or a whisper to someone you are linked with (never through the lobby: it carries text only). Each visit-client
+  keeps every picture it gets, once, and asks for one it lacks from whoever passed the line on. Click one: full size.
+- **Links get previews**: as you type a link, your visit-client fetches its page once, and your line carries what it
+  is (title, description, site, picture). Those you send it to never contact the site.
+- **🖼 by the box**: the pictures and the links shared in the conversation the box talks to, newest first.
+- From code: `visit.share(blob)`, `visit.say(text, to, { media, links })`, `visit.preview(url)`, `visit.media(id)`,
+  `visit.history()`, `visit.shared(conversation, kind)`.
+
+**Fixed: a visitor's body and mount twice.** A host page that lost its visit-client a moment (a restart, a blip)
+forgot its visitors but left their bodies and mounts in its scene; they came back with their visits, made again:
+two of each (an empty mount beside the rider). Now they go with them.
+
+**Voice across a plot's side, a room's voice, no echo, and keeping people out.**
+
+- **Across a plot's side.** You and a friend, each at home in your own room, hear each other when your worlds put
+  you near: both of them, each its own (45 m, the nearer the louder, from where your world has them). Stepping
+  over the line no longer cuts a conversation off. Rooms with a world (`visit.world`) need do nothing.
+- **A room's voice**, as a game's voice chat: 🎧 by the chat box joins the voice of the room it talks to (else your
+  own), and everyone in it hears everyone else, wherever they are, while their microphones are on. One at a time;
+  a line over the box says whose and who is in it (🔊: speaking), and stays while the rest fades.
+  `visit.joinVoice(key)`, `visit.roomVoice`.
+- **No more echo.** Standing near someone and on the phone with them (or in a room voice with them), you heard
+  them twice. Now you hear each person one way only: in person first, then the call, then the room voice. The call
+  goes quiet while they are near, and comes back as they walk off.
+- **Keeping people out of your room.** In the panel's row for someone: ban voice, ban chat, and Kick from voice
+  (while they are in your room's voice). A ban is kept in your state file until you lift it: out of your room's
+  voice, they are not heard in it and hear none of it; out of its chat, their lines are not said in it and they
+  get none of its lines. They are told. Calls are apart. `visit.ban(key, { voice, chat })`, `visit.bans`.
+
+**A room's chat is a party.** Talking into a friend's room went one way: you could say a line into Gooshy's room,
+but Gooshy could not answer in it, only into yours, so a conversation split across two rooms and nobody saw all
+of it. Now every room has one chat, like a party in a game:
+
+- **Everyone in a room, and everyone linked with it, either way, has every line said in it**, wherever they are:
+  its owner's, a visitor's, a linked friend's from their own room.
+- **Its owner says a line in it**: "To your room" among the chat window's choices (while anyone is linked with
+  you), or `/room` alone; `visit.say(text, "room")` from code.
+- **Shown as channels**: `[Gooshy's room] [Gooshy]: sup`, `[Your room] [Gooshy]: sup`, as the lobby's are, your
+  own lines too.
+- **Names finish themselves**: after `/w` or `/room`, the names it could be show over the box, and Tab finishes
+  one (again: the next). A name is taken once a space follows it, or on Enter (all of it, or the one name it
+  starts), no longer as soon as it is typed (a longer name could follow).
+- **`/r`** with nobody having whispered to you yet goes to whom you last whispered.
+- **A reload keeps the chat.** Your visit-client keeps the last 100 lines you have had, yours too, in memory
+  (never on disk), and gives them back to the page when it comes back, with any that came while it reloaded. The
+  window keeps where your lines go, too.
+
+An older Visit has a room's lines only while in that room, and its owner's never; it hears nobody across a plot's
+side, and joins no room's voice.
+
+### What an integration does
+
+1. **Give visit-client a database.** `bin/setup` (run it again: it keeps your `.env`'s answers) starts Postgres in
+   Docker for it, or takes the URL of one you have, and writes `VISIT_DATABASE_URL` into the `.env`. By hand:
+   INTEGRATING.md step 1. Your launcher passes it on with the other `VISIT_*` settings (`--database` as a flag).
+2. Get visit-client 0.20.0, and **make its database ready**: `visit-client migrate` (setup does it). From now on, run
+   it after every upgrade, before starting the new visit-client. Bans in your state file move into the database by
+   themselves.
+3. Nothing else for the chat window, the panel, and voice: they are Visit's.
+4. If your room draws chat itself from the `chat` event: a line may carry pictures (`media`) and links (`links`),
+   with its `conversation`; and a `scope: "sim"` line may now come for a room you are
+   only linked with (its `to`, the room), and `visit.say(text, "room")` says one in yours. After a reload, the
+   lines from before come first, marked `old`: no bubble or sound for those.
+5. **Leave Visit's things out of your physics** (MODELS.md, "Your physics"): your floor, walls and raycasts skip
+   anything marked `userData.visitor` or `userData.visitRider` (visitors' bodies, their mounts). A floor check that
+   hits a rider's own mount stands them on top of it.
+6. A room that draws its own 🔊 marks from `visit.voices` at home: a friend across your plot's side may be in it
+   now (by their key; their room's `visit:me` in your world). A room without the panel offers `visit.joinVoice` and
+   `visit.ban` where it likes.
+
 ## v0.19.0 — 2026-10-27
 
 **One way of placing people, and bodies that show.** A friend's body didn't show in your room, or showed buried,

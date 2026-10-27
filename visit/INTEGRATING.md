@@ -41,8 +41,9 @@ take them unless your user asks for something else. The defaults are Visit's own
   for Go there, their look in your room, Kick, Unlink), knocks, your door and guests, your world's Map, the microphone and who is near, calls (📞 call, Pick up, speaker / handset, Hang up), notes (where
   a friend's world put your room), and ⏱ (how this page is doing);
 - **the chat window** (the panel's, `Visit.chat`): bottom left, as in a game. Enter to type, and say a line to
-  everyone who can see you, whisper to one person (`/w name`), say it into a linked friend's room (`/room name`), or
-  to the lobby (`/1`); it fades when nobody has said anything for a while;
+  everyone who can see you, whisper to one person (`/w name`), say it in your room's chat (`/room`: everyone in it
+  and linked with it) or a linked friend's (`/room name`), or to the lobby (`/1`); Tab finishes a name; 🎧 joins a
+  room's voice (everyone in it hears everyone else), and a line over the box says who is in it; it fades when nobody has said anything for a while;
 - **mounts** (`visit.ride`, M, the panel's "your mount"): Visit carries them and puts them under their rider in
   the room they ride into; what they are (models, names, paces) is your room's to say (`visit.possessions`), and the
   panel shows them once you give some;
@@ -148,6 +149,25 @@ Or build it, for a machine the releases do not cover or a checkout newer than th
 - **macOS or Windows:** with Rust installed (https://rustup.rs), `cargo build --release` in `client/` gives
   `client/target/release/visit-client`. It has to run natively there: a container cannot listen on the
   machine's own 127.0.0.1.
+
+**Its database.** visit-client needs Postgres beside it (Visit 0.20): it keeps its user's chat there, the pictures
+and links shared in it, and whom its room keeps out. Setup gives it one (it starts Postgres in Docker for it, or
+takes the URL of one you have) and writes `VISIT_DATABASE_URL` into the `.env`. By hand:
+
+```sh
+docker run -d --name visit-db --restart unless-stopped -e POSTGRES_USER=visit -e POSTGRES_PASSWORD=<a password> \
+  -e POSTGRES_DB=visit -v visit-db:/var/lib/postgresql/data -p 127.0.0.1:7432:5432 postgres:17-alpine
+# VISIT_DATABASE_URL=postgres://visit:<a password>@127.0.0.1:7432/visit in the .env
+```
+
+Then make it ready, **once now and again after every upgrade**, with the visit-client you will run (setup does it
+for you):
+
+```sh
+"$VISIT_CLIENT_PATH" migrate          # reads VISIT_DATABASE_URL; --status: where it is, changing nothing
+```
+
+visit-client will not start without one, nor against one not made ready by its own version (it says what to run).
 
 Check: `visit-client --version` prints the `version` of `client/Cargo.toml` in your checkout (the visit.js
 it serves and the protocols it speaks are that version's), and `visit-client --help` prints its flags. You
@@ -355,7 +375,8 @@ visit.host({
   agents): those go as before. If something marked does change in itself, call `visit.landscapeChanged()`.
 - **Chat**: the panel's chat window, bottom left: your user presses Enter, types a line, and Enter says it. Said
   (the default), everyone who can see them has it over their head for a few seconds, and in their chat; `/w name`
-  whispers it to one person, `/room name` says it into a linked friend's room, `/1` to the whole lobby
+  whispers it to one person, `/room` says it in your room's chat (everyone in your room and linked with it, as a
+  game's party), `/room name` in a linked friend's, `/1` to the whole lobby
   (`visit.say(text, to)` from code). With a world (step
   9) Visit draws the bubbles in your room too; without one, draw them yourself from `visit.chats`
   (`Visit.bubble(THREE, text, unit)` makes one). Make sure your room's keys ignore a text box (WASD there is typing,
@@ -608,8 +629,12 @@ marked offline, walked into but not through its walls; start it again, and the p
       them); their own world shows them where your room has them.
 - [ ] Mounts: a visitor pressing M rides into your room on theirs, under them; your `move` lifts them, paces them and
       flies them as your room has it; your user's own (if you give any), at home, under their feet.
+- [ ] Its database: `visit-client migrate --status` says up to date; a restart keeps the chat (its last lines are
+      there again), and older lines come as the chat window's log is scrolled to its top.
+- [ ] Pictures and links: a screenshot pasted into the chat box goes with the line, to a friend's room, and shows
+      there; a link typed gets its preview; 🖼 lists what was shared.
 - [ ] Chat: Enter opens the chat window, bottom left; a line said shows over its speaker's head for everyone who
-      can see them, and in their chat; `/w name` whispers, `/room name` reaches a linked friend's room, `/1` the lobby; your own keys
+      can see them, and in their chat; `/w name` whispers, `/room` your room's chat, `/room name` a linked friend's, `/1` the lobby; your own keys
       ignore a text box (typing "w" there does not walk), and nothing of yours hides the window.
 - [ ] Your landscape (what never changes) marked `userData.visitStatic`; nothing that moves or changes under it,
       or `visit.landscapeChanged()` when it does.
@@ -663,6 +688,7 @@ integration does about it**. To upgrade a workroom that works, read it from the 
 
 1. Pull basedverse (`git pull` in its checkout).
 2. Get the new visit-client: run setup again (it keeps the `.env`'s answers; choose download), or step 1.
+   **Then bring its database up to date**: `"$VISIT_CLIENT_PATH" migrate` (setup does it), before you start it.
 3. Do each "what an integration does" of the versions you skipped, in order, and add any new setting it
    names to the `.env` (setup adds its own).
 4. Run step 8 again, and step 9's check.

@@ -1,11 +1,14 @@
 //! visit-client: Visit's local client (../SPEC.md). One per workroom per machine. It owns all networking
 //! (the lobby session, the links to other visit-clients, the visits), keeps them across page reloads,
-//! and serves the workroom's page on 127.0.0.1 only, behind a token.
+//! and serves the workroom's page on 127.0.0.1 only, behind a token. What it keeps, it keeps in its database
+//! beside it (Postgres, ../SPEC.md 8.12), whose schema `visit-client migrate` makes.
 mod core;
+mod db;
 mod frames;
 mod link;
 mod land;
 mod lobby;
+mod media;
 mod page;
 mod state;
 
@@ -61,7 +64,31 @@ struct Args {
     /// their plots to draw while they are away; none: beside the state file (landscapes/), or for this run only.
     #[arg(long, env = "VISIT_CACHE_DIR")]
     cache_dir: Option<PathBuf>,
+    /// Its database, beside it (required): postgres://user:password@host:port/database. Made ready, and brought up
+    /// to date after each upgrade, by `visit-client migrate --database <url>`.
+    #[arg(long, env = "VISIT_DATABASE_URL", hide_env_values = true)]
+    database: Option<String>,
 }
+
+/// `visit-client migrate`: makes the database ready for this visit-client, or brings it up to date after an
+/// upgrade (each migration once, in order); `--status` says where it is, changing nothing.
+#[derive(Parser)]
+#[command(name = "visit-client migrate", version, about = "Makes visit-client's database ready, or brings it up to date (visit/SPEC.md 8.12)")]
+struct Migrate {
+    /// The database: postgres://user:password@host:port/database.
+    #[arg(long, env = "VISIT_DATABASE_URL", hide_env_values = true)]
+    database: String,
+    /// Say where it is and what is pending, changing nothing.
+    #[arg(long)]
+    status: bool,
+}
+
+/// What a run with no database says: how to have one.
+const NO_DATABASE: &str = "a database is required: --database postgres://user:password@host:port/database (or VISIT_DATABASE_URL).
+Postgres in Docker, for example:
+  docker run -d --name visit-db --restart unless-stopped -e POSTGRES_USER=visit -e POSTGRES_PASSWORD=<a password> \
+    -v visit-db:/var/lib/postgresql/data -p 127.0.0.1:7432:5432 postgres:17-alpine
+then, once (and after every upgrade): visit-client migrate --database postgres://visit:<a password>@127.0.0.1:7432/visit";
 
 /// Compares two secrets in time that does not depend on where they differ.
 pub fn ct_eq(a: &str, b: &str) -> bool {
@@ -91,7 +118,26 @@ fn main() -> ExitCode {
             std::env::remove_var(&k);
         }
     }
-    tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("the tokio runtime").block_on(run())
+    let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("the tokio runtime");
+    if std::env::args().nth(1).as_deref() == Some("migrate") {
+        return rt.block_on(migrate(Migrate::parse_from(std::iter::once("visit-client migrate".to_string()).chain(std::env::args().skip(2)))));
+    }
+    rt.block_on(run())
+}
+
+async fn migrate(m: Migrate) -> ExitCode {
+    match db::migrate(&m.database, m.status).await {
+        Ok(lines) => {
+            for l in lines {
+                println!("{l}");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("visit-client migrate: {e:#}");
+            ExitCode::from(1)
+        }
+    }
 }
 
 async fn run() -> ExitCode {
@@ -120,6 +166,7 @@ async fn run() -> ExitCode {
     if !(a.lobby.starts_with("wss://") || a.lobby.starts_with("ws://")) {
         return bad_flags("--lobby: a ws:// or wss:// URL");
     }
+    let Some(database) = a.database.clone().filter(|d| !d.is_empty()) else { return bad_flags(NO_DATABASE) };
     let relays = a.relays.as_deref().map(|r| match r {
         "none" => link::Relays::Off,
         "default" => link::Relays::Default,
@@ -139,7 +186,19 @@ async fn run() -> ExitCode {
 
     let (core_tx, core_rx) = mpsc::unbounded_channel();
     let (lobby_tx, lobby_rx) = mpsc::unbounded_channel();
-    let (saved, fresh) = state::Saved::load(a.state_file.as_deref());
+    let (mut saved, fresh) = state::Saved::load(a.state_file.as_deref());
+    // The database, at the schema this visit-client needs (else it says what to run); bans an older state file
+    // kept, moved into it.
+    let (client, loaded) = match db::open(&database, &saved.bans).await {
+        Ok(x) => x,
+        Err(e) => {
+            eprintln!("visit-client: {e:#}");
+            return ExitCode::from(5);   // (4: the lobby refused it)
+        }
+    };
+    saved.bans = loaded.bans;
+    let (db_tx, db_rx) = mpsc::unbounded_channel();
+    tokio::spawn(db::run(database, client, db_rx, core_tx.clone()));
     let away = saved.away;
     let hello = lobby::Hello { name: a.name.clone(), sim, status: "available".into(), max_visitors: a.max_visitors };
     tokio::spawn(lobby::run(a.lobby.clone(), hello, lobby_rx, core_tx.clone(), away));
@@ -168,7 +227,7 @@ async fn run() -> ExitCode {
     println!("{}", json!({ "ready": true, "port": a.port, "version": VERSION, "proto": page::PROTO }));
     let cache = a.cache_dir.clone().or_else(|| a.state_file.as_deref().map(|f| f.parent().unwrap_or(std::path::Path::new(".")).join("landscapes")));
     let lands = land::Lands::open(cache);
-    let code = core::Core::new(lobby_tx, core_tx, relays, a.max_visitors, a.idle_exit, saved, fresh, a.state_file.clone(), lands).run(core_rx).await;
+    let code = core::Core::new(lobby_tx, core_tx, relays, a.max_visitors, a.idle_exit, saved, fresh, a.state_file.clone(), lands, db_tx, loaded.chat).run(core_rx).await;
     ExitCode::from(code as u8)
 }
 

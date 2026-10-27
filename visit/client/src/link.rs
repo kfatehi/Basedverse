@@ -53,12 +53,20 @@ const STREAM_LAND: u8 = 3;
 /// A stream the visitor opens, its host having asked: one of its possessions' models (8.11): its id (a length byte,
 /// then the id), then gzipped JSON.
 const STREAM_POSSESSION: u8 = 4;
+/// A picture shared in chat (8.12), either way, as the other side asked for it: its id, its type, then its bytes.
+const STREAM_MEDIA: u8 = 5;
+/// The most pictures taken from the other side a minute.
+const MEDIA_PER_MINUTE: u32 = 30;
 /// The least time between two possessions' models a host takes from one visitor.
 const POSSESSION_EVERY: Duration = Duration::from_millis(500);
 /// What a datagram of voice starts with (8.7), and of a visitor's voice a room passes on; an input's is JSON, and
 /// starts with `{`.
 const DATAGRAM_AUDIO: u8 = 0xA0;
 const DATAGRAM_RELAY: u8 = 0xA1;
+/// A room voice's (8.7): a member's to the room's owner, and the owner's (theirs, or a member's passed on) to a
+/// member; each who spoke, then the voice. An older Visit ignores them.
+const DATAGRAM_VOICE_UP: u8 = 0xA2;
+const DATAGRAM_VOICE_DOWN: u8 = 0xA3;
 /// The most datagrams of voice taken from the other side a second (one every 20 ms, and some to spare); and of
 /// voices passed on by a room (one each of several visitors).
 const AUDIO_PER_SECOND: u32 = 100;
@@ -92,6 +100,11 @@ pub enum LinkCmd {
     Audio(Bytes),
     /// Someone's voice this office passes to the other side (8.7, 8.8).
     Relay(Bytes),
+    /// A voice in a room voice (8.7), who spoke and the voice: this office's user's to the room's owner (`up`), or
+    /// the owner's to a member.
+    Voice { up: bool, data: Bytes },
+    /// A picture (its id and type) the other side asked for (8.12).
+    Media { id: String, mime: String, bytes: Bytes },
     /// End the link, saying why.
     Close(String),
 }
@@ -394,7 +407,7 @@ async fn run(role: Role, visit: &str, est: Established, cmds: &mut mpsc::Receive
         (tx, q)
     });
     let (mut tick, mut path) = (tokio::time::interval(Duration::from_secs(1)), None::<bool>);
-    let (mut audio_in, mut relay_in) = ((Instant::now(), 0u32), (Instant::now(), 0u32));
+    let (mut audio_in, mut relay_in, mut voice_in) = ((Instant::now(), 0u32), (Instant::now(), 0u32), (Instant::now(), 0u32));
     let ended = loop {
         tokio::select! {
             msg = ctl_rx.recv() => match msg {
@@ -421,6 +434,15 @@ async fn run(role: Role, visit: &str, est: Established, cmds: &mut mpsc::Receive
                     relay_in.1 += 1;
                     if relay_in.1 <= RELAY_PER_SECOND && b.len() <= 1 + frames::MAX_AUDIO + 128 {
                         let _ = core.send(Ev::LinkRelay { visit: visit.to_string(), data: b.slice(1..) });
+                    }
+                }
+                Ok(b) if b.first() == Some(&DATAGRAM_VOICE_UP) || b.first() == Some(&DATAGRAM_VOICE_DOWN) => {
+                    if voice_in.0.elapsed() >= Duration::from_secs(1) {
+                        voice_in = (Instant::now(), 0);
+                    }
+                    voice_in.1 += 1;
+                    if voice_in.1 <= RELAY_PER_SECOND && b.len() <= 1 + frames::MAX_AUDIO + 256 {
+                        let _ = core.send(Ev::LinkVoice { visit: visit.to_string(), up: b[0] == DATAGRAM_VOICE_UP, data: b.slice(1..) });
                     }
                 }
                 Ok(b) => if role == Role::Host {
@@ -451,6 +473,15 @@ async fn run(role: Role, visit: &str, est: Established, cmds: &mut mpsc::Receive
                 Some(LinkCmd::Relay(data)) => {
                     let mut d = Vec::with_capacity(1 + data.len());
                     d.push(DATAGRAM_RELAY);
+                    d.extend_from_slice(&data);
+                    let _ = conn.send_datagram(Bytes::from(d));
+                }
+                Some(LinkCmd::Media { id, mime, bytes }) => {
+                    tasks.push(tokio::spawn(write_media(conn.clone(), id, mime, bytes, visit.to_string())));
+                }
+                Some(LinkCmd::Voice { up, data }) => {
+                    let mut d = Vec::with_capacity(1 + data.len());
+                    d.push(if up { DATAGRAM_VOICE_UP } else { DATAGRAM_VOICE_DOWN });
                     d.extend_from_slice(&data);
                     let _ = conn.send_datagram(Bytes::from(d));
                 }
@@ -605,6 +636,57 @@ async fn write_possession(conn: Connection, id: String, gz: Bytes, visit: String
     }
 }
 
+/// A picture the other side asked for (8.12), on a stream of its own: its id and type, then its bytes.
+async fn write_media(conn: Connection, id: String, mime: String, bytes: Bytes, visit: String) {
+    let sent = async {
+        let mut s = conn.open_uni().await?;
+        s.write_all(&[STREAM_MEDIA, id.len() as u8]).await?;
+        s.write_all(id.as_bytes()).await?;
+        s.write_all(&[mime.len() as u8]).await?;
+        s.write_all(mime.as_bytes()).await?;
+        frames::write_scene_msg(&mut s, &bytes).await?;
+        s.finish()?;
+        anyhow::Ok(())
+    };
+    if let Err(e) = sent.await {
+        debug!(%visit, "a picture did not go: {e:#}");
+    }
+}
+
+/// A picture from the other side (8.12): its bytes must be what its id says (their hash) and a picture, at most
+/// MAX_MEDIA.
+async fn read_media(mut stream: RecvStream, visit: String, core: mpsc::UnboundedSender<Ev>) {
+    let read = async {
+        let mut n = [0u8];
+        stream.read_exact(&mut n).await?;
+        let mut id = vec![0u8; n[0] as usize];
+        stream.read_exact(&mut id).await?;
+        stream.read_exact(&mut n).await?;
+        let mut mime = vec![0u8; n[0] as usize];
+        stream.read_exact(&mut mime).await?;
+        let bytes = frames::read_blob(&mut stream, crate::media::MAX_MEDIA).await?.ok_or_else(|| anyhow::anyhow!("no picture"))?;
+        anyhow::Ok((String::from_utf8(id)?, bytes))
+    };
+    let (id, bytes) = match tokio::time::timeout(Duration::from_secs(120), read).await {
+        Ok(Ok(x)) => x,
+        Ok(Err(e)) => return warn!(%visit, "a picture that is not what it should be: {e:#}"),
+        Err(_) => return,
+    };
+    match crate::media::picture(&bytes, crate::media::MAX_MEDIA) {
+        Some((hash, mime)) if hash == id => { let _ = core.send(Ev::LinkMedia { visit, id, mime: mime.to_string(), bytes }); }
+        _ => warn!(%visit, "a picture that is not what it was said to be: dropped"),
+    }
+}
+
+/// Pictures taken in the current minute, at most MEDIA_PER_MINUTE: true if one more may be.
+fn media_counted(m: &mut (Instant, u32)) -> bool {
+    if m.0.elapsed() >= Duration::from_secs(60) {
+        *m = (Instant::now(), 0);
+    }
+    m.1 += 1;
+    m.1 <= MEDIA_PER_MINUTE
+}
+
 /// The visitor's side: the host's landscape it asked for, checked (gzipped JSON, within a scene's limits) and
 /// passed on still gzipped: kept as it came, by the hash of what it is.
 async fn read_land(mut stream: RecvStream, visit: String, core: mpsc::UnboundedSender<Ev>) {
@@ -626,9 +708,16 @@ async fn read_land(mut stream: RecvStream, visit: String, core: mpsc::UnboundedS
 /// any other stream is ignored.
 async fn read_avatars(conn: Connection, visit: String, core: mpsc::UnboundedSender<Ev>) {
     let (mut last, mut last_possession): (Option<Instant>, Option<Instant>) = (None, None);
+    let mut media = (Instant::now(), 0u32);
     while let Ok(mut stream) = conn.accept_uni().await {
         let mut kind = [0u8];
         if !matches!(tokio::time::timeout(HANDSHAKE, stream.read_exact(&mut kind)).await, Ok(Ok(()))) {
+            continue;
+        }
+        if kind[0] == STREAM_MEDIA {
+            if media_counted(&mut media) {
+                tokio::spawn(read_media(stream, visit.clone(), core.clone()));
+            }
             continue;
         }
         if kind[0] == STREAM_POSSESSION {
@@ -701,6 +790,7 @@ pub fn possession_id_ok(id: &str) -> bool {
 /// one is never waited for.
 async fn read_streams(conn: Connection, visit: String, core: mpsc::UnboundedSender<Ev>) {
     let (mut deltas, mut scene, mut land): (Option<JoinHandle<()>>, Option<JoinHandle<()>>, Option<JoinHandle<()>>) = (None, None, None);
+    let mut media = (Instant::now(), 0u32);
     while let Ok(mut stream) = conn.accept_uni().await {
         let mut kind = [STREAM_DELTAS];
         if !matches!(tokio::time::timeout(HANDSHAKE, stream.read_exact(&mut kind)).await, Ok(Ok(()))) {
@@ -721,6 +811,11 @@ async fn read_streams(conn: Connection, visit: String, core: mpsc::UnboundedSend
             STREAM_LAND => {
                 if let Some(old) = land.replace(tokio::spawn(read_land(stream, visit, core))) {
                     old.abort();
+                }
+            }
+            STREAM_MEDIA => {
+                if media_counted(&mut media) {
+                    tokio::spawn(read_media(stream, visit, core));
                 }
             }
             other => debug!(%visit, other, "a stream of a kind this version does not know: ignored"),

@@ -102,8 +102,11 @@ async def start_client(name, port, url):
     path = os.path.join(TMP, name + ".token")
     with open(path, "w") as f:
         f.write(token)
+    database = "%s/%s" % (os.environ["VISIT_TEST_DB"], name.lower())   # run-browser.sh's Postgres: made ready first
+    m = await asyncio.create_subprocess_exec(BIN, "migrate", "--database", database, stdout=asyncio.subprocess.DEVNULL)
+    assert await m.wait() == 0, "visit-client migrate failed"
     p = await asyncio.create_subprocess_exec(BIN, "--lobby", url, "--name", name, "--sim", "test-room/1", "--port", str(port),
-                                             "--token-file", path, "--relays", "none", stdout=asyncio.subprocess.PIPE,
+                                             "--token-file", path, "--relays", "none", "--database", database, stdout=asyncio.subprocess.PIPE,
                                              stderr=open(os.path.join(OUT, name + ".log"), "w"))
     await asyncio.wait_for(p.stdout.readline(), 10)
     return p, token
@@ -448,6 +451,9 @@ async def main():
                   "B has A at:", await b.js("JSON.stringify(v.visitors.map(x => x.pose))"), "B frames/s:", await b.js("window.renders"))
             print("      B's spawns:", await b.js("JSON.stringify((window.spawns || []).slice(-6))"))
         check("and back: home in A's own room", home, (True, True))
+        check("both at home, each near the other in its own world (A's: B flush east; B's: A 25 m east): each hears the other near, across the side",
+              (await a.until("v.voices.some(x => x.name === 'B') && JSON.parse(v._whereTold.sig).world.some(w => w[0] === %s)" % json.dumps(kb), 15),
+               await b.until("v.voices.some(x => x.name === 'A')", 15)), (True, True))
 
         print("\nB away: its plot kept from its landscape, walked into, not through")
         await b.js("v.leaveLobby()")
@@ -539,7 +545,7 @@ async def main():
         await b.js("document.querySelector('.visit-panel button.who').click()")
         check("B opens A's row: A sees B's room; A's look in B's room, their model by default; Kick, no; Unlink", await b.until(
             "(r => !!r && [r.querySelector('.muted').textContent, [...r.querySelectorAll('button')].map(b => b.textContent + (b.classList.contains('on2') ? '*' : '')).join()])(document.querySelector('.visit-panel .sub'))"),
-            ["they see your room", "their model*,our model,Unlink"])
+            ["they see your room", "their model*,our model,ban voice,ban chat,Unlink"])
         await a.shot("a_link_corner.png")
         await a.js("document.querySelector('.visit-stage').click()")
         check("a click on the corner: go there, put it in my world, unlink", await a.js(
@@ -666,6 +672,10 @@ async def main():
         await b.key("KeyM", "m", 77, True)
         await b.key("KeyM", "m", 77, False)
         check("M again: on the one B last rode", await b.until("v.riding"), "crate")
+        await a.js("v._ws.close()")   # A's page loses its visit-client a moment (it connects again by itself)
+        check("A's page loses its visit-client and comes back while B rides: B's crate and B's body in A's room once each, not twice",
+              await a.until("v.state === 'online' && v.visitors.length === 1 && !!v.visitors[0].riding && !!room.scene.getObjectByName('crate-box')"
+                            " && room.scene.children.filter(c => c.name === 'mount:B').length === 1 && room.scene.children.filter(c => c.name === 'avatar:B').length <= 1", 30), True)
         await b.js("v.ride(null)")
         await a.until("!room.scene.getObjectByName('mount:B')")
         await b.js("v.leave()")
@@ -733,6 +743,13 @@ async def main():
             "(l => l && l.scope === 'whisper' && l.name === 'B' && !v.chats.some(c => c.text === 'psst') && l.text)(v.chatLog.at(-1))"), "psst")
         check("A's window: [B] whispers; B's: To [A]", (await a.js(f"{cw}.querySelector('.log').lastChild.textContent"), await b.js(f"{cw}.querySelector('.log').lastChild.textContent")),
               ("[B] whispers: psst", "To [A]: psst"))
+        await enter(b)
+        await b.call("Input.insertText", text="/s ")
+        await b.call("Input.insertText", text="/r ")
+        check("/r on B, whom nobody has whispered to yet: back to whom B last whispered (A)", await b.until(
+            f"(c => c.dataset.scope === 'whisper' && c.querySelector('select').selectedOptions[0].textContent === 'Tell A:' && c.querySelector('input').value === '')({cw})"), True)
+        await b.key("Escape", "Escape", 27, True)
+        await b.key("Escape", "Escape", 27, False)
         await enter(a)
         await a.call("Input.insertText", text="/r back at you")
         await enter(a)
@@ -745,8 +762,8 @@ async def main():
         await enter(b)
         check("said: A has it in its chat, into its room, from B (over nobody's head)", await a.until(
             "(l => l && l.scope === 'sim' && l.name === 'B' && l.to.key === v.key && l.text)(v.chatLog.at(-1))"), "into your room")
-        check("A's window: [B] to your room; B's: To A's room", (await a.js(f"{cw}.querySelector('.log').lastChild.textContent"), await b.js(f"{cw}.querySelector('.log').lastChild.textContent")),
-              ("[B] to your room: into your room", "To A's room: into your room"))
+        check("A's window: [Your room] [B]; B's: [A's room] [B] (a room's chat, as a channel)", (await a.js(f"{cw}.querySelector('.log').lastChild.textContent"), await b.js(f"{cw}.querySelector('.log').lastChild.textContent")),
+              ("[Your room] [B]: into your room", "[A's room] [B]: into your room"))
         check("the lobby carries chat (its welcome said so)", (await a.js("v.lobbyChat"), await b.js("v.lobbyChat")), (True, True))
         await enter(b)
         check("B's box remembers where it last said a line", await b.until(f"{cw}.dataset.scope"), "sim")
@@ -761,6 +778,77 @@ async def main():
         check("the window's 🔔: a sound with each line that comes; a click, none (kept in this browser)", (await b.js(f"{cw}.querySelector('button.sound').textContent"),
               await b.js(f"({cw}.querySelector('button.sound').click(), {cw}.querySelector('button.sound').textContent)"), await b.js(f"({cw}.querySelector('button.sound').click(), {cw}.querySelector('button.sound').textContent)")), ("🔔", "🔕", "🔔"))
         check("Esc: the box goes, its line unsaid", (await b.until(f"!{cw}.classList.contains('typing')"), await a.js("v.chatLog.some(l => l.text === 'half a thought')")), (True, False))
+        await enter(b)
+        check("B, with A linked (visiting): its own room's chat among the choices", await b.js(f"[...{cw}.querySelector('select').options].map(o => o.textContent)"),
+              ["Say:", "Tell A:", "To your room:", "To A's room:", "Lobby:"])
+        await b.call("Input.insertText", text="/w ")
+        check("/w and a space: the names it could be, over the box", await b.until(f"{cw}.querySelector('.names').textContent"), "Tab: A")
+        await b.key("Tab", "Tab", 9, True)
+        await b.key("Tab", "Tab", 9, False)
+        check("Tab finishes the name, not yet taken (a longer one could follow)", await b.until(f"(c => c.querySelector('input').value === '/w A' && c.dataset.scope)({cw})"), "lobby")
+        await b.call("Input.insertText", text=" ")
+        check("then a space: the box whispers to A, the names gone", await b.until(
+            f"(c => c.dataset.scope === 'whisper' && c.querySelector('select').selectedOptions[0].textContent === 'Tell A:' && c.querySelector('input').value === '' && c.querySelector('.names').textContent)({cw})"), "")
+        await b.key("Escape", "Escape", 27, True)
+        await b.key("Escape", "Escape", 27, False)
+        await enter(a)
+        await a.call("Input.insertText", text="/room")
+        await enter(a)
+        check("/room alone, Enter: A's box goes to its own room's chat, still open", await a.until(
+            f"(c => c.dataset.scope === 'sim' && c.classList.contains('typing') && c.querySelector('select').selectedOptions[0].textContent)({cw})"), "To your room:")
+        await a.call("Input.insertText", text="for everyone here")
+        await enter(a)
+        check("said: B, linked with A (A visits it), has it in its chat, A's room's", await b.until(
+            "(l => l && l.scope === 'sim' && l.name === 'A' && l.to.name === 'A' && l.to.key !== v.key && l.text)(v.chatLog.at(-1))"), "for everyone here")
+        check("B's window: [A's room] [A]; A's: [Your room] [A]", (await b.until(f"(t => t.includes('everyone') && t)({cw}.querySelector('.log').lastChild.textContent)"),
+              await a.js(f"{cw}.querySelector('.log').lastChild.textContent")), ("[A's room] [A]: for everyone here", "[Your room] [A]: for everyone here"))
+        await b.js(f"{cw}.querySelector('button.headset').click()")
+        check("B's 🎧 (its box not on a room): into its own room's voice, a line over the box saying so", await b.until(
+            f"!!v.roomVoice && v.roomVoice.key === v.key && {cw}.querySelector('.voice').textContent.startsWith('🎧 Your room: you')"), True)
+        await a.js("v.joinVoice(v.visiting.host.key)")
+        check("A joins it: both lines say who is in it", (await a.until(f"(t => t.startsWith('🎧 B') && t.includes('B · you'))({cw}.querySelector('.voice').textContent)"),
+              await b.until(f"{cw}.querySelector('.voice').textContent.includes('you · A')")), (True, True))
+        await b.js("document.querySelector('.visit-panel .sub') || document.querySelector('.visit-panel button.who').click()")
+        check("B opens A's row: ban voice, ban chat, Kick from voice", await b.until(
+            "(s => !!s && [...s.querySelectorAll('button')].map(b => b.textContent).filter(t => /ban|voice/.test(t)).join())(document.querySelector('.visit-panel .sub'))"), "ban voice,ban chat,Kick from voice")
+        await b.js("document.querySelector('.visit-panel .sub button[data-v=ban][data-what=chat]').click()")
+        check("ban chat: kept, and A told (its window says so)", (await b.until("v.bans.length === 1 && v.bans[0].chat && !v.bans[0].voice && v.bans[0].name"),
+              await a.until(f"v.bannedBy.length === 1 && {cw}.querySelector('.log').textContent.includes('keeps you out of its chat')")), ("A", True))
+        await b.js("document.querySelector('.visit-panel .sub button[data-v=ban][data-what=chat]').click()")
+        check("clicked again: lifted", (await b.until("v.bans.length === 0"), await a.until("v.bannedBy.length === 0")), (True, True))
+        await b.js("document.querySelector('.visit-panel .sub button[data-v=voice_kick]').click()")
+        check("Kick from voice: A is out, told why", await a.until(f"!v.roomVoice && {cw}.querySelector('.log').textContent.includes('took you out of their room')"), True)
+        await b.js(f"{cw}.querySelector('.voice button[data-v=leave]').click()")
+        check("B's Leave: out of its own voice, the line gone", await b.until(f"!v.roomVoice && {cw}.querySelector('.voice').textContent === ''"), True)
+        await enter(a)
+        await a.call("Input.insertText", text="/s ")
+        await a.js("""(async () => {
+            const c = document.createElement('canvas'); c.width = 64; c.height = 48;
+            const g = c.getContext('2d'); g.fillStyle = '#e33'; g.fillRect(0, 0, 64, 48); g.fillStyle = '#3e3'; g.fillRect(16, 12, 32, 24);
+            const blob = await new Promise(r => c.toBlob(r, 'image/png'));
+            const dt = new DataTransfer(); dt.items.add(new File([blob], 'shot.png', { type: 'image/png' }));
+            document.querySelector('.visit-chat input').dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+        })()""")
+        check("A pastes a picture into the box: it waits over the box, kept by A's visit-client", await a.until(
+            f"(c => c.querySelectorAll('.attach .chip').length === 1 && !c.querySelector('.attach .chip.busy'))({cw})"), True)
+        await a.call("Input.insertText", text="my screen")
+        await enter(a)
+        check("Enter: said with it, in B's room; B's window shows the line and the picture (from B's own visit-client, which had it from A's)", await b.until(
+            f"(l => !!l && l.textContent.includes('my screen') && (i => !!i && i.src.startsWith('blob:') && i.complete && i.naturalWidth === 64)(l.querySelector('img.pic')))({cw}.querySelector('.log').lastChild)"), True)
+        check("and A's own, the box empty again", await a.until(f"(c => (i => !!i && i.naturalWidth === 64)(c.querySelector('.log').lastChild.querySelector('img.pic')) && !c.querySelector('.attach .chip'))({cw})"), True)
+        await b.js(f"{cw}.querySelector('.log').lastChild.querySelector('img.pic').click()")
+        check("B clicks it: full size, over everything; a click, gone", (await b.until("!!document.querySelector('.visit-lightbox img')"),
+              await b.js("(d => (d.click(), !document.querySelector('.visit-lightbox')))(document.querySelector('.visit-lightbox'))")), (True, True))
+        await enter(b)
+        await b.call("Input.insertText", text="/s ")
+        await b.js(f"{cw}.querySelector('button.gallery').click()")
+        check("B's 🖼 (its box on its own room): what was shared in it, from its database: A's picture", await b.until(
+            f"(s => s.classList.contains('on') && s.querySelectorAll('.grid img').length === 1 && s.querySelector('.tabs b').textContent)({cw}.querySelector('.shared'))"), "Shared in your room")
+        await b.js(f"{cw}.querySelector('.shared button[data-k=links]').click()")
+        check("its links: none yet", await b.until(f"(t => t.includes('No links') && t)({cw}.querySelector('.shared .items').textContent)"), "No links shared here yet")
+        await b.js(f"{cw}.querySelector('.shared button[data-k=close]').click()")
+        await b.key("Escape", "Escape", 27, True)
+        await b.key("Escape", "Escape", 27, False)
         await a.js("window.cw2 = Visit.chat(v, { fade: 300 })")
         check("a window idle a while fades away", await a.until("cw2.element.classList.contains('idle')"), True)
         await b.js("v.say('wake up')")
@@ -769,6 +857,13 @@ async def main():
         await a.shot("a_chat.png")
         await b.shot("b_chat.png")
         check("six lines at once: the sixth not said (5 every 10 s)", await a.js("(r => r[5])(Array.from({ length: 6 }, (_, i) => v.say('n' + i)))"), False)
+        await a.call("Page.reload")
+        check("A's page reloads: its chat window has the chat A had, kept by its visit-client, its own lines too, before the window's note; no bubbles, all old",
+              await a.until(f"window.v && v.visiting && v.chatLog.length > 5 && (c => !!c && (t => [t.includes('[B] whispers: psst'), t.includes('[Your room] [A]: for everyone here'), "
+                            f"t.includes('[B] says: wake up'), t.at(-1).startsWith('Enter to chat'), v.chats.length === 0, v.chatLog.every(l => l.old)])"
+                            f"([...c.querySelectorAll('.log .line')].map(d => d.textContent)))({cw})", 30), [True] * 6)
+        check("and the box still says where A's lines went (this tab): Say, as A last chose", await a.js("JSON.parse(sessionStorage.getItem('visit:chat-to')).scope"), "say")
+        await a.until("v.visiting && !v.visiting.paused && !!(v._viewer && v._viewer.scene)", 30)
         await a.js("v.leave()")
         await b.until("v.visitors.length === 0")
         await a.js("v.setMic(false)")
@@ -791,8 +886,8 @@ async def main():
         check("and A sees it in B's room (it is in B's scene)", await a.until("!!(v._viewer && v._viewer.scene && v._viewer.scene.root.getObjectByName('visit:phone-model'))"), True)
         await b.js("document.querySelector('.visit-panel button[data-v=pick_up]').click()")
         check("B picks up: on, both ways, each in its own room", (await a.until("v.calls.length === 1 && v.calls[0].state === 'on'"), await b.until("v.calls.length === 1 && v.calls[0].state === 'on'")), (True, True))
-        check("A hears B, as a telephone (not by where anyone stands), and B A", (await a.until("(s => !!s && s.frames > 50 && s.level > 0.005)(v._voices.get(v.calls[0].key))"),
-              await b.until("(s => !!s && s.frames > 50 && s.level > 0.005)(v._voices.get(v.calls[0].key))")), (True, True))
+        check("A hears B, as a telephone (not by where anyone stands), and B A", (await a.until("(s => !!s && s.frames > 50 && s.level > 0.005)(v._voices.get('call:' + v.calls[0].key))"),
+              await b.until("(s => !!s && s.frames > 50 && s.level > 0.005)(v._voices.get('call:' + v.calls[0].key))")), (True, True))
         check("the microphone on for the call only: nobody near either", (await a.js("!v.mic && !!v._mic && v.voices.length === 0"), await b.js("!v.mic && !!v._mic")), (True, True))
         ka = await b.js("v.calls[0].key")
         await b.js("v.phone(true, { at: { x: room.me.x + 1, y: 1, z: room.me.z } })")   # B's phone, a step from B
@@ -800,15 +895,15 @@ async def main():
         await b.js("document.querySelector('.visit-panel button[data-v=speaker]').click()")
         check("B puts it on speaker: its lamp lit, its handset back", await b.until("v._phoneObj.lamp.visible && v._phoneObj.handset.visible"), True)
         check("B puts it on speaker: A's voice from B's phone, heard where B stands (its voice for the call only: its microphone is off)", await b.until(
-            "v.calls[0].speaker && (s => !!s && s.near && s.frames > 10)(v._voices.get(" + json.dumps(ka) + ")) && v._voiceTo === 2"), True)
-        heard = "(s => s ? s.frames : 0)(v._voices.get(v.calls[0].key))"
+            "v.calls[0].speaker && (s => !!s && s.near && s.frames > 10)(v._voices.get(" + json.dumps("call:" + ka) + ")) && v._voiceTo === 2"), True)
+        heard = "(s => s ? s.frames : 0)(v._voices.get('call:' + v.calls[0].key))"
         async def growing(tab):
             f0 = await tab.js(heard)
             await asyncio.sleep(1.0)
             return await tab.js(heard) - f0 > 20
         check("and B, near it, heard by A", await growing(a), True)
         await b.js("v.phone(true, { at: { x: room.me.x + 100, y: 1, z: room.me.z } })")
-        await b.until("!v._voices.get(" + json.dumps(ka) + ").near")
+        await b.until("!v._voices.get(" + json.dumps("call:" + ka) + ").near")
         await asyncio.sleep(0.5)
         check("B far from its phone: B not hearing the call, and (B's visit-client deciding) not heard in it", await growing(a), False)
         await b.js("document.querySelector('.visit-panel button[data-v=speaker]').click()")

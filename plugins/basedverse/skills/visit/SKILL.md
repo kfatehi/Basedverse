@@ -48,6 +48,12 @@ feature in a workroom's code. If the changelog has something newer than the tabl
 - **Never open a second page on the user's own visit-client.** A second page takes over theirs (close code 4409). To
   test, run a second visit-client, as INTEGRATING.md step 8 says.
 - Don't commit, push or restart their running things unless they ask or the plan they agreed says so.
+- **Its database** (Visit 0.20): visit-client needs Postgres. After installing or upgrading visit-client, always
+  bring its database up to date with **that** visit-client before starting it: `"$VISIT_CLIENT_PATH" migrate`, with
+  the workroom's `.env` loaded (it reads `VISIT_DATABASE_URL`), or `--database <url>`. `migrate --status` says where
+  it is without changing anything: run it first, and tell the user what is pending. Only ever against the
+  workroom's own database (its `.env`'s); if it holds anything they care about, offer a backup first
+  (`pg_dump`). If migrate fails, stop and show the user why; never edit its tables by hand.
 - A variant the user wants (a cell phone instead of a desk phone, voice without panning) either fits today's API or
   needs Visit to change. Say which, from SPEC.md. If it needs a Visit change, record it in `VISIT.md` as an open request
   for basedverse. Do not work around the contract.
@@ -65,6 +71,8 @@ feature in a workroom's code. If the changelog has something newer than the tabl
    - `VISIT.md` at the workroom's root, if there is one: the version it was integrated at, and its decisions.
    - The visit-client it runs: `"$VISIT_CLIENT_PATH" --version`, or `curl -s http://127.0.0.1:${VISIT_PORT:-7401}/health`,
      which answers `{"version": …}`. If they differ, say so.
+   - Its database: `VISIT_DATABASE_URL` in the `.env`, and `"$VISIT_CLIENT_PATH" migrate --status` (where it is, what is
+     pending). None (before 0.20): the plan gives it one (bin/setup can start Postgres in Docker).
 4. **What it uses**: `VISIT.md` says. Without one, search the page's code for each feature (the table below), tell
    the user what you found, and let them correct it.
 
@@ -80,16 +88,18 @@ feature in a workroom's code. If the changelog has something newer than the tabl
 | where friends put you | 0.10 | step 9 | `visit.seen`, the panel's notes |
 | avatars | 0.9 | step 5 | `visit.avatar(`, `entry.avatar` |
 | interactions | 0.9 | step 5 | `visit.interactions(`, `userData.visitPoint` |
-| voice (same room, 45 m) | 0.9, 0.10 | step 5 | `visit.setMic(`, `visit.listener(`, the panel's 🎙 |
+| voice (same room, 45 m; across a plot's side, near in both worlds) | 0.9, 0.10, 0.20 | step 5 | `visit.setMic(`, `visit.listener(`, the panel's 🎙; a world (`visit.world(`) |
 | 🔊 over who is speaking | 0.13 | vanilla | `visit.world(` (unless `speaking: false`) |
 | phone | 0.9, 0.13 | step 5 | `visit.phone(` (`model: false`: their own) |
 | chat bubbles | 0.11 | step 5 | `visit.say(`, `bubbles` |
-| chat window, scopes (say, whisper, a linked room, the lobby) | 0.15, 0.16 | vanilla | the panel's chat window (`chat: false`: their own), `visit.say(text, to)` |
+| chat window, scopes (say, whisper, a room's chat, the lobby); a room's voice (🎧), bans (panel) | 0.15, 0.16, 0.20 | vanilla | the panel's chat window (`chat: false`: their own), `visit.say(text, to)` |
 | one panel row a person (their look, Kick, Unlink in it) | 0.16 | vanilla | the panel; visitors' own look by default (`visit.useAvatars(`) |
 | landscapes, offline plots | 0.12 | step 5 | `userData.visitStatic`, `visit.landscapeChanged(` |
 | mounts (possessions: the room's own; Visit carries them) | 0.18 | vanilla, step 5 | `visit.ride(`, `visit.possessions(`, `mounts:`, `eye:` in `visit.host(` |
 | positions at the feet; bodies drawn by Visit; `body` reports (MODELS.md) | 0.19 | step 5, MODELS.md | `spawn(`, `move(` return feet; `look` in `visit.visitors`; `Visit.checkModel(` |
 | physics: falling, flying, riders (the room's own) | 0.17, 0.19 | step 5 | `move(` (`input.up`, `who.riding`), `spawn(` (`at.air`), `eye:`, `walk: { speed, mounts }`; `air` in `world.frame(` |
+| its database (chat history, pictures, links, bans), `visit-client migrate` | 0.20 | step 1 | `VISIT_DATABASE_URL` in the `.env`; the launcher passes it on |
+| pictures and links in chat (paste, previews, 🖼 shared), history up the log | 0.20 | vanilla | the panel's chat window; `visit.share(`, `visit.preview(`, `visit.history(`, `visit.shared(` |
 | telemetry (⏱) | 0.14 | troubleshooting | the panel's ⏱, `visit.perf(`: nothing to integrate, a tool for when a room feels slow |
 
 ## List
@@ -123,6 +133,9 @@ Write the plan in the conversation:
   - their avatar;
   - where the panel goes.
 - **Getting visit-client**: as INTEGRATING.md step 1 says (setup, or the release's download), within their rules.
+- **Its database**: as step 1 says (setup starts Postgres in Docker, or uses theirs), within their rules (a
+  containerised workroom runs Postgres as one of its own services); then `visit-client migrate`, every install and
+  every upgrade.
 
 Wait for "go" (or the user's own word for it).
 

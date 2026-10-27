@@ -22,8 +22,9 @@ const KEY: u8 = 1;
 const EDIT: u8 = 2;
 /// A page's own avatar (8.6): gzipped JSON, kept by its visit-client for the hosts that ask.
 const AVATAR: u8 = 4;
-/// A moment of the page's own user's voice (8.7: its channel says where it may go, VOICE_ROOM and VOICE_CALLS; its
-/// visit-client decides who hears it), or to the page, another office's: one Opus packet.
+/// A moment of the page's own user's voice (8.7: its channel says where it may go, VOICE_ROOM, VOICE_CALLS and
+/// VOICE_CHANNEL; its visit-client decides who hears it), or to the page, another office's: one Opus packet. To the
+/// page, the first byte of the timestamp's place says how it came (ROUTE_NEAR, ROUTE_CALL, ROUTE_VOICE).
 const AUDIO: u8 = 8;
 /// To the page, a moment of someone else's voice an office passed on (8.7, 8.8): a visitor's, from the room to
 /// another visitor near them; a call's, from a phone on speaker to those near it, and theirs to the call. Who spoke
@@ -35,6 +36,9 @@ const LAND: u8 = 32;
 /// One of a page's own possessions (8.11): its model, gzipped JSON, its slot in the list the page gave (the frame's
 /// channel). Kept by its visit-client for the hosts that ask.
 const POSSESSION: u8 = 64;
+/// A picture shared in chat (8.12): from the page, one to keep (its channel a slot the page names, answered with
+/// `media_ready`); to the page, one it asked for (who it is, its type, then its bytes; never dropped).
+const MEDIA: u8 = 128;
 /// The most one packet of voice takes (20 ms of Opus is some tens of bytes).
 pub const MAX_AUDIO: usize = 1000;
 /// The most an avatar takes gzipped, and unpacked.
@@ -135,9 +139,34 @@ pub fn land_from_page(b: &[u8]) -> Option<Bytes> {
     Some(Bytes::copy_from_slice(&b[11..]))
 }
 
-/// Where a page's own user's voice may go: the room they are in, their calls.
+/// A picture from the page to keep (its slot, and its bytes), if the frame is one and not too big.
+pub fn media_from_page(b: &[u8]) -> Option<(u16, Bytes)> {
+    if b.len() < 12 || b[2] != MEDIA || b.len() - 11 > crate::media::MAX_MEDIA {
+        return None;
+    }
+    Some((u16::from_be_bytes([b[0], b[1]]), Bytes::copy_from_slice(&b[11..])))
+}
+
+/// A picture for the page: who it is (its id), its type, then its bytes.
+pub fn media_to_page(id: &str, mime: &str, bytes: &[u8]) -> Bytes {
+    let head = relay_head(id, mime, bytes);
+    let mut out = BytesMut::with_capacity(11 + head.len());
+    out.put_u16(0);
+    out.put_u8(MEDIA);
+    out.put_u64(0);
+    out.extend_from_slice(&head);
+    out.freeze()
+}
+
+/// Where a page's own user's voice may go: the room they are in (and across a plot's side), their calls, the room
+/// voice they are in.
 pub const VOICE_ROOM: u16 = 1;
 pub const VOICE_CALLS: u16 = 2;
+pub const VOICE_CHANNEL: u16 = 4;
+/// How a voice came to the page (8.7): in person (in a room, or across a plot's side), on a call, in a room voice.
+pub const ROUTE_NEAR: u8 = 0;
+pub const ROUTE_CALL: u8 = 1;
+pub const ROUTE_VOICE: u8 = 2;
 
 /// A packet of the page's own user's voice and where it may go, if the frame is one and not too big.
 pub fn audio_from_page(b: &[u8]) -> Option<(u16, Bytes)> {
@@ -147,11 +176,11 @@ pub fn audio_from_page(b: &[u8]) -> Option<(u16, Bytes)> {
     Some((u16::from_be_bytes([b[0], b[1]]), Bytes::copy_from_slice(&b[11..])))
 }
 
-/// Someone's voice passed on (RELAY): who spoke (an id of at most 32 bytes, a name of at most 24 characters), then
-/// the voice.
+/// Someone's voice passed on (RELAY, and a room voice's): who spoke (an id of at most 100 bytes: a visit's id, or an
+/// office's key; a name of at most 24 characters), then the voice.
 pub fn relay_head(id: &str, name: &str, voice: &[u8]) -> Bytes {
     let cut = |s: &str, n: usize| -> String { s.chars().scan(0, |len, c| { *len += c.len_utf8(); (*len <= n).then_some(c) }).collect() };
-    let (id, name) = (cut(id, 32), cut(&name.chars().take(24).collect::<String>(), 96));
+    let (id, name) = (cut(id, 100), cut(&name.chars().take(24).collect::<String>(), 96));
     let mut out = BytesMut::with_capacity(2 + id.len() + name.len() + voice.len());
     out.put_u8(id.len() as u8);
     out.extend_from_slice(id.as_bytes());
@@ -170,22 +199,22 @@ pub fn relay_parts(b: &[u8]) -> Option<(String, String, &[u8])> {
     Some((id.to_string(), name.to_string(), &b[2 + n + m..]))
 }
 
-/// Someone's voice the other side passed on, for the page, on the channel of the visit it came by.
-pub fn relay_to_page(channel: u16, data: &[u8]) -> Bytes {
-    let mut out = BytesMut::with_capacity(11 + data.len());
-    out.put_u16(channel);
-    out.put_u8(RELAY);
-    out.put_u64(0);
-    out.extend_from_slice(data);
-    out.freeze()
+/// Someone's voice the other side passed on, for the page, on the channel of the visit it came by, and how.
+pub fn relay_to_page(channel: u16, route: u8, data: &[u8]) -> Bytes {
+    voice_to_page(channel, RELAY, route, data)
 }
 
-/// The other office's packet of voice for the page, on the channel of the visit it came by.
-pub fn audio_to_page(channel: u16, data: &[u8]) -> Bytes {
+/// The other office's packet of voice for the page, on the channel of the visit it came by, and how.
+pub fn audio_to_page(channel: u16, route: u8, data: &[u8]) -> Bytes {
+    voice_to_page(channel, AUDIO, route, data)
+}
+
+fn voice_to_page(channel: u16, flag: u8, route: u8, data: &[u8]) -> Bytes {
     let mut out = BytesMut::with_capacity(11 + data.len());
     out.put_u16(channel);
-    out.put_u8(AUDIO);
-    out.put_u64(0);
+    out.put_u8(flag);
+    out.put_u8(route);
+    out.put_bytes(0, 7);
     out.extend_from_slice(data);
     out.freeze()
 }
@@ -302,9 +331,11 @@ mod tests {
     fn who_spoke_goes_with_the_voice() {
         let head = relay_head("phone:v1a2b3c4d5e6f", "Ada Ünder", b"opus");
         assert_eq!(relay_parts(&head), Some(("phone:v1a2b3c4d5e6f".to_string(), "Ada Ünder".to_string(), &b"opus"[..])));
-        let long = relay_head(&"x".repeat(80), &"é".repeat(40), b"");
+        let long = relay_head(&"x".repeat(120), &"é".repeat(40), b"");
         let (id, name, voice) = relay_parts(&long).unwrap();
-        assert_eq!((id.len(), name.chars().count(), voice.len()), (32, 24, 0));
+        assert_eq!((id.len(), name.chars().count(), voice.len()), (100, 24, 0));   // an office's key fits (a room voice's)
+        let page = audio_to_page(7, ROUTE_CALL, b"opus");
+        assert_eq!((&page[..4], &page[11..]), (&[0, 7, AUDIO, ROUTE_CALL][..], &b"opus"[..]));   // how it came, first in the timestamp's place
         assert!(relay_parts(&[5, b'a']).is_none() && relay_parts(&[]).is_none());
         assert!(audio_from_page(&[0, 3, AUDIO, 0, 0, 0, 0, 0, 0, 0, 0, 0xFC]).is_some() && audio_from_page(&[0, 3, RELAY, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3]).is_none());
     }

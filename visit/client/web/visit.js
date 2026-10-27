@@ -13,7 +13,7 @@
 // visitor's page walks at once and the host corrects it), and a host renders and encodes nothing for anyone.
 "use strict";
 (function () {
-  const VERSION = "0.19.0", PROTO = "basedverse-visit-local/2";
+  const VERSION = "0.20.0", PROTO = "basedverse-visit-local/2";
   const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, LOOK = 0.0025;
   const POINT_MS = 200, AIM_MS = 125;   // a visitor's points, at most one this often; what it aims at, looked for this often
   // A visitor's up and down (SPEC 8.2: its input's `up`), as WoW flies: what they do is the room's (its move).
@@ -48,7 +48,8 @@
   // draws it with the very three.js release the host runs, fetched from a CDN and checked against the hashes
   // below (Subresource Integrity): nothing else ever runs from it, and what the host sends is only ever read as
   // data (cleanScene). The visitor walks at once, predicted here, and the host's answer corrects it.
-  const KEY = 1, EDIT = 2, AVATAR = 4, AUDIO = 8, RELAY = 16, LAND = 32, POSSESSION = 64;   // frames' flags: bit 0 a key delta; bit 1 a scene edit, bit 2 this office's avatar (page to visit-client); bit 3 voice; bit 5 this room's landscape (page to visit-client); bit 6 one of its possessions, its slot the channel (8.11) (SPEC 5.4)
+  const KEY = 1, EDIT = 2, AVATAR = 4, AUDIO = 8, RELAY = 16, LAND = 32, POSSESSION = 64, MEDIA = 128;   // frames' flags: bit 0 a key delta; bit 1 a scene edit, bit 2 this office's avatar (page to visit-client); bit 3 voice; bit 5 this room's landscape (page to visit-client); bit 6 one of its possessions, its slot the channel (8.11); bit 7 a picture shared in chat (8.12) (SPEC 5.4)
+  const MEDIA_MAX = 8 << 20, MEDIA_KINDS = ["image/png", "image/jpeg", "image/webp", "image/gif"];   // a picture shared (8.12): at most 8 MB, of these kinds
   // A landscape (SPEC 8.10) goes to visit-client this long after what is static last changed: once, for a room still
   // loading.
   const LAND_QUIET = 1000;
@@ -60,7 +61,8 @@
   // Heard within v.voiceRange metres (as visit-client says: VOICE_RANGE until it has), fading to nothing there. Who
   // hears whom the room's visit-client decides; a page's voice says where it may go: the room its user is in, their
   // calls, or both (VOICE_ROOM, VOICE_CALLS: its frame's channel).
-  const VOICE_RATE = 48000, VOICE_FRAME = 960, VOICE_BITRATE = 24000, VOICE_LEAD = 0.06, VOICE_LATE = 0.4, VOICE_RANGE = 45, VOICE_ROOM = 1, VOICE_CALLS = 2;
+  const VOICE_RATE = 48000, VOICE_FRAME = 960, VOICE_BITRATE = 24000, VOICE_LEAD = 0.06, VOICE_LATE = 0.4, VOICE_RANGE = 45, VOICE_ROOM = 1, VOICE_CALLS = 2, VOICE_CHANNEL = 4;
+  const ROUTE_CALL = 1, ROUTE_VOICE = 2;   // how a voice came (to the page: the frame's first timestamp byte): in person (0), a call, a room voice
   // A phone (SPEC 8.8) rings this long, unanswered, then stops.
   const CALL_RING_MS = 30000;
   // Chat (SPEC 8.9): a line is at most CHAT_LEN characters, at most CHATS of them every CHAT_WINDOW ms (as visit-client
@@ -229,6 +231,28 @@
   const BLANK = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
   const MAX_SIDE = 4096, MAX_VERTICES = 4e6, MAX_OBJECTS = 1e5;
   const isObj = x => !!x && typeof x === "object" && !Array.isArray(x);
+  const bansFrom = l => (Array.isArray(l) ? l : []).filter(b => isObj(b) && typeof b.key === "string").map(b => ({ key: b.key, name: String(b.name || ""), voice: b.voice === true, chat: b.chat === true }));
+  // A line's pictures and links (8.12), as the visit-client gives them: [{ id, mime, size }], [{ url, title, description,
+  // site, image }].
+  const picturesFrom = l => (Array.isArray(l) ? l : []).filter(p => isObj(p) && /^[0-9a-f]{64}$/.test(p.id)).slice(0, 4).map(p => ({ id: p.id, mime: String(p.mime || ""), size: Number(p.size) || 0 }));
+  const linksFrom = l => (Array.isArray(l) ? l : []).filter(x => isObj(x) && /^https?:\/\/\S+$/.test(String(x.url || ""))).slice(0, 2).map(x => ({ url: String(x.url),
+    title: String(x.title || ""), description: String(x.description || ""), site: String(x.site || ""), image: picturesFrom(isObj(x.image) ? [x.image] : [])[0] || null }));
+  // A picture made small enough to share (8.12): at most 4096 px a side and MEDIA_MAX, as WebP (else JPEG).
+  async function smaller(blob) {
+    const bmp = await createImageBitmap(blob);
+    let scale = Math.min(1, 4096 / Math.max(bmp.width, bmp.height));
+    for (let i = 0; i < 6; i++, scale *= 0.7) {
+      const c = document.createElement("canvas");
+      c.width = Math.max(1, Math.round(bmp.width * scale)); c.height = Math.max(1, Math.round(bmp.height * scale));
+      c.getContext("2d").drawImage(bmp, 0, 0, c.width, c.height);
+      for (const [kind, q] of [["image/webp", 0.85], ["image/jpeg", 0.85]]) {
+        const out = await new Promise(r => c.toBlob(r, kind, q));
+        if (out && out.type === kind && out.size <= MEDIA_MAX) return out;
+      }
+    }
+    throw new Error("too big to share, even made smaller");
+  }
+  const membersFrom = l => (Array.isArray(l) ? l : []).filter(x => isObj(x) && typeof x.key === "string").map(x => ({ key: x.key, name: String(x.name || ""), speaking: false }));
   function cleanScene(json, budget) {
     if (!isObj(json)) throw new Error("a scene is a JSON object");
     const arr = k => (Array.isArray(json[k]) ? json[k] : []).filter(isObj);
@@ -650,13 +674,26 @@
       try { const m = localStorage.getItem("visit:mount"); if (m) this.mount = m; } catch (e) { /* none kept */ }
       this._own = [];          // your page's own possessions (8.11): [{ id, name, object, unit, mount, fly, speed, lift }]   // whose look your visitors have in your room (8.6): "theirs" or "mine"
       this.mic = false;        // your microphone on (8.7): those near you hear you
-      this.voices = [];        // who you can hear, near you: [{ key, name, distance (m), speaking }]
+      this.voices = [];        // who you can hear, near you: [{ key, name, distance (m), speaking }] (in your room, the one you
+                               //   are in, and friends across your plot's side, near in both worlds)
+      this.roomVoice = null;   // the room voice you are in (8.7): { key (its room's owner's; yours: v.key), name, members:
+                               //   [{ key, name, speaking }], joining }
+      this.voiceMembers = [];  // who is in your own room's voice, you too if you are: [{ key, name, speaking }]
+      this.bans = [];          // whom you keep out of your room's voice or chat (8.9): [{ key, name, voice, chat }]
+      this.bannedBy = [];      // rooms that keep you out of their voice or chat: [{ key, name, voice, chat }]
+      this._asks = new Map();     // what the page asked its visit-client and waits for (history, shared, preview), by req
+      this._reqN = 0;
+      this._puts = new Map();     // pictures being kept (8.12), by slot: { resolve, reject, t }
+      this._slot = 0;
+      this._media = new Map();    // pictures by id: a promise of a URL this page can show (null: not to be had)
+      this._mediaWait = new Map();   // id -> its promise's resolve, while the visit-client fetches it
       this.voiceRange = VOICE_RANGE;   // metres: farther, nobody is heard (visit-client's, from ready)
       this._voices = new Map();   // their key -> a decoder, its panner, and where its next moment plays
       this._voiceTo = 0;          // where your voice may go: VOICE_ROOM, VOICE_CALLS, both, or nowhere (nothing encoded)
       this._chats = new Map();    // lines said in the rooms you are in or host (8.9), still showing, by who said them
       this._bodies = new Map();   // channel -> how the room on it draws your user: { look, eyes, problem } (8.6)
-      this.chatLog = [];       // the last CHAT_LOG lines of chat, of every scope (8.9), as "chat" gave them, with `at` (ms)
+      this.chatLog = [];       // the last CHAT_LOG lines of chat, of every scope (8.9), as "chat" gave them, with `at` (ms);
+                               //   `old`, from before this page (kept by the visit-client: a reload keeps the chat)
       this.lobbyChat = false;  // the lobby relays chat (8.9): say(text, "lobby") goes to everyone in it
       this._kept = new Map();     // guests' plots kept while they are away (8.10): key -> { key, name, plot, unit, json, asked, built }
       this._landText = null;      // this room's landscape, as last given to visit-client
@@ -767,6 +804,8 @@
       if (this._sync) Object.assign(this._sync, { landDirty: true, landAt: 0 });
       this._nearHome = []; this._nearBy.clear(); this._whereTold.sig = "";
       this.seen = (Array.isArray(m.seen) ? m.seen : []).filter(x => isObj(x) && isObj(x.at)).map(x => ({ key: String(x.key), name: String(x.name || ""), at: x.at }));
+      this.bans = bansFrom(m.bans); this.bannedBy = bansFrom(m.banned_by); this.voiceMembers = membersFrom(m.voice_members);
+      this._roomVoiceFrom(m.room_voice);
       this.knocks = []; this.knocking = [];
       this._avatarsFrom(m.avatars);
       this._phoneOn.clear();
@@ -824,16 +863,27 @@
         case "phone": if (m.on) this._phoneOn.add(m.channel); else { this._phoneOn.delete(m.channel); const p = this._peerOf(m.channel); if (p && p.key) this._callEnd(p.key, "their phone went", false); } break;
         case "call": this._callIn(m); break;
         case "layout": this.layout = Array.isArray(m.layout) ? m.layout : []; break;
-        case "chat": {   // a line (8.9): said in your room by a visitor (their channel), or in a room you are in or see;
-          // into your room (home) or the one you are in, from a linked office ("sim"); whispered to you ("whisper"); in
-          // the lobby ("lobby")
-          const line = { key: String(m.key || ""), name: String(m.name || ""), text: String(m.text || "").slice(0, 4 * CHAT_LEN) };
-          if (m.scope === "lobby") this._chatIn({ ...line, scope: "lobby", mine: !!this.office && m.id === this.office.id });
-          else if (m.scope === "whisper") this._chatIn({ ...line, scope: "whisper", id: typeof m.id === "string" ? m.id : null });
-          else if (m.scope === "sim") {
-            const p = m.home === true ? { key: this.key || "", name: this.office ? this.office.name : "" } : this._peerOf(m.channel) || {};
-            this._chatIn({ ...line, scope: "sim", channel: m.channel, to: { key: String(p.key || ""), name: String(p.name || "") } });
-          } else this._chatIn({ ...line, id: typeof m.id === "string" ? m.id : null, owner: m.owner === true, channel: m.channel, room: this._hosted.has(m.channel) ? "home" : m.channel });
+        case "chat": this._chatMsg(m, false); break;
+        case "media_ready": {   // a picture shared, kept by the visit-client (8.12): its id
+          const put = this._puts.get(m.slot);
+          if (put) { this._puts.delete(m.slot); clearTimeout(put.t); put.resolve({ id: String(m.id), mime: String(m.mime), size: Number(m.size) || 0 }); }
+          break;
+        }
+        case "media_none": { const w = this._mediaWait.get(m.id); this._mediaWait.delete(m.id); this._media.delete(m.id); if (w) w(null); break; }
+        case "preview": case "history": case "shared": { const a = this._asks.get(m.req); if (a) { this._asks.delete(m.req); a.resolve(m); } break; }
+        case "bans": this.bans = bansFrom(m.bans); this._changed(); break;
+        case "banned": {   // a room that keeps your user out of its voice or its chat (8.9), or no longer
+          const b = bansFrom([m])[0];
+          if (!b) break;
+          this.bannedBy = this.bannedBy.filter(x => x.key !== b.key).concat(b.voice || b.chat ? [b] : []);
+          this._emit("banned", b); this._changed(); break;
+        }
+        case "room_voice": this._roomVoiceFrom(m.key == null ? null : m, m.out); break;   // the room voice you are in, who is in it; or none
+        case "voice_members": this.voiceMembers = membersFrom(m.members); this._changed(); break;   // who is in your room's voice
+        case "chat_log": {   // the chat your user had, kept by the visit-client (8.9): all of it, for a page that comes back
+          // (a reload); after a blip, what came meanwhile
+          const had = this.chatLog.length ? this.chatLog[this.chatLog.length - 1].at : 0;
+          for (const l of Array.isArray(m.lines) ? m.lines : []) if (isObj(l) && Number(l.at) > had && !(had && l.mine)) this._chatMsg(l, true);
           break;
         }
         case "voice_near": {   // who is near your user (8.7): in your room (no channel), or in the one you are in
@@ -866,7 +916,13 @@
         case "plot_forgotten": this._kept.delete(String(m.key)); if (this._world) this._world._keptForget(String(m.key)); break;
         case "scene": this._sceneEdit(m); break;
         case "scene_lost": { const w = this._viewing(m.channel); if (w) this._sceneResync(w); break; }
-        case "error": this._emit("error", { code: m.code, message: m.message, ref: m.ref }); break;
+        case "error": {
+          const put = m.ref === "media_put" && this._puts.get(m.slot), a = typeof m.ref === "number" && this._asks.get(m.ref);
+          if (put) { this._puts.delete(m.slot); clearTimeout(put.t); put.reject(new Error(m.message || m.code)); }
+          if (a) { this._asks.delete(m.ref); a.reject(new Error(m.message || m.code)); }
+          this._emit("error", { code: m.code, message: m.message, ref: m.ref });
+          break;
+        }
       }
     }
 
@@ -1245,6 +1301,9 @@
     }
 
     _dropAll() {
+      // Visitors' bodies and mounts out of this room's scene with them: they come back, made again, with their visits
+      // (were they left, a page that lost its visit-client a moment had two of each).
+      for (const h of this._hosted.values()) { this._avatarDrop(h); this._rideDrop(h); }
       this._hosted.clear();
       for (const w of this._watches.values()) this._sceneDrop(w);
       this._watches.clear();
@@ -1364,6 +1423,7 @@
       if (r.kind === "home") {
         for (const h of this._hosted.values()) if (h.inside && h.pose && h.visitor.key) out.set(h.visitor.key, { key: h.visitor.key, name: h.visitor.name || "", channel: h.channel,
           x: h.pose.x * r.k, y: (Number(h.pose.y) || 0) * r.k, z: h.pose.z * r.k });
+        for (const x of this._worldNear()) if (!out.has(x.key)) out.set(x.key, x);
         return out;
       }
       const m = r.s.mark || (r.s.mark = r.s.root.getObjectByName("visit:me")), host = r.w.host || (this.visiting && this.visiting.host) || {};
@@ -1373,6 +1433,23 @@
       for (const [id, x] of r.s.relayed || []) {
         const b = id === "phone" || id.startsWith("phone:") ? r.s.root.getObjectByName("visit:phone") : this._body(r.s, id);   // a call on the room's speaker: from its phone
         if (b && performance.now() - x.at < 2000) out.set("relay:" + id, Object.assign({ key: "relay:" + id, name: x.name, channel: r.w.channel }, this._where(r.s, b, r.k)));
+      }
+      return out;
+    }
+    // Your friends at home in their own rooms, each a plot in your world, and where your world has them (8.7: across a
+    // plot's side), in metres: by the mark each room keeps where its owner stands (none while they are away).
+    _worldNear() {
+      const wd = this._world, out = [];
+      if (!wd) return out;
+      const k = this._unit();
+      for (const x of wd.list) {
+        const w = x.w, s = w && w.scene;
+        if (!s || w.inside || !w.host || !w.host.key) continue;
+        let m = s.mark;
+        if (!m || !m.parent) m = s.mark = s.root.getObjectByName("visit:me");
+        let shown = !!m;
+        for (let o = m; o && shown; o = o.parent) if (!o.visible) shown = false;
+        if (shown) out.push(Object.assign({ key: w.host.key, name: w.host.name || "", channel: w.channel }, this._where(s, m, k)));
       }
       return out;
     }
@@ -1391,8 +1468,13 @@
             return { key, name: n.name, distance: n.distance, speaking: n.phone ? [...this._voices.keys()].some(k => k.startsWith("relay:phone") && speaking(k)) : speaking(key) }; })
         : [...near.values()].filter(p => p.distance <= range).map(p => ({ key: p.key, name: p.name, distance: Math.round(p.distance * 10) / 10, speaking: speaking(p.key) }));
       const room = this.mic && !!r.ears && (this.voices.length > 0 || (r.kind !== "home" && !told)), calls = [...this._calls.values()].some(c => c.state === "on");
-      this._voiceTo = (room ? VOICE_ROOM : 0) | (calls ? VOICE_CALLS : 0);
-      for (const c of this._calls.values()) c.speaking = speaking(c.key);
+      const rv = this.roomVoice, chan = this.mic && !!rv && !rv.joining && rv.members.some(x => x.key !== this.key);
+      this._voiceTo = (room ? VOICE_ROOM : 0) | (calls ? VOICE_CALLS : 0) | (chan ? VOICE_CHANNEL : 0);
+      for (const c of this._calls.values()) c.speaking = speaking("call:" + c.key);
+      const heard = x => { const was = x.speaking; x.speaking = x.key !== this.key && (speaking("room:" + x.key) || speaking(x.key) || speaking("call:" + x.key)); return was !== x.speaking; };   // however you hear them
+      let flip = false;
+      for (const x of [...(rv ? rv.members : []), ...this.voiceMembers]) flip = heard(x) || flip;
+      if (flip) this._emit("voice", rv);
       const ku = this._unit(), pa = this._phoneAt, phone = pa && r.ears && r.kind === "home" && { x: pa.x * ku, y: (pa.y || 0) * ku, z: pa.z * ku };   // your phone, in your room
       const ctx = this._ctx;
       if (ctx && r.ears) {
@@ -1402,6 +1484,7 @@
         else { l.setPosition(r.ears.x, r.ears.y, r.ears.z); l.setOrientation(fx, 0, fz, 0, 1, 0); }
       }
       for (const s of this._voices.values()) {
+        if (s.room) continue;   // a room voice: not from anywhere
         const c = s.callKey && this._calls.get(s.callKey);
         let p = near.get(s.key);
         if (c && c.speaker) {   // a call on speaker: from your phone, heard where you are in your room
@@ -1420,16 +1503,19 @@
     _voiceWhere(r) {
       const k = this._unit(), q = x => Math.round(x * 10) / 10, pa = this._phoneAt;
       const where = { me: r.kind === "home" && r.ears ? [q(r.ears.x), q(r.ears.y), q(r.ears.z)] : null, phone: pa ? [q(pa.x * k), q((pa.y || 0) * k), q(pa.z * k)] : null,
-        visitors: [...this._hosted.values()].filter(h => h.inside && h.pose).map(h => [h.channel, q(h.pose.x * k), q((Number(h.pose.y) || 0) * k), q(h.pose.z * k)]) };
+        visitors: [...this._hosted.values()].filter(h => h.inside && h.pose).map(h => [h.channel, q(h.pose.x * k), q((Number(h.pose.y) || 0) * k), q(h.pose.z * k)]),
+        world: r.kind === "home" ? this._worldNear().map(x => [x.key, q(x.x), q(x.y), q(x.z)]) : [] };
       const sig = JSON.stringify(where), now = performance.now();
       if (sig === this._whereTold.sig || now - this._whereTold.at < 100 || !this._ws || this._ws.readyState !== 1) return;
       Object.assign(this._whereTold, { sig, at: now });
       this._send(Object.assign({ type: "voice_where" }, where));
     }
-    // A packet of someone's voice, sent here because the room's visit-client has you near them (or on a call). On a
-    // call: theirs, or (passed on) someone near their phone on speaker, heard as a call is (_callVoice). Passed on by
-    // the room your user is in: from where its scene has them. Another office's own: from where it is.
-    _voiceIn(ch, data, relayed) {
+    // A packet of someone's voice, sent here because your visit-client has you hear it, one way only (8.7: in person
+    // first, then a call, then a room voice; its route says which). A room voice's: who spoke (their key), heard as
+    // they are, not from anywhere. A call's: theirs, or (passed on) someone near their phone on speaker, heard as a
+    // call is (_callVoice). In person, passed on by the room your user is in: from where its scene has them. Another
+    // office's own: from where it is (in your room, the one you are in, or across your plot's side).
+    _voiceIn(ch, data, relayed, route) {
       let id = null, name = "";
       if (relayed) {
         if (data.length < 3) return;
@@ -1439,7 +1525,13 @@
         name = new TextDecoder().decode(data.subarray(2 + n, 2 + n + m)); data = data.subarray(2 + n + m);
       }
       const p = this._peerOf(ch), call = p && p.key && this._calls.get(p.key);
-      if (call && call.state === "on" && call.channel === ch) return this._callVoice(call, relayed ? "call:" + id : p.key, relayed ? name : p.name || "", data);
+      if (route === ROUTE_VOICE) {
+        if (!relayed || !id || !this.roomVoice) return;
+        const s = this._voiceOf("room:" + id);
+        s.room = true; s.name = name;
+        return this._voiceDecode(s, data);
+      }
+      if (route === ROUTE_CALL) return call && call.state === "on" ? this._callVoice(call, "call:" + (relayed ? id : p.key), relayed ? name : p.name || "", data) : undefined;
       if (relayed) {
         const r = this._voiceRoom;
         if (!r || r.kind === "home" || r.w.channel !== ch) return;
@@ -1459,11 +1551,11 @@
     _voiceOf(key) {
       let s = this._voices.get(key);
       if (s) return s;
-      const ctx = this._audio(), gain = ctx.createGain(), panner = ctx.createPanner(), phone = ctx.createBiquadFilter();
+      const ctx = this._audio(), gain = ctx.createGain(), panner = ctx.createPanner(), phone = ctx.createBiquadFilter(), flat = ctx.createGain();
       Object.assign(panner, { panningModel: "HRTF", distanceModel: "linear", refDistance: 1, maxDistance: VOICE_RANGE, rolloffFactor: 1 });
       phone.type = "bandpass"; phone.frequency.value = 1400; phone.Q.value = 0.7;   // a call to your ear sounds as a telephone does
-      gain.connect(panner); panner.connect(ctx.destination); phone.connect(ctx.destination);
-      s = { key, gain, panner, phone, next: 0, ts: 0, level: 0, heardAt: 0, frames: 0, near: false, callKey: null, dec: null };
+      gain.connect(panner); panner.connect(ctx.destination); phone.connect(ctx.destination); flat.connect(ctx.destination);
+      s = { key, gain, panner, phone, flat, next: 0, ts: 0, level: 0, heardAt: 0, frames: 0, near: false, callKey: null, room: false, dec: null };
       s.dec = new AudioDecoder({ output: d => this._voicePlay(s, d), error: e => { console.warn("visit: a voice could not be decoded", e); this._voiceDrop(key); } });
       s.dec.configure({ codec: "opus", sampleRate: VOICE_RATE, numberOfChannels: 1 });
       this._voices.set(key, s);
@@ -1476,7 +1568,7 @@
       d.close();
       s.level = rms(pcm); s.frames++;
       if (s.level > 0.01) s.heardAt = performance.now();
-      const c = s.callKey && this._calls.get(s.callKey), out = c && c.state === "on" ? (c.speaker ? (s.near ? s.gain : null) : s.phone) : s.near ? s.gain : null;
+      const c = s.callKey && this._calls.get(s.callKey), out = s.room ? s.flat : c && c.state === "on" ? (c.speaker ? (s.near ? s.gain : null) : s.phone) : s.near ? s.gain : null;
       if (!out) return;
       const src = ctx.createBufferSource(), now = ctx.currentTime;
       src.buffer = buf; src.connect(out);
@@ -1489,7 +1581,7 @@
       if (!s) return;
       this._voices.delete(key);
       if (s.dec.state !== "closed") s.dec.close();
-      for (const n of [s.gain, s.panner, s.phone]) n.disconnect();
+      for (const n of [s.gain, s.panner, s.phone, s.flat]) n.disconnect();
     }
     _peerOf(ch) {
       const h = this._hosted.get(ch);
@@ -1564,30 +1656,117 @@
     //     (you too, over yours), and those who have that room in their world or in a corner; nobody else.
     //   { whisper } (an office's id, or its key): its user alone, wherever they are, in their chat (v.whisperTargets:
     //     those in the lobby who take whispers). The lobby passes it on, and keeps nothing.
-    //   { key } (or a key): into the room of an office you are linked with, either way (v.chatTargets): everyone in
-    //     it has it in their chat, wherever you are.
+    //   "room": your room's chat: everyone in your room, and every office linked with yours, either way, has it in
+    //     their chat, wherever they are (as you have what is said in theirs).
+    //   { key } (or a key): a linked room's chat, the room of an office you are linked with, either way
+    //     (v.chatTargets): everyone in it, and linked with it, has it in their chat, wherever you are.
     //   "lobby": everyone in the lobby has it in their chat (v.lobbyChat: a lobby that relays it, and you in it).
     // Plain text, at most 200 characters, 5 lines every 10 s wherever they go (false: not said). "chat" says each line
     // that comes: { scope ("say", "whisper", "sim" or "lobby"), key, name, text, mine, owner, id, channel, to } (`to`,
-    // yours: whom you whispered, { id, key, name }; a "sim" line's: the room it was said into, { key, name }, yours with
-    // your key; `id`, a whisper's or lobby line's: the sayer's office); v.chatLog, the last 100; v.chats, the lines
+    // yours: whom you whispered, { id, key, name }; a "sim" line's: the room whose chat it was said in, { key, name },
+    // yours with your key; `id`, a whisper's or lobby line's: the sayer's office; `old`, from before this page, kept by
+    // the visit-client: a reload keeps the chat); v.chatLog, the last 100; v.chats, the lines
     // over heads still showing. Visit draws those in the views it draws (your world, and another's room); a room
     // without a world draws its own (Visit.bubble). Visit.chat, the chat window (the panel's), shows them all.
-    say(text, to) {
+    say(text, to, { media = [], links = [] } = {}) {
       const t = [...String(text == null ? "" : text).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim()].slice(0, CHAT_LEN).join("").trim(), now = Date.now();
       const scope = to == null || to === "here" ? "say" : to === "lobby" ? "lobby" : isObj(to) && to.whisper != null ? "whisper" : "sim";
-      const target = scope === "sim" ? this.chatTargets.find(o => o.key === String(isObj(to) ? to.key : to))
+      const target = to === "room" ? { key: this.key || "", name: this.office ? this.office.name : "" }
+        : scope === "sim" ? this.chatTargets.find(o => o.key === String(isObj(to) ? to.key : to))
         : scope === "whisper" ? this.whisperTargets.find(o => o.id === String(to.whisper) || (o.key && o.key === String(to.whisper))) : null;
+      const pics = picturesFrom(media), cards = linksFrom(links), shares = pics.length + cards.length > 0;
+      const att = { ...(pics.length ? { media: pics } : {}), ...(cards.length ? { links: cards } : {}) };
       this._said = this._said.filter(at => now - at < CHAT_WINDOW);
-      if (!t || this._said.length >= CHATS || !this._ws || this._ws.readyState !== 1) return false;
-      if (((scope === "sim" || scope === "whisper") && !target) || ((scope === "lobby" || scope === "whisper") && !(this.lobbyChat && this.state === "online"))) return false;
+      if ((!t && !shares) || this._said.length >= CHATS || !this._ws || this._ws.readyState !== 1) return false;
+      if (((scope === "sim" || scope === "whisper") && !target) || ((scope === "lobby" || (scope === "whisper" && !shares)) && !(this.lobbyChat && this.state === "online"))) return false;
+      if (shares && (scope === "lobby" || (scope === "whisper" && !this.chatTargets.some(o => o.key === target.key)))) return false;   // pictures and links: not through the lobby
       this._said.push(now);
-      this._send(scope === "say" ? { type: "say", text: t } : { type: "say", text: t, to: scope === "lobby" ? "lobby" : scope === "whisper" ? { whisper: target.id } : { key: target.key } });
-      const me = { key: this.key || "", name: this.office ? this.office.name : "", text: t, mine: true, owner: false, id: null };
-      if (scope === "say") { const r = this._room(); this._chatIn({ ...me, room: r.kind === "home" ? "home" : r.w.channel }); }
-      else if (scope === "sim") this._chatIn({ ...me, scope, to: { key: target.key, name: target.name } });
-      else if (scope === "whisper") this._chatIn({ ...me, scope, to: { id: target.id, key: target.key, name: target.name } });
+      this._send(scope === "say" ? { type: "say", text: t, ...att } : { type: "say", text: t, to: scope === "lobby" ? "lobby" : to === "room" ? "room" : scope === "whisper" ? { whisper: target.id } : { key: target.key }, ...att });
+      const me = { key: this.key || "", name: this.office ? this.office.name : "", text: t, mine: true, owner: false, id: null, ...att };
+      if (scope === "say") { const r = this._room(); this._chatIn({ ...me, room: r.kind === "home" ? "home" : r.w.channel, conversation: this._conversationHere() }); }
+      else if (scope === "sim") this._chatIn({ ...me, scope, to: { key: target.key, name: target.name }, conversation: "room:" + target.key });
+      else if (scope === "whisper") this._chatIn({ ...me, scope, to: { id: target.id, key: target.key, name: target.name }, conversation: "person:" + (target.key || "id:" + target.id) });
       return true;   // (a lobby line comes back from the lobby, in its order)
+    }
+    // The conversation of the room your user is in (8.12): "room:" its owner's key.
+    _conversationHere() {
+      const r = this._room();
+      return "room:" + (r.kind === "home" ? this.key || "" : ((r.w && r.w.host) || (this.visiting && this.visiting.host) || {}).key || "");
+    }
+
+    // ---------- pictures and links in chat (8.12) ----------
+    // Share a picture (a Blob or File, as pasted or dropped: PNG, JPEG, WebP or GIF; a bigger one, or another kind, is
+    // made smaller as WebP first): kept by your visit-client, in its database. Resolves to { id, mime, size }, for
+    // say(text, to, { media: [it] }).
+    async share(blob) {
+      if (!blob || typeof blob.arrayBuffer !== "function") throw new Error("visit.share: a picture (a Blob or a File)");
+      const b = blob.size <= MEDIA_MAX && MEDIA_KINDS.includes(blob.type) ? blob : await smaller(blob);
+      const bytes = new Uint8Array(await b.arrayBuffer());
+      if (!this._ws || this._ws.readyState !== 1) throw new Error("visit.share: not connected to visit-client");
+      const slot = this._slot = (this._slot % 65535) + 1;
+      const kept = new Promise((resolve, reject) => {
+        const t = setTimeout(() => { this._puts.delete(slot); reject(new Error("visit-client did not answer")); }, 30000);
+        this._puts.set(slot, { resolve, reject, t });
+      });
+      const f = new Uint8Array(11 + bytes.length);
+      new DataView(f.buffer).setUint16(0, slot); f[2] = MEDIA; f.set(bytes, 11);
+      this._ws.send(f);
+      const m = await kept;
+      if (!this._media.has(m.id)) this._media.set(m.id, Promise.resolve(URL.createObjectURL(b)));
+      return m;
+    }
+    // A picture by its id, as a URL this page can show: once your visit-client has it (it asks whoever sent it), or
+    // null if it cannot be had.
+    media(id) {
+      let p = this._media.get(id);
+      if (p) return p;
+      p = new Promise(resolve => {
+        this._mediaWait.set(id, resolve);
+        this._send({ type: "media_get", id: String(id) });
+        setTimeout(() => { if (this._mediaWait.get(id) === resolve) { this._mediaWait.delete(id); this._media.delete(id); resolve(null); } }, 90000);
+      });
+      this._media.set(id, p);
+      return p;
+    }
+    _mediaIn(b) {
+      if (b.length < 3) return;
+      const n = b[0], m = b[1 + n], id = new TextDecoder().decode(b.subarray(1, 1 + n)), mime = new TextDecoder().decode(b.subarray(2 + n, 2 + n + m));
+      const url = URL.createObjectURL(new Blob([b.slice(2 + n + m)], { type: mime }));
+      this._media.set(id, Promise.resolve(url));
+      const w = this._mediaWait.get(id);
+      this._mediaWait.delete(id);
+      if (w) w(url);
+    }
+    // A link's preview, made by your visit-client (it fetches the page once; those you send it to never do):
+    // { url, title, description, site, image } (image: a picture's { id, mime, size }), or null.
+    async preview(url) {
+      if (!/^https?:\/\/\S+$/.test(String(url))) return null;
+      const m = await this._ask("preview", { url: String(url) }, 12000);
+      return m.none ? null : linksFrom([{ ...m, url: String(url) }])[0] || null;
+    }
+    // The chat before a moment (ms since 1970; none: now), from your visit-client's database, newest last: { lines,
+    // more } (each line as the "chat" event has it, `old`).
+    async history({ before, limit } = {}) {
+      const m = await this._ask("history", { ...(Number(before) > 0 ? { before: Math.floor(Number(before)) } : {}), ...(limit ? { limit: Number(limit) } : {}) });
+      const lines = [];
+      for (const l of Array.isArray(m.lines) ? m.lines : []) { const c = isObj(l) && this._chatFrom(l, true); if (c && this._hasContent(c)) lines.push(this._lineOf(c, true)); }
+      return { lines, more: !!m.more };
+    }
+    // The pictures (kind "media") or the links ("links") shared in a conversation ("room:<key>", "person:<key>",
+    // "lobby"; a line's `conversation`), newest first: { items, more }: a picture's { id, mime, size, at, key, name,
+    // mine }, a link's { url, title, description, site, image, at, key, name, mine }.
+    async shared(conversation, kind = "media", { before, limit } = {}) {
+      const m = await this._ask("shared", { conversation: String(conversation), kind: kind === "links" ? "links" : "media", ...(Number(before) > 0 ? { before: Number(before) } : {}), ...(limit ? { limit: Number(limit) } : {}) });
+      return { items: Array.isArray(m.items) ? m.items.filter(isObj) : [], more: !!m.more };
+    }
+    _ask(type, body, ms = 15000) {
+      if (!this._ws || this._ws.readyState !== 1) return Promise.reject(new Error("not connected to visit-client"));
+      const req = ++this._reqN;
+      return new Promise((resolve, reject) => {
+        const t = setTimeout(() => { this._asks.delete(req); reject(new Error(`no answer to ${type}`)); }, ms);
+        this._asks.set(req, { resolve: m => { clearTimeout(t); resolve(m); }, reject: e => { clearTimeout(t); reject(e); } });
+        this._send(Object.assign({ type, req }, body));
+      });
     }
     // Whom you may whisper to (say(text, { whisper })): those in the lobby whose Visit takes whispers.
     get whisperTargets() {
@@ -1607,17 +1786,50 @@
       const now = performance.now();
       return [...this._chats.values()].filter(c => c.until > now).map(c => ({ key: c.key, name: c.name, text: c.text, mine: c.mine, owner: c.owner, id: c.id, channel: c.channel }));
     }
-    _chatIn(c) {
-      if (!c.text) return;
-      const scope = c.scope || "say", line = { scope, key: c.key, name: c.name, text: c.text, mine: !!c.mine, owner: !!c.owner, id: c.id || null, channel: c.channel, to: c.to || null };
-      if (scope === "say") {   // over the speaker's head, a while
+    // A line (8.9) as the visit-client gives it: said in your room by a visitor (their channel), or in a room you are
+    // in or see; in a room's chat ("sim"): into yours (home), or in a linked one's (its channel); whispered to you
+    // ("whisper"); in the lobby ("lobby"). `old`: kept by the visit-client from before this page (`at`, when), your own
+    // lines too (`mine`).
+    _chatMsg(m, old) { const c = this._chatFrom(m, old); if (c) this._chatIn(c, old); }
+    _chatFrom(m, old) {
+      const line = { key: String(m.key || ""), name: String(m.name || ""), text: String(m.text || "").slice(0, 4 * CHAT_LEN), at: Number(m.at) || 0,
+        media: picturesFrom(m.media), links: linksFrom(m.links), conversation: typeof m.conversation === "string" ? m.conversation : null };
+      if (m.mine === true) {
+        if (!old) return null;
+        const to = isObj(m.to) ? { key: String(m.to.key || ""), name: String(m.to.name || ""), ...(m.to.id ? { id: String(m.to.id) } : {}) } : null;
+        return { ...line, scope: ["sim", "whisper"].includes(m.scope) ? m.scope : "say", mine: true, to };
+      }
+      if (m.scope === "lobby") return { ...line, scope: "lobby", mine: !!this.office && m.id === this.office.id };
+      if (m.scope === "whisper") return { ...line, scope: "whisper", id: typeof m.id === "string" ? m.id : null };
+      if (m.scope === "sim") {   // the room whose chat it is: yours (home), else its owner (by the conversation, or the link it came by)
+        const rk = line.conversation && line.conversation.startsWith("room:") ? line.conversation.slice(5) : null;
+        const p = m.home === true || rk === this.key ? { key: this.key || "", name: this.office ? this.office.name : "" }
+          : rk ? { key: rk, name: this._nameOf(rk) || (this._peerOf(m.channel) || {}).name || "" } : this._peerOf(m.channel) || {};
+        return { ...line, scope: "sim", channel: m.channel, to: { key: String(p.key || ""), name: String(p.name || "") } };
+      }
+      return { ...line, id: typeof m.id === "string" ? m.id : null, owner: m.owner === true, channel: m.channel, room: this._hosted.has(m.channel) ? "home" : m.channel };
+    }
+    // An office's name, by its key, as this page knows it (the lobby, its links).
+    _nameOf(key) {
+      const o = this.offices.find(x => x.key === key) || this.chatTargets.find(x => x.key === key);
+      return o ? o.name : "";
+    }
+    _hasContent(c) { return !!c.text || (c.media && c.media.length > 0) || (c.links && c.links.length > 0); }
+    _lineOf(c, old) {
+      return { scope: c.scope || "say", key: c.key, name: c.name, text: c.text, mine: !!c.mine, owner: !!c.owner, id: c.id || null, channel: c.channel, to: c.to || null,
+        media: c.media || [], links: c.links || [], conversation: c.conversation || null, at: old ? c.at : Date.now(), ...(old ? { old: true } : {}) };
+    }
+    _chatIn(c, old) {
+      if (!this._hasContent(c)) return;
+      const line = this._lineOf(c, old);
+      if (line.scope === "say" && !old && c.text) {   // over the speaker's head, a while
         c.until = performance.now() + chatShows(c.text);
         this._chats.set(c.mine ? "mine" : c.key + "|" + (c.id || ""), c);
       }
-      this.chatLog.push({ at: Date.now(), ...line });
+      this.chatLog.push(line);
       if (this.chatLog.length > CHAT_LOG) this.chatLog.shift();
       this._emit("chat", line);
-      if (scope === "say") this._changed();
+      if (line.scope === "say" && !old) this._changed();
     }
     // Who your user hears speaking (v.voices), each where `who(key)` says it is in the room they are in: a 🔊 over
     // each (8.7). In another's room, keys are its owner's, "relay:" a visitor's visit there, "relay:phone…" a call on
@@ -1699,6 +1911,44 @@
       return [...seen.values()];
     }
     get calls() { return [...this._calls.values()].map(c => ({ key: c.key, name: c.name, state: c.state, speaker: !!c.speaker, speaking: !!c.speaking })); }
+
+    // ---------- room voice (8.7) and keeping people out (8.9) ----------
+    // Into a room's voice, as a game's voice chat is: everyone in it hears everyone else in it, wherever they are, not
+    // by distance (they hear you while your microphone is on). One at a time: `key`, a linked office's (its room's;
+    // v.chatTargets), yours ("room", or v.key), or null (out). False: not possible (no link with them, or their room
+    // keeps you out of its voice). Whoever you also hear another way (in person, or on a call) you hear that way only.
+    // The "room_voice" event: the one you are in now (null: none; `out`, why you are out: "kicked", "banned", "gone").
+    joinVoice(key) {
+      const k = key === "room" || key === true ? this.key : key == null ? null : String(key);
+      if (!this._ws || this._ws.readyState !== 1 || (k && !this.key)) return false;
+      if (k && k !== this.key && (!this.chatTargets.some(o => o.key === k) || this.bannedBy.some(b => b.key === k && b.voice))) return false;
+      this._send({ type: "voice_join", key: k });
+      if (k && k !== this.key && (!this.roomVoice || this.roomVoice.key !== k)) {   // theirs: in once their room says who is in it
+        const t = this.chatTargets.find(o => o.key === k);
+        this.roomVoice = { key: k, name: t ? t.name : "", members: [], joining: true };
+        this._emit("room_voice", this.roomVoice); this._changed();
+      }
+      return true;
+    }
+    // One out of your room's voice now (they may come back).
+    voiceKick(key) { this._send({ type: "voice_kick", key: String(key) }); }
+    // Keep someone out of your room's voice, its chat, both, or neither (8.9), until you lift it (ban(key, {})). Out of
+    // its voice: not heard in your room (in person, across your plot's side, in its voice) and hearing none of it. Out
+    // of its chat: what they say is not said in it, and they have none of its lines. Calls are apart: you answer or not.
+    ban(key, { voice = false, chat = false } = {}) {
+      const k = String(key), o = this.offices.find(x => x.key === k) || this.chatTargets.find(x => x.key === k) || this.bans.find(x => x.key === k);
+      this._send({ type: "ban", key: k, name: o ? o.name : "", voice: !!voice, chat: !!chat });
+    }
+    banOf(key) { return this.bans.find(b => b.key === key) || null; }
+    _roomVoiceFrom(m, out) {
+      const was = this.roomVoice, same = isObj(m) && was && was.key === m.key;
+      this.roomVoice = isObj(m) && typeof m.key === "string"
+        ? { key: m.key, name: String(m.name || (same ? was.name : "")), members: Array.isArray(m.members) ? membersFrom(m.members) : same ? was.members : [], joining: !Array.isArray(m.members) && (!same || was.joining) }
+        : null;
+      if (!this.roomVoice) for (const k of [...this._voices.keys()]) if (k.startsWith("room:")) this._voiceDrop(k);
+      this._emit("room_voice", out ? { key: null, out: { key: String(out.key || ""), name: String(out.name || ""), why: String(out.why || "") } } : this.roomVoice);
+      this._changed();
+    }
     call(key) {
       if (!this._phone) throw new Error("visit.call: your room has no phone (phone(true) first)");
       const ch = [...this._phoneOn].find(c => { const p = this._peerOf(c); return p && p.key === key; });
@@ -2799,7 +3049,8 @@
     _frame(buf) {
       if (buf.byteLength < 11) return;
       const fl = new DataView(buf).getUint8(2);
-      if (fl === AUDIO || fl === RELAY) return this._voiceIn(new DataView(buf).getUint16(0), new Uint8Array(buf, 11), fl === RELAY);
+      if (fl === MEDIA) return this._mediaIn(new Uint8Array(buf, 11));
+      if (fl === AUDIO || fl === RELAY) return this._voiceIn(new DataView(buf).getUint16(0), new Uint8Array(buf, 11), fl === RELAY, new DataView(buf).getUint8(3));
       const dv = new DataView(buf), w = this._viewing(dv.getUint16(0));
       if (w) this._sceneDelta(w, dv, (dv.getUint8(2) & KEY) !== 0);
     }
@@ -3472,7 +3723,12 @@
         items = items.concat(v._chatsIn(p.w.channel, c => c.mine ? mine() : b.over(c.id ? v._body(s, c.id) : s.root.getObjectByName("visit:me"), 2.4 / u, 0.6 / u)));
       }
       if (this.showSpeaking && x && x.w.scene) { const s = x.w.scene, hostKey = (x.w.host || {}).key; speakers = v._speakersIn(key => v._speakerIn(s, hostKey, key, b, u)); }
-      else if (this.showSpeaking) speakers = v._speakersIn(key => { const h = [...v._hosted.values()].find(y => y.inside && y.visitor.key === key); return h ? over(h, 2.0 / u, 0.15 / u) : null; });
+      else if (this.showSpeaking) speakers = v._speakersIn(key => {
+        const h = [...v._hosted.values()].find(y => y.inside && y.visitor.key === key);
+        if (h) return over(h, 2.0 / u, 0.15 / u);
+        const p = list.find(p => p.w && p.w.scene && !p.w.inside && p.w.host.key === key);   // a friend across your plot's side, at home in theirs
+        return p ? b.over(p.w.scene.mark, 2.0 / u, 0.15 / u) : null;
+      });
       b.draw(this.renderer, camera, (this.showLines ? items : []).concat(speakers), u);
     }
 
@@ -3625,6 +3881,9 @@
       // Voice (8.7): those near you in the room you are in; your microphone on or off.
       if (v.state === "online") rows.push(`<div class="row"><span class="grow">${v.voices.length ? "near you: " + v.voices.map(x => `<b class="${x.speaking ? "speaking" : ""}">${x.speaking ? "🔊 " : ""}${esc(x.name)}</b>`).join(", ") : `voice <span class="muted">· nobody near you</span>`}</span>
         <button data-v="mic" class="${v.mic ? "go" : ""}" title="${v.mic ? "those near you hear you (click: microphone off)" : "your microphone: those near you hear you, the nearer the louder (headphones are best)"}">${v.mic ? "🎙 on" : "🎙 off"}</button></div>`);
+      // The room voice you are in (8.7): whose, who is in it; Leave.
+      if (v.roomVoice) { const rv = v.roomVoice; rows.push(`<div class="row"><span class="grow">🎧 ${esc(rv.key === v.key ? "your room's" : `${rv.name}'s room's`)} voice${rv.joining ? " <span class=\"muted\">· joining…</span>"
+        : `: ${rv.members.map(x => `<b class="${x.speaking ? "speaking" : ""}">${x.speaking ? "🔊 " : ""}${esc(x.key === v.key ? "you" : x.name)}</b>`).join(", ")}`}</span><button data-v="voice_leave" title="out of this voice">Leave</button></div>`); }
       // Your mount (8.11), once your room gives one: which one M gets you on, and on or off.
       if (v.mounts.length) rows.push(`<div class="row"><span class="grow">${v.riding ? "riding" : "your mount"}</span><select data-v="mount" title="the one M gets you on" style="max-width: 9em">${v.mounts.map(m =>
         `<option value="${esc(m.id)}"${m.id === v.mount ? " selected" : ""}>${esc(m.name)}${m.fly ? " (flies)" : ""}</option>`).join("")}</select><button data-v="ride" class="${v.riding ? "go" : ""}" title="M: on your mount, or off">${v.riding ? "Get off" : "Ride"}</button></div>`);
@@ -3667,6 +3926,16 @@
           const u = v.avatarUse(p.key);
           btns.push(`<span class="seg" title="how ${esc(p.name)} looks in your room">${[["theirs", "their model"], ["mine", "our model"]].map(([w, t]) =>
             `<button data-v="look" data-key="${esc(p.key)}" data-use="${w}" class="${u === w ? "on2" : ""}">${t}</button>`).join("")}</span>`);
+        }
+        // Your room's voice and chat (8.9): kept out of either, until you lift it; out of its voice now.
+        if (v.voiceMembers.some(x => x.key === p.key)) seen.push("in your room's voice");
+        const by = p.key && v.bannedBy.find(b => b.key === p.key);
+        if (by) seen.push(`their room keeps you out of its ${by.voice && by.chat ? "voice and chat" : by.voice ? "voice" : "chat"}`);
+        if (p.key) {
+          const ban = v.banOf(p.key) || { voice: false, chat: false };
+          btns.push(`<span class="seg" title="keep ${esc(p.name)} out of your room's voice, or its chat (until you lift it)">${["voice", "chat"].map(w =>
+            `<button data-v="ban" data-key="${esc(p.key)}" data-what="${w}" class="${ban[w] ? "on2" : ""}">${ban[w] ? `${w} banned` : `ban ${w}`}</button>`).join("")}</span>`);
+          if (v.voiceMembers.some(x => x.key === p.key)) btns.push(`<button data-v="voice_kick" data-key="${esc(p.key)}" title="out of your room's voice now (they may come back)">Kick from voice</button>`);
         }
         if (p.visit) btns.push(`<button data-v="kick" data-x="${esc(p.visit.id)}" title="out of your room">Kick</button>`);
         btns.push(`<button data-v="cut" data-p="${esc(p.key || p.id)}" title="every link between you two ends${p.key && v.isGuest(p.key) ? ", and they are no longer a guest (★)" : ""}">Unlink</button>`);
@@ -3736,6 +4005,9 @@
       else if (act === "to_world") v.toWorld(b.dataset.x);
       else if (act === "show") v._toCorner(v._link(b.dataset.x)), v._changed();
       else if (act === "kick") v.kick(b.dataset.x);
+      else if (act === "ban") { const k = b.dataset.key, now = v.banOf(k) || { voice: false, chat: false }; v.ban(k, { ...now, [b.dataset.what]: !now[b.dataset.what] }); }
+      else if (act === "voice_kick") v.voiceKick(b.dataset.key);
+      else if (act === "voice_leave") v.joinVoice(null);
       else if (act === "away") v.leaveLobby();
       else if (act === "back") v.joinLobby();
       else if (act === "guest") v.isGuest(b.dataset.key) ? v.removeGuest(b.dataset.key) : v.addGuest(b.dataset.key, b.dataset.name);
@@ -3770,13 +4042,49 @@
   // ---------- the chat window (8.9): bottom left, as in a game ----------
   // Enter to type a line, Enter to say it, Esc to stop; / opens it with the / typed, for a command. Where a line goes
   // is before the box: Say (everyone who can see you), Tell <name> (a whisper: them alone, wherever they are), To
-  // <name>'s room (everyone in a linked friend's room), Lobby (everyone in it). Pick it there, or start the line with
-  // /s, /w <name> (/t, /tell), /r (back to whoever last whispered to you), /room <name>, /1 (/l) and a space; it stays
-  // for the next line. The window fades `fade` ms after the last line, and comes back with the next one, or Enter.
+  // your room / To <name>'s room (a room's chat: everyone in it, and linked with it), Lobby (everyone in it). Pick it
+  // there, or start the line with /s, /w <name> (/t, /tell), /r (back to whoever last whispered to you, else whom
+  // you last whispered), /room (yours) or /room <name>, /1 (/l) and a space; it stays for the next line. Tab
+  // finishes a name (again: the next one), from those it could be, shown over the box. 🎧 by the box (or /voice)
+  // joins the voice of the room the box talks to (else your own room's), or leaves it: while you are in one, a line
+  // over the box says whose and who is in it (🔊: speaking), and stays. The rest fades `fade` ms after the last line,
+  // and comes back with the next one, or Enter.
   // `element`: where it goes (the page). Its place: --visit-chat-left, --visit-chat-bottom.
   const CHAT_CSS = `
 .visit-chat { position: fixed; left: var(--visit-chat-left, 16px); bottom: var(--visit-chat-bottom, 16px); z-index: 19; width: min(660px, calc(100vw - 32px)); font: 19.5px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif; color: #fff; transition: opacity .8s; }
-.visit-chat.idle { opacity: 0; pointer-events: none; }
+.visit-chat.idle { pointer-events: none; }
+.visit-chat > * { transition: opacity .8s; }
+.visit-chat.idle > :not(.voice) { opacity: 0; }
+.visit-chat .voice { margin-top: 4px; padding: 2px 8px; width: fit-content; max-width: 100%; font-size: 85%; color: #7ee787; background: rgba(0,0,0,.45); border-radius: 6px; pointer-events: auto; }
+.visit-chat .voice:empty { display: none; }
+.visit-chat .voice .muted { color: #c9d1d9; opacity: .8; }
+.visit-chat .voice button { font: inherit; color: #c9d1d9; background: none; border: 1px solid #6e7681; border-radius: 4px; padding: 0 5px; margin-left: 4px; cursor: pointer; }
+.visit-chat .line img.pic { display: block; max-width: min(240px, 60vw); max-height: 180px; min-width: 40px; min-height: 30px; margin: 4px 0 2px; border-radius: 6px; cursor: zoom-in; background: rgba(255,255,255,.08); }
+.visit-chat .card { display: flex; gap: 8px; align-items: flex-start; max-width: 440px; margin: 4px 0 2px; padding: 6px 8px; color: inherit; text-decoration: none; text-shadow: none; background: rgba(22,27,34,.88); border-left: 3px solid #aaaaff; border-radius: 6px; }
+.visit-chat .card img { width: 64px; height: 64px; flex: none; object-fit: cover; border-radius: 4px; }
+.visit-chat .card .site { font-size: 70%; opacity: .7; }
+.visit-chat .card .title { font-size: 85%; font-weight: 600; }
+.visit-chat .card .desc { font-size: 75%; opacity: .85; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.visit-chat .attach { display: none; flex-wrap: wrap; gap: 8px; align-items: flex-start; margin-top: 6px; }
+.visit-chat.typing .attach:not(:empty) { display: flex; }
+.visit-chat .chip { position: relative; }
+.visit-chat .chip > img { display: block; width: 56px; height: 56px; object-fit: cover; border-radius: 4px; }
+.visit-chat .chip.busy > img { opacity: .45; }
+.visit-chat .chip .card { margin: 0; max-width: 360px; }
+.visit-chat .chip button.drop { position: absolute; top: -6px; right: -6px; width: 18px; height: 18px; padding: 0; font: 11px/16px system-ui; color: #fff; background: #30363d; border: 1px solid #6e7681; border-radius: 50%; cursor: pointer; }
+.visit-chat .shared { display: none; max-height: 16em; overflow-y: auto; margin-bottom: 4px; padding: 6px 8px; font-size: 80%; background: rgba(13,17,23,.94); border: 1px solid #30363d; border-radius: 6px; }
+.visit-chat .shared.on { display: block; }
+.visit-chat .shared .tabs { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 6px; }
+.visit-chat .shared .tabs b { flex: 1; font-weight: 600; }
+.visit-chat .shared button { font: inherit; color: #c9d1d9; background: none; border: 1px solid #30363d; border-radius: 4px; padding: 0 6px; cursor: pointer; }
+.visit-chat .shared .tabs button.on { color: #fff; border-color: #aaaaff; }
+.visit-chat .shared .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(72px, 1fr)); gap: 4px; margin-bottom: 4px; }
+.visit-chat .shared .grid img { width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 4px; cursor: zoom-in; }
+.visit-chat button.gallery { font: inherit; background: none; border: 0; padding: 0 2px; cursor: pointer; opacity: .8; }
+.visit-lightbox { position: fixed; inset: 0; z-index: 60; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,.85); cursor: zoom-out; }
+.visit-lightbox img { max-width: 95vw; max-height: 95vh; border-radius: 4px; }
+.visit-chat button.headset { font: inherit; background: none; border: 0; padding: 0 2px; cursor: pointer; opacity: .55; }
+.visit-chat button.headset.on { opacity: 1; text-shadow: 0 0 6px #7ee787; }
 .visit-chat .log { max-height: 11em; overflow-y: auto; padding: 4px 8px; border-radius: 6px; text-shadow: 0 1px 2px #000, 0 0 4px #000; scrollbar-width: none; overflow-wrap: anywhere; }
 .visit-chat .log:empty { display: none; }
 .visit-chat:hover .log, .visit-chat.typing .log { background: rgba(0,0,0,.4); }
@@ -3784,12 +4092,25 @@
 .visit-chat .line.sim, .visit-chat[data-scope=sim] form { color: #aaaaff; }
 .visit-chat .line.lobby, .visit-chat[data-scope=lobby] form { color: #ffc864; }
 .visit-chat .line.note { color: #ffff00; }
+.visit-chat .names { margin-top: 4px; padding: 0 8px; font-size: 85%; color: #c9d1d9; text-shadow: 0 1px 2px #000, 0 0 4px #000; }
+.visit-chat .names:empty { display: none; }
 .visit-chat form { display: none; align-items: center; gap: 4px; margin-top: 4px; padding: 3px 6px; background: rgba(0,0,0,.7); border: 1px solid #6e7681; border-radius: 6px; }
 .visit-chat.typing form { display: flex; }
 .visit-chat select { font: inherit; color: inherit; background: none; border: 0; padding: 0; max-width: 45%; cursor: pointer; }
 .visit-chat option { color: #e6edf3; background: #161b22; }
 .visit-chat input { flex: 1; min-width: 0; font: inherit; color: inherit; background: none; border: 0; outline: none; }
 .visit-chat button.sound { font: inherit; color: inherit; background: none; border: 0; padding: 0 2px; cursor: pointer; opacity: .8; }`;
+
+  // A picture full size, over everything, until a click or Esc.
+  function lightbox(url) {
+    const d = document.createElement("div"), img = document.createElement("img");
+    d.className = "visit-lightbox"; img.src = url; d.appendChild(img);
+    const shut = () => { d.remove(); removeEventListener("keydown", esc, true); };
+    const esc = e => { if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); shut(); } };
+    d.addEventListener("click", shut);
+    addEventListener("keydown", esc, true);
+    document.body.appendChild(d);
+  }
 
   // A soft sound for a line that comes (not your own): a whisper rises, a lobby line is lower, the rest one note. Made
   // with Web Audio (a page's sound waits for a key or a click: browsers allow none before).
@@ -3815,17 +4136,24 @@
     const root = document.createElement("div");
     root.className = "visit-chat";
     root.dataset.scope = "say";
-    root.innerHTML = `<div class="log" aria-live="polite"></div><form><select title="where your line goes"></select><input maxlength="${CHAT_LEN}" autocomplete="off" spellcheck="false"><button type="button" class="sound"></button></form>`;
+    root.innerHTML = `<div class="shared"></div><div class="log" aria-live="polite"></div><div class="names"></div><div class="voice"></div><div class="attach"></div><form><select title="where your line goes"></select><input maxlength="${CHAT_LEN}" autocomplete="off" spellcheck="false"><button type="button" class="gallery" title="pictures and links shared here">🖼</button><button type="button" class="headset">🎧</button><button type="button" class="sound"></button></form>`;
     element.appendChild(root);
-    const log = root.querySelector(".log"), form = root.querySelector("form"), pick = form.querySelector("select"), input = form.querySelector("input"), bell = form.querySelector("button.sound");
+    const shared = root.querySelector(".shared"), attach = root.querySelector(".attach"), gallery = root.querySelector("button.gallery");
+    const log = root.querySelector(".log"), names = root.querySelector(".names"), voice = root.querySelector(".voice"), headset = root.querySelector("button.headset"), form = root.querySelector("form"), pick = form.querySelector("select"), input = form.querySelector("input"), bell = form.querySelector("button.sound");
     // A sound with each line that comes, unless this browser was told not to (the 🔔 by the box).
     let quiet = !sound;
     try { if (localStorage.getItem("visit:chat-quiet") === "1") quiet = true; } catch (e) { /* not kept */ }
     const bellSay = () => { bell.textContent = quiet ? "🔕" : "🔔"; bell.title = quiet ? "no sound with a line (click: a sound)" : "a sound with each line (click: none)"; };
     bellSay();
     bell.addEventListener("click", () => { quiet = !quiet; try { localStorage.setItem("visit:chat-quiet", quiet ? "1" : "0"); } catch (e) { /* not kept */ } bellSay(); input.focus(); });
-    let to = { scope: "say" }, choices = [], typing = false, last = null, fadeTimer = null;
-    const label = t => t.scope === "lobby" ? "Lobby" : t.scope === "whisper" ? `Tell ${t.name}` : t.scope === "sim" ? `To ${t.name}'s room` : "Say";
+    let to = { scope: "say" }, choices = [], typing = false, last = null, told = null, tab = null, fadeTimer = null, intro = null;
+    try {   // where lines went before a reload (this tab)
+      const t = JSON.parse(sessionStorage.getItem("visit:chat-to") || "null");
+      if (isObj(t) && ["say", "whisper", "sim", "lobby"].includes(t.scope)) to = { scope: t.scope, ...["key", "id", "name"].reduce((o, k) => (typeof t[k] === "string" ? { ...o, [k]: t[k] } : o), {}) };
+    } catch (e) { /* not kept */ }
+    const yours = () => ({ scope: "sim", key: v.key || "", name: v.office ? v.office.name : "" });   // your room's chat
+    const room = t => t.key === v.key ? "your room" : `${t.name || "a"}'s room`;
+    const label = t => t.scope === "lobby" ? "Lobby" : t.scope === "whisper" ? `Tell ${t.name}` : t.scope === "sim" ? `To ${room(t)}` : "Say";
     const same = (a, b) => a.scope === b.scope && (a.key || a.id || null) === (b.key || b.id || null);
     const whom = t => v.whisperTargets.find(o => (t.key && o.key === t.key) || o.id === t.id);   // a whisper's person, now
     const shown = l => {
@@ -3833,43 +4161,215 @@
       if (l.scope === "note") return l.text;
       if (l.scope === "lobby") return `[Lobby] ${who}: ${l.text}`;
       if (l.scope === "whisper") return l.mine ? `To [${l.to.name}]: ${l.text}` : `${who} whispers: ${l.text}`;
-      if (l.scope === "sim") return l.mine ? `To ${l.to.name}'s room: ${l.text}` : `${who} to ${l.to && l.to.key === v.key ? "your room" : `${(l.to && l.to.name) || "a"}'s room`}: ${l.text}`;
+      if (l.scope === "sim") { const r = room(l.to || {}); return `[${r[0].toUpperCase() + r.slice(1)}] ${who}: ${l.text}`; }
       return `${who} says: ${l.text}`;
     };
     const wake = () => {
       root.classList.remove("idle");
       clearTimeout(fadeTimer);
-      if (fade > 0) fadeTimer = setTimeout(function sleep() { if (typing || root.matches(":hover")) fadeTimer = setTimeout(sleep, 1000); else root.classList.add("idle"); }, fade);
+      if (fade > 0) fadeTimer = setTimeout(function sleep() { if (typing || root.matches(":hover") || shared.classList.contains("on")) fadeTimer = setTimeout(sleep, 1000); else root.classList.add("idle"); }, fade);
     };
-    const add = l => {
-      const end = log.scrollTop + log.clientHeight >= log.scrollHeight - 4, d = document.createElement("div");
+    // A picture by its id, shown once the visit-client has it (a click: full size); a link, as its sender's
+    // preview has it (a click: the link, in a new tab).
+    const picture = (id, cls, big = true) => {
+      const img = document.createElement("img");
+      if (cls) img.className = cls;
+      img.alt = "a picture";
+      v.media(id).then(url => {
+        if (!url) { img.alt = "(a picture that cannot be had)"; return; }
+        const end = log.scrollTop + log.clientHeight >= log.scrollHeight - 8;
+        img.addEventListener("load", () => { if (end && log.contains(img)) log.scrollTop = log.scrollHeight; }, { once: true });
+        img.src = url;
+      });
+      if (big) img.addEventListener("click", e => { e.preventDefault(); e.stopPropagation(); if (img.src) lightbox(img.src); });
+      return img;
+    };
+    const card = l => {
+      const a = document.createElement("a");
+      a.className = "card";
+      if (/^https?:\/\//.test(l.url)) { a.href = l.url; a.target = "_blank"; a.rel = "noopener noreferrer"; }
+      if (l.image && l.image.id) a.appendChild(picture(l.image.id, "", false));
+      const t = document.createElement("div");
+      for (const [cls, text] of [["site", l.site], ["title", l.title || l.url], ["desc", l.description]]) if (text) { const x = document.createElement("div"); x.className = cls; x.textContent = text; t.appendChild(x); }
+      a.appendChild(t);
+      return a;
+    };
+    const lineEl = l => {   // a line: its text, then its pictures and its links' previews
+      const d = document.createElement("div");
       d.className = "line " + l.scope; d.textContent = shown(l);
-      log.appendChild(d);
-      while (log.childElementCount > CHAT_LOG) log.firstChild.remove();
+      if (l.at) d.dataset.at = String(l.at);
+      for (const p of l.media || []) d.appendChild(picture(p.id, "pic"));
+      for (const c of l.links || []) d.appendChild(card(c));
+      return d;
+    };
+    const add = l => {   // a line at the end; one from before this page (`old`), before the window's first note
+      const end = log.scrollTop + log.clientHeight >= log.scrollHeight - 4, d = lineEl(l);
+      if (l.old && intro && intro.parentNode === log) log.insertBefore(d, intro); else log.appendChild(d);
+      while (log.childElementCount > CHAT_LOG * 4) { log.firstChild.remove(); older = true; }
       if (end) log.scrollTop = log.scrollHeight;
       wake();
+      return d;
     };
+    // The chat's history (8.12), up the log: older lines, from the visit-client's database, as the log scrolls to
+    // its top.
+    let older = true, loadingOlder = false;
+    log.addEventListener("scroll", () => {
+      if (log.scrollTop > 24 || loadingOlder || !older) return;
+      const first = log.querySelector(".line[data-at]"), before = first ? Number(first.dataset.at) : Date.now(), h = log.scrollHeight;
+      loadingOlder = true;
+      v.history({ before, limit: 40 }).then(r => {
+        older = r.more;
+        const top = log.firstChild;
+        for (const l of r.lines) log.insertBefore(lineEl(l), top);
+        log.scrollTop += log.scrollHeight - h;
+      }, () => { older = false; }).finally(() => { loadingOlder = false; });
+    });
     const note = text => add({ scope: "note", text });
-    const fill = () => {   // the choices before the box: Say, a whisper to each, each linked room, the lobby
+    const fill = () => {   // the choices before the box: Say, a whisper to each, your room (anyone linked), each linked room, the lobby
+      const linked = v.chatTargets;
       choices = [{ scope: "say" }, ...v.whisperTargets.map(o => ({ scope: "whisper", id: o.id, key: o.key, name: o.name })),
-        ...v.chatTargets.map(o => ({ scope: "sim", key: o.key, name: o.name })), ...(v.lobbyChat ? [{ scope: "lobby" }] : [])];
+        ...(linked.length ? [yours()] : []), ...linked.map(o => ({ scope: "sim", key: o.key, name: o.name })), ...(v.lobbyChat ? [{ scope: "lobby" }] : [])];
       if (!choices.some(c => same(c, to))) choices.splice(1, 0, to);   // (gone, or no lobby chat: said so if used)
       pick.innerHTML = choices.map((c, i) => `<option value="${i}">${esc(label(c))}:</option>`).join("");
       pick.value = String(choices.findIndex(c => same(c, to)));
       root.dataset.scope = to.scope;
+      headsetSay();
+      try { sessionStorage.setItem("visit:chat-to", JSON.stringify(to)); } catch (e) { /* not kept */ }
     };
     const open = (start = "") => {
       if (document.pointerLockElement) document.exitPointerLock();
       typing = true; root.classList.add("typing"); fill(); wake();
       input.value = start; input.focus();
     };
-    const close = () => { typing = false; root.classList.remove("typing"); input.value = ""; if (root.contains(document.activeElement)) document.activeElement.blur(); wake(); };
-    // The one of `list` whose name starts `rest`, then a space (or is all of it): the longest.
-    const named = (list, rest) => {
-      const low = rest.toLowerCase();
-      return list.filter(o => o.name && (low === o.name.toLowerCase() || low.startsWith(o.name.toLowerCase() + " "))).sort((a, b) => b.name.length - a.name.length)[0];
+    const close = () => { typing = false; root.classList.remove("typing"); input.value = ""; names.textContent = ""; tab = null; pending = []; linkCard = null; linkSkip.clear(); drawAttach(); if (root.contains(document.activeElement)) document.activeElement.blur(); wake(); };
+    // The one of `list` whose name starts `rest`, then a space (the longest), or, on Enter (`done`), is all of it or
+    // the one name it starts.
+    const named = (list, rest, done) => {
+      const low = rest.toLowerCase(), all = done && low.trim();
+      const o = list.filter(o => o.name && ((all && all === o.name.toLowerCase()) || low.startsWith(o.name.toLowerCase() + " "))).sort((a, b) => b.name.length - a.name.length)[0];
+      if (o || !all) return o;
+      const start = list.filter(o => o.name && o.name.toLowerCase().startsWith(all));
+      return start.length === 1 ? start[0] : undefined;
     };
-    const help = "/s say (everyone who can see you) · /w name (a whisper) · /r reply · /room name (everyone in a linked room) · /1 the lobby";
+    // A name being typed after /w (/t, /tell, /whisper) or /room (/sim): the command, and the names it could be.
+    const naming = () => {
+      const m = /^\/(w|t|whisper|tell|room|sim)\s([\s\S]*)$/i.exec(input.value);
+      if (!m) return null;
+      const stem = tab ? tab.stem : m[2].toLowerCase(), rooms = /^(room|sim)$/i.test(m[1]);
+      return { cmd: m[1], stem, names: (rooms ? v.chatTargets : v.whisperTargets).map(o => o.name).filter(n => n && n.toLowerCase().startsWith(stem)) };
+    };
+    const hint = () => { const n = naming(); names.textContent = n && n.names.length ? `Tab: ${n.names.slice(0, 8).join(" · ")}${n.names.length > 8 ? " …" : ""}` : ""; };
+    const help = "/s say (everyone who can see you) · /w name (a whisper) · /r reply · /room (your room's chat) · /room name (a linked room's) · /1 the lobby · /voice (🎧) · Tab finishes a name";
+    // Pictures for the next line (pasted, or dropped on the window: each kept by the visit-client at once, `media`
+    // once kept), and a link's preview (made as the link is typed; ✕: none for it).
+    let pending = [], linkCard = null, linkTimer = null;
+    const linkSkip = new Set();
+    const chip = (inside, drop) => {
+      const c = document.createElement("div");
+      c.className = "chip";
+      c.appendChild(inside);
+      const x = document.createElement("button");
+      x.type = "button"; x.className = "drop"; x.textContent = "✕"; x.title = "not this";
+      x.addEventListener("click", () => { drop(); drawAttach(); input.focus(); });
+      c.appendChild(x);
+      return c;
+    };
+    const drawAttach = () => {
+      attach.textContent = "";
+      for (const p of pending) {
+        const img = document.createElement("img");
+        img.src = p.url;
+        const c = chip(img, () => { pending = pending.filter(q => q !== p); });
+        if (!p.media) c.classList.add("busy");
+        attach.appendChild(c);
+      }
+      if (linkCard && !linkCard.loading) attach.appendChild(chip(card(linkCard), () => { linkSkip.add(linkCard.url); linkCard = null; }));
+    };
+    const addPictures = files => {
+      if (!typing) open();
+      for (const f of files) {
+        if (pending.length >= 4) { note("At most 4 pictures in a line"); break; }
+        const p = { url: URL.createObjectURL(f), media: null };
+        p.ready = v.share(f).then(m => { p.media = m; drawAttach(); return m; },
+          e => { pending = pending.filter(q => q !== p); drawAttach(); note(`That picture cannot be shared: ${e.message || e}`); return null; });
+        pending.push(p);
+      }
+      drawAttach();
+    };
+    input.addEventListener("paste", e => {
+      const files = [...((e.clipboardData && e.clipboardData.items) || [])].filter(i => i.kind === "file" && /^image\//.test(i.type)).map(i => i.getAsFile()).filter(Boolean);
+      if (!files.length) return;
+      if (!(e.clipboardData.getData("text/plain") || "").trim()) e.preventDefault();
+      addPictures(files);
+    });
+    root.addEventListener("dragover", e => { if (e.dataTransfer && [...e.dataTransfer.types].includes("Files")) e.preventDefault(); });
+    root.addEventListener("drop", e => {
+      const files = [...((e.dataTransfer && e.dataTransfer.files) || [])].filter(f => /^image\//.test(f.type));
+      if (files.length) { e.preventDefault(); addPictures(files); }
+    });
+    const linkLook = () => {   // the first link in the box: its preview, made by the visit-client
+      const m = /https?:\/\/[^\s<>"']+/.exec(input.value), url = m ? m[0].replace(/[.,;:!?)\]]+$/, "") : null;
+      if (!url || linkSkip.has(url)) { if (linkCard) { linkCard = null; drawAttach(); } return; }
+      if (linkCard && linkCard.url === url) return;
+      linkCard = { url, loading: true };
+      drawAttach();
+      v.preview(url).then(p => {
+        if (!linkCard || linkCard.url !== url) return;
+        linkCard = p ? { ...p, url } : null;
+        if (!p) linkSkip.add(url);
+        drawAttach();
+      }, () => { if (linkCard && linkCard.url === url) { linkCard = null; drawAttach(); } });
+    };
+    // What was shared (🖼): the pictures, or the links, in the conversation the box talks to, newest first.
+    let sharedKind = "media";
+    const conversation = () => to.scope === "sim" ? "room:" + to.key : to.scope === "whisper" ? "person:" + (to.key || "id:" + to.id) : to.scope === "lobby" ? "lobby" : v._conversationHere();
+    const sharedDraw = async more => {
+      const c = conversation(), title = c === "lobby" ? "the lobby" : c.startsWith("person:") ? `you and ${to.name || "them"}`
+        : c === "room:" + v.key ? "your room" : `${v._nameOf(c.slice(5)) || "their"}'s room`;
+      if (!more) shared.innerHTML = `<div class="tabs"><b>Shared in ${esc(title)}</b><button data-k="media" class="${sharedKind === "media" ? "on" : ""}">Pictures</button><button data-k="links" class="${sharedKind === "links" ? "on" : ""}">Links</button><button data-k="close" title="close">✕</button></div><div class="items"></div>`;
+      const items = shared.querySelector(".items");
+      const moreButton = items.querySelector("button.more");
+      if (moreButton) moreButton.remove();
+      try {
+        const r = await v.shared(c, sharedKind, { before: more ? Number(items.dataset.before) : undefined });
+        let box = items.querySelector(".grid");
+        if (sharedKind === "media" && !box && r.items.length) { box = document.createElement("div"); box.className = "grid"; items.appendChild(box); }
+        for (const i of r.items) (sharedKind === "media" ? box : items).appendChild(sharedKind === "media" ? picture(i.id, "") : card(linksFrom([i])[0] || { url: i.url }));
+        if (!r.items.length && !more) items.textContent = sharedKind === "media" ? "No pictures shared here yet" : "No links shared here yet";
+        if (r.items.length) items.dataset.before = String(r.items[r.items.length - 1].at);
+        if (r.more) { const b = document.createElement("button"); b.className = "more"; b.textContent = "More"; b.dataset.k = "more"; items.appendChild(b); }
+      } catch (e) { items.textContent = `Not available: ${e.message || e}`; }
+    };
+    gallery.addEventListener("click", () => { shared.classList.toggle("on"); if (shared.classList.contains("on")) sharedDraw(false); wake(); input.focus(); });
+    shared.addEventListener("click", e => {
+      const b = e.target.closest("button[data-k]");
+      if (!b) return;
+      if (b.dataset.k === "close") shared.classList.remove("on");
+      else if (b.dataset.k === "more") sharedDraw(true);
+      else { sharedKind = b.dataset.k; sharedDraw(false); }
+    });
+    // The room voice 🎧 joins: of the room the box talks to, else your own room's.
+    const voiceRoom = () => to.scope === "sim" && to.key ? { key: to.key, name: room(to) } : { key: v.key, name: "your room" };
+    const headsetSay = () => {
+      const r = voiceRoom(), on = !!v.roomVoice && v.roomVoice.key === r.key;
+      headset.classList.toggle("on", on);
+      headset.title = on ? `in ${r.name}'s voice (click: leave it)` : `join ${r.name}'s voice: everyone in it hears everyone else, wherever they are`;
+    };
+    const voiceToggle = () => {
+      const r = voiceRoom();
+      if (v.roomVoice && v.roomVoice.key === r.key) return void v.joinVoice(null);
+      if (!v.joinVoice(r.key)) note(v.bannedBy.some(b => b.key === r.key && b.voice) ? `${r.name[0].toUpperCase() + r.name.slice(1)} keeps you out of its voice` : `${r.name}: you are not linked with them now`);
+    };
+    let voiceDrawn = "", voiceIn = null;
+    const voiceLine = () => {   // the room voice you are in: whose, who is in it (🔊: speaking), Leave
+      const rv = v.roomVoice;
+      const html = !rv ? "" : `🎧 ${esc(rv.key === v.key ? "Your room" : `${rv.name}'s room`)}: ${rv.joining ? `<span class="muted">joining…</span>`
+        : rv.members.map(x => `${x.speaking ? "🔊 " : ""}${esc(x.key === v.key ? "you" : x.name)}`).join(" · ")}${v.mic ? "" : ` <span class="muted">(your microphone is off)</span>`}<button type="button" data-v="leave" title="out of this voice">Leave</button>`;
+      if (html !== voiceDrawn) { voiceDrawn = html; voice.innerHTML = html; }
+      headsetSay();
+    };
+    voice.addEventListener("click", e => { if (e.target.closest("button[data-v=leave]")) v.joinVoice(null); });
+    headset.addEventListener("click", () => { voiceToggle(); input.focus(); });
     // A command at the start of the box, once a space follows it (or on Enter): where lines go from now. True: it was
     // one, and what follows it is the line.
     const command = done => {
@@ -3878,37 +4378,55 @@
       if (m[2] === undefined && !done) return false;
       const cmd = m[1].toLowerCase();
       let rest = m[2] || "", next = null;
+      if (cmd === "voice") { if (!done && m[2] === undefined) return false; voiceToggle(); input.value = rest; return !!rest.trim(); }
       if (cmd === "s" || cmd === "say") next = { scope: "say" };
       else if (cmd === "1" || cmd === "l" || cmd === "lobby") next = v.lobbyChat ? { scope: "lobby" } : (done && note("No lobby chat: this lobby does not carry it, or you are not in it"), null);
-      else if (cmd === "r" || cmd === "reply") next = last || (done && note("Nobody has whispered to you yet"), null);
+      else if (cmd === "r" || cmd === "reply") next = last || told || (done && note("Nobody has whispered to you yet"), null);
       else if (["w", "t", "whisper", "tell", "room", "sim"].includes(cmd)) {
-        const room = cmd === "room" || cmd === "sim", o = named(room ? v.chatTargets : v.whisperTargets, rest);
-        if (o) { next = room ? { scope: "sim", key: o.key, name: o.name } : { scope: "whisper", id: o.id, key: o.key, name: o.name }; rest = rest.slice(o.name.length + 1); }
+        const rooms = cmd === "room" || cmd === "sim", o = named(rooms ? v.chatTargets : v.whisperTargets, rest, done);
+        if (o) { next = rooms ? { scope: "sim", key: o.key, name: o.name } : { scope: "whisper", id: o.id, key: o.key, name: o.name }; rest = rest.slice(o.name.length + 1); }
         else if (!done) return false;   // a name still being typed
-        else note(!rest.trim() ? `/${cmd} and a name` : room ? `You are not linked with anyone called ${rest.trim()}` : `Nobody called ${rest.trim()} is in the lobby (or their Visit takes no whispers)`);
+        else if (rooms && !rest.trim()) next = yours();
+        else note(!rest.trim() ? `/${cmd} and a name` : rooms ? `You are not linked with anyone called ${rest.trim()}` : `Nobody called ${rest.trim()} is in the lobby (or their Visit takes no whispers)`);
       } else if (done) note(`Unknown: /${cmd}. ${help}`);
       if (next) { to = next; fill(); input.value = rest; return true; }
       if (done) input.value = "";
       return false;
     };
-    input.addEventListener("input", () => command(false));
+    input.addEventListener("input", () => { tab = null; command(false); hint(); clearTimeout(linkTimer); linkTimer = setTimeout(linkLook, 500); });
     input.addEventListener("keydown", e => {
       e.stopPropagation();   // the page's own keys (walking) are not for this box
       if (e.key === "Escape") { e.preventDefault(); close(); }
+      else if (e.key === "Tab" && !e.shiftKey) {   // the name being typed, finished (again: the next it could be)
+        const n = naming();
+        if (!n || !n.names.length) return;
+        e.preventDefault();
+        tab = { stem: n.stem, at: tab ? (tab.at + 1) % n.names.length : 0 };
+        input.value = `/${n.cmd} ${n.names[tab.at]}`;
+        hint();
+      }
     });
     pick.addEventListener("change", () => { to = choices[Number(pick.value)] || { scope: "say" }; fill(); input.focus(); });
+    // A line said where the box talks to: false (and why, said) if it could not be.
+    const send = (t, media, links) => {
+      const p = to.scope === "whisper" && whom(to);
+      if (v.say(t, to.scope === "say" ? undefined : to.scope === "lobby" ? "lobby" : to.scope === "whisper" ? { whisper: p ? p.id : "" } : to.key === v.key ? "room" : { key: to.key }, { media, links })) return true;
+      if ((media.length || links.length) && (to.scope === "lobby" || (to.scope === "whisper" && p && !v.chatTargets.some(o => o.key === p.key)))) note("Pictures and links go to rooms, and to those you are linked with: not through the lobby");
+      else if (to.scope === "whisper" && !p) { note(`${to.name} is not in the lobby now`); to = { scope: "say" }; fill(); }
+      else if (to.scope === "sim" && to.key !== v.key && !v.chatTargets.some(o => o.key === to.key)) { note(`${to.name}'s room: you are not linked with them now`); to = { scope: "say" }; fill(); }
+      else if ((to.scope === "lobby" || to.scope === "whisper") && !v.lobbyChat) { note("No lobby chat: this lobby does not carry it, or you are not in it"); to = { scope: "say" }; fill(); }
+      else note(`Too fast: at most ${CHATS} lines every ${CHAT_WINDOW / 1000} s`);
+      return false;
+    };
     form.addEventListener("submit", e => {
       e.preventDefault();
       const cmd = input.value.startsWith("/");
       if (cmd && !command(true)) return;   // not a line (said why)
-      const t = input.value.trim();
-      if (!t) { if (!cmd) close(); return; }   // (a command alone: where the next line goes, the box still open)
-      const p = to.scope === "whisper" && whom(to);
-      if (v.say(t, to.scope === "say" ? undefined : to.scope === "lobby" ? "lobby" : to.scope === "whisper" ? { whisper: p ? p.id : "" } : { key: to.key })) return close();
-      if (to.scope === "whisper" && !p) { note(`${to.name} is not in the lobby now`); to = { scope: "say" }; fill(); }
-      else if (to.scope === "sim" && !v.chatTargets.some(o => o.key === to.key)) { note(`${to.name}'s room: you are not linked with them now`); to = { scope: "say" }; fill(); }
-      else if ((to.scope === "lobby" || to.scope === "whisper") && !v.lobbyChat) { note("No lobby chat: this lobby does not carry it, or you are not in it"); to = { scope: "say" }; fill(); }
-      else note(`Too fast: at most ${CHATS} lines every ${CHAT_WINDOW / 1000} s`);
+      const t = input.value.trim(), pics = pending.slice(), links = linkCard && !linkCard.loading && t.includes(linkCard.url) ? [linkCard] : [];
+      if (!t && !pics.length) { if (!cmd) close(); return; }   // (a command alone: where the next line goes, the box still open)
+      if (!pics.length) { if (send(t, [], links)) close(); return; }
+      close();   // its pictures: said once each is kept
+      Promise.all(pics.map(p => p.ready)).then(ms => { const media = ms.filter(Boolean); if (media.length || t) send(t, media, links); });
     });
     root.addEventListener("focusout", () => setTimeout(() => { if (typing && !root.contains(document.activeElement)) { typing = false; root.classList.remove("typing"); wake(); } }, 0));
     const key = e => {   // Enter (or /), anywhere but a box of the page's own: type a line
@@ -3920,18 +4438,36 @@
     };
     const onChat = l => {
       add(l);
-      if (!quiet && !l.mine && l.scope !== "note") chatSound(l.scope);
-      if (l.scope === "whisper" && !l.mine && l.id) last = { scope: "whisper", id: l.id, key: l.key || null, name: l.name };
+      if (!quiet && !l.mine && !l.old && l.scope !== "note") chatSound(l.scope);
+      heard(l);
     };
-    const onError = e => { if (e && ["say", "whisper", "chat"].includes(e.ref)) note(String(e.message || e.code)); };
+    const heard = l => {   // whom /r answers: who last whispered to you, else whom you last whispered
+      if (l.scope !== "whisper") return;
+      if (!l.mine && l.id) last = { scope: "whisper", id: l.id, key: l.key || null, name: l.name };
+      else if (l.mine && l.to && l.to.id) told = { scope: "whisper", id: l.to.id, key: l.to.key || null, name: l.to.name };
+    };
+    const onError = e => { if (e && ["say", "whisper", "chat", "voice_join"].includes(e.ref)) note(String(e.message || e.code)); };
+    const onVoice = rv => {   // into a room voice (said once), or out of one (and why)
+      const o = rv && rv.out;
+      if (o) note(o.why === "kicked" ? `${o.name} took you out of their room's voice` : o.why === "banned" ? `${o.name}'s room keeps you out of its voice` : `Out of ${o.name}'s room's voice: you are no longer linked`);
+      else if (rv && !rv.joining && voiceIn !== rv.key) note(`In ${rv.key === v.key ? "your room's" : `${rv.name}'s room's`} voice: everyone in it hears everyone else${v.mic ? "" : ", and you once your microphone is on (🎙)"}`);
+      voiceIn = rv && !rv.joining ? rv.key : rv ? voiceIn : null;
+      voiceLine();
+    };
+    const onBanned = b => note(b.voice || b.chat ? `${b.name}'s room keeps you out of its ${b.voice && b.chat ? "voice and chat" : b.voice ? "voice" : "chat"}` : `${b.name}'s room lets you back into its voice and chat`);
     addEventListener("keydown", key);
-    v.on("chat", onChat); v.on("error", onError);
-    for (const l of v.chatLog) add(l);
-    for (const l of v.chatLog) if (l.scope === "whisper" && !l.mine && l.id) last = { scope: "whisper", id: l.id, key: l.key || null, name: l.name };
-    note("Enter to chat · /s say · /w whisper · /r reply · /room name · /1 lobby");
+    v.on("chat", onChat); v.on("error", onError); v.on("room_voice", onVoice); v.on("banned", onBanned); v.on("change", voiceLine); v.on("voice", voiceLine);
+    voiceIn = v.roomVoice && !v.roomVoice.joining ? v.roomVoice.key : null;
+    voiceLine();
+    for (const l of v.chatLog) { add(l); heard(l); }
+    intro = note("Enter to chat · paste a picture · 🖼 shared · 🎧 voice · /s say · /w whisper · /r reply · /room yours, /room name · /1 lobby · Tab finishes a name");
     return {
       element: root, open, close,
-      release() { removeEventListener("keydown", key); v.off("chat", onChat); v.off("error", onError); clearTimeout(fadeTimer); root.remove(); },
+      release() {
+        removeEventListener("keydown", key);
+        v.off("chat", onChat); v.off("error", onError); v.off("room_voice", onVoice); v.off("banned", onBanned); v.off("change", voiceLine); v.off("voice", voiceLine);
+        clearTimeout(fadeTimer); root.remove();
+      },
     };
   }
 

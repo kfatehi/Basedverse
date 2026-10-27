@@ -132,7 +132,9 @@ decision, one knock at a time, or once and for all for its guests (point 9).
 
 ```
 visit-client --lobby wss://lobby.example/ --name "Magic Room" --sim my-sim/1.0 \
-             --port 7401 --token-file /run/user/1000/visit.token [--max-visitors 3] [--idle-exit 0]
+             --port 7401 --token-file /run/user/1000/visit.token \
+             --database postgres://visit:<password>@127.0.0.1:7432/visit [--max-visitors 3] [--idle-exit 0]
+visit-client migrate --database postgres://visit:<password>@127.0.0.1:7432/visit [--status]
 ```
 
 | flag | env | default | meaning |
@@ -147,6 +149,7 @@ visit-client --lobby wss://lobby.example/ --name "Magic Room" --sim my-sim/1.0 \
 | `--origins` | `VISIT_ORIGINS` | none | the page origins allowed to connect (`http://localhost:3000`, comma-separated); none: any page with the token (section 3, point 4) |
 | `--relays` | `VISIT_RELAYS` | the lobby's | the relays for links: `none`, `default` (iroh's own), or URLs, comma-separated |
 | `--state-file` | `VISIT_STATE_FILE` | none | a file where it keeps what outlasts a run: whether the office is away (`leave_lobby`, 5.2), so a restart stays away; its key (section 2), so it is the same office to its guests' hosts; its door and its guests; its world's layout (8.4); whose look its visitors have (8.6). Readable by its owner only (section 3, point 10). None: every start joins the lobby, with a new key and no guests. A launcher SHOULD give one |
+| `--database` | `VISIT_DATABASE_URL` | — (required, Visit 0.20) | its database (8.12): Postgres beside it, `postgres://user:password@host:port/database`, no TLS (on this machine or its own network). Made ready, and brought up to date after every upgrade, by `visit-client migrate`; a start checks it is at the schema it needs |
 | `--cache-dir` | `VISIT_CACHE_DIR` | beside the state file (`landscapes/`); none without one | where it keeps friends' landscapes (8.10), each by its office's key and hash, at most 256 MiB (the oldest go first), and the plots it keeps to draw while their offices are away; without a directory, for the run only |
 
 A flag wins over its environment variable, and a variable set but blank counts as unset (its default), as a
@@ -158,8 +161,15 @@ On start it prints **one JSON line** to stdout once it listens, then logs to std
 {"ready": true, "port": 7401, "version": "0.7.0", "proto": "basedverse-visit-local/2"}
 ```
 
-Exit codes: 0 asked to stop (SIGINT/SIGTERM, or idle-exit); 2 bad flags; 3 the port is taken; 4 the
-lobby refused it for good (`proto_unsupported`, `name_invalid`).
+Exit codes: 0 asked to stop (SIGINT/SIGTERM, or idle-exit); 2 bad flags (no `--database` among them: it says how to
+have one); 3 the port is taken; 4 the lobby refused it for good (`proto_unsupported`, `name_invalid`); 5 its database:
+not reached in 30 s, or not at the schema this visit-client needs (it says what to run: `visit-client migrate`).
+
+**`visit-client migrate`** (`--database`, or `VISIT_DATABASE_URL`) makes its database ready, or brings it up to date
+after an upgrade: each migration this visit-client knows that the database lacks, in order, once, each in a
+transaction of its own (recorded in `visit_migrations`), one run at a time (an advisory lock). It refuses a database
+newer than it knows. `--status` says where the database is and what is pending, changing nothing. Exit 0, or 1 and
+why. The migrations are built into the binary: whoever has a visit-client has its migrations.
 
 ### 4.2 Lifecycle
 
@@ -253,9 +263,16 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `avatar_use` | `key`, `use` (`"mine"` \| `"theirs"` \| null: the default) | the same for one office, apart from the default; kept in the state file |
 | `phone` | `on` (bool) | this room has a phone (8.8), or no longer: every link is told |
 | `call` | `channel`, `act` (`"ring"` \| `"answer"` \| `"hangup"`) | a call on that visit (8.8): ring their phone (refused `no_phone` if their room has none), answer it, end it |
-| `say` | `text` (1 to 200 characters), `to`? (none or `"here"`; `{"whisper"}`; `{"key"}`; `"lobby"`) | a line this office's user says (8.9). No `to`: to everyone who can see them (the room they are in, and those who see it from outside). `{"whisper": "<office id>"}`: to that office's user alone, through the lobby (its errors, `ref: "whisper"`: `not_found`, `not_supported`). `{"key"}`: into the room of an office linked with this one, either way (`no_link` if none). `"lobby"`: to everyone in the lobby (`not_supported` if the lobby does not carry chat). Control characters become spaces; trimmed; at most 5 every 10 s, whatever their `to` (`rate_limited`) |
+| `say` | `text` (1 to 200 characters; may be empty with pictures or links), `to`? (none or `"here"`; `{"whisper"}`; `{"key"}`; `"room"`; `"lobby"`), `media`? (pictures shared, at most 4: [{`id`, `mime`, `size`}]), `links`? (at most 2: [{`url`, `title`, `description`, `site`, `image`}]) | a line this office's user says (8.9). No `to`: to everyone who can see them (the room they are in, and those who see it from outside). `{"whisper": "<office id>"}`: to that office's user alone, through the lobby (its errors, `ref: "whisper"`: `not_found`, `not_supported`). `{"key"}`: into the room of an office linked with this one, either way (`no_link` if none). `"lobby"`: to everyone in the lobby (`not_supported` if the lobby does not carry chat). Control characters become spaces; trimmed; at most 5 every 10 s, whatever their `to` (`rate_limited`) |
 | `speaker` | `channel`, `on` (bool) | a call on this office's phone's speaker (8.8), or back to the ear (`no_call` if none is on there) |
-| `voice_where` | `me` [x, y, z] \| null, `phone` [x, y, z] \| null, `visitors` [[`channel`, x, y, z], …] (metres, this room's terms) | where everyone in this office's room is (8.7): its own user (null: not in it), its phone, each visitor in it. Who hears whom in the room goes by it. Sent when it changes, at most 10 a second |
+| `voice_where` | `me` [x, y, z] \| null, `phone` [x, y, z] \| null, `visitors` [[`channel`, x, y, z], …], `world` [[`key`, x, y, z], …] (metres, this room's terms) | where everyone in this office's room is (8.7): its own user (null: not in it), its phone, each visitor in it; and where its world has each friend at home in their own room, a plot in it (by their key; Visit 0.20). Who hears whom in the room, and across its plot's sides, goes by it. Sent when it changes, at most 10 a second |
+| `media_get` | `id` | a picture (8.12) this page would show: sent as a binary message (5.4, bit 7) once this office has it (it asks the link the line came by, if it has not), or `media_none` |
+| `preview` | `url` (http or https), `req` | a link's preview (8.12), made by this visit-client (it fetches the page once): `preview` back, with `req` |
+| `history` | `before`? (ms since 1970; none: now), `limit`? (1–200, 50), `req` | the chat before then (8.12), from the database: `history` back, newest last |
+| `shared` | `conversation` (`room:<key>`, `person:<key>`, `lobby`), `kind` (`media` or `links`), `before`?, `limit`? (1–200, 60), `req` | the pictures, or the links, shared in that conversation (8.12), newest first: `shared` back |
+| `voice_join` | `key` \| null | into a room voice (8.7): a linked office's room's (its key; `no_link` if none, `banned` if it keeps this office's user out of its voice), this office's own (its own key), or none (null). One at a time |
+| `voice_kick` | `key` | one out of this office's room's voice, now (8.7): they may join again |
+| `ban` | `key`, `name`?, `voice`, `chat` (bools) | keep that office's user out of this office's room's voice, its chat, both, or neither (8.9). Kept in its database (8.12) until lifted (both false); the other office told |
 | `knock` | `to` (office id), `message`? (≤ 280), `link`? (true: a link, 8.5) | ask to visit an office, or to link with it (refused `not_hosting` before `host`) |
 | `answer` | `knock`, `accept` (bool), `message`? | let a knocker in, or not |
 | `end` | `visit` | end a visit: yours as a visitor (leave), or a visitor's to you (kick) |
@@ -283,8 +300,18 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `possession` | `channel`, `id`, `possession` {`unit`, `json`} | one of a visitor's possessions' models, which this page asked for (host side, 8.11): checked as an avatar is |
 | `phone` | `channel`, `on` | the other office's room has a phone now (8.8), or no longer (also `phone` in `visit_started`) |
 | `call` | `channel`, `act` | a call on that visit (8.8): they ring, answer, or hang up |
-| `chat` | `channel`, `key`, `name`, `text`, and `id` (a visitor's, by its visit there) or `owner` (true: the room's owner); or `scope` | a line said (8.9): in this office's room by a visitor (that visit's channel, its `id`), or in a room its user is in or sees from outside (that visit's channel: its owner, or another visitor). `scope: "sim"`: said into a room from a linked office, by that office's user (`key`, `name`): into this office's room (`home: true`; `channel`, the link it came by), or into the one its user is in (its `channel`). `scope: "whisper"`: whispered to this office's user (`id`, the sayer's office id; `key`, its key or null). `scope: "lobby"`: said in the lobby (`id`, `key`, as a whisper's); this office's own too, in the lobby's order. Never this office's own otherwise. `ready` and `online` say whether the lobby carries chat (`lobby_chat`) |
-| `voice_near` | `channel`?, `near`: [{`key`, `name`, `distance` (m), `id`?, `phone`?}] | who is near this office's user (8.7), within `voice_range`: in its own room (no `channel`: as its visit-client has it), or in the room it is in (that visit's `channel`: as its owner's says). `id`: a visitor's, by its visit there; `phone`: a call on that room's speaker. When it changes; distances at most every second. `ready` has `voice_range` (45) |
+| `chat` | `channel`, `key`, `name`, `text`, and `id` (a visitor's, by its visit there) or `owner` (true: the room's owner); or `scope` | a line said (8.9): in this office's room by a visitor (that visit's channel, its `id`), or in a room its user is in or sees from outside (that visit's channel: its owner, or another visitor). `scope: "sim"`: said in a room's chat (`key`, `name`: its sayer): into this office's room from a linked office (`home: true`; `channel`, the link it came by), or in the chat of a room linked with this one (its owner's or said into it: `channel`, the link with that room's office). `scope: "whisper"`: whispered to this office's user (`id`, the sayer's office id; `key`, its key or null). `scope: "lobby"`: said in the lobby (`id`, `key`, as a whisper's); this office's own too, in the lobby's order. Never this office's own otherwise. `ready` and `online` say whether the lobby carries chat (`lobby_chat`) |
+| `chat_log` | `lines` | the chat this office's user has had (8.9), for a page that connects (a reload): after `ready` and the lobby, if there is any. Each line as `chat` gave it, with `at` (ms since 1970) and `conversation`; this office's own too (`mine: true`, `scope` "say", "sim" or "whisper", `to` as the page's `chat` event has it). The last 100 (all of it is in its database, 8.12: `history`) |
+| `media_ready` | `slot`, `id`, `mime`, `size` | a picture the page shared (5.4, bit 7, on that slot), kept (8.12): its id. Not a picture: `error` (`bad_media`, `ref: "media_put"`, `slot`) |
+| `media_none` | `id` | a picture asked for (`media_get`) that this office does not have and will not get |
+| `preview` | `req`, `url`, `title`, `description`, `site`, `image` ({`id`, `mime`, `size`} \| null); or `none: true` | a link's preview (8.12), as made here; its picture kept |
+| `history` | `req`, `lines`, `more` | the chat asked for (8.12), newest last, each as `chat_log`'s; `more`: there is more before |
+| `shared` | `req`, `conversation`, `kind`, `items`, `more` | what was shared there (8.12), newest first: a picture's {`id`, `mime`, `size`, `at`, `key`, `name`, `mine`}, a link's {`url`, `title`, `description`, `site`, `image`, `at`, `key`, `name`, `mine`} |
+| `voice_near` | `channel`?, `near`: [{`key`, `name`, `distance` (m), `id`?, `phone`?, `world`?}] | who is near this office's user (8.7), within `voice_range`: in its own room (no `channel`: as its visit-client has it), or in the room it is in (that visit's `channel`: as its owner's says). `id`: a visitor's, by its visit there; `phone`: a call on that room's speaker; `world`: a friend across a plot's side, near in both worlds (by this office's world's measure). When it changes; distances at most every second. `ready` has `voice_range` (45) |
+| `room_voice` | `key` \| null, `name`, `members` [{`key`, `name`}], `out`? {`key`, `name`, `why`} | the room voice this office's user is in (8.7), and who is in it, when that changes; null: none (`out`: they were taken out, `why` "kicked", "banned" or "gone"). `ready` has `room_voice` (its `members` null until its room says again) |
+| `voice_members` | `members` [{`key`, `name`}] | who is in this office's own room's voice (8.7), its own user first if they are. `ready` has `voice_members` |
+| `bans` | `bans` [{`key`, `name`, `voice`, `chat`}] | whom this office's user keeps out of their room's voice or chat (8.9), as it changes. `ready` has `bans` |
+| `banned` | `key`, `name`, `voice`, `chat` | a room that keeps this office's user out of its voice or chat (8.9), or no longer (both false). `ready` has `banned_by` |
 | `enter` / `exit` | `channel`, `pose`? {`x`, `y`, `z`, `yaw`, `air`} (for `enter`) | a watcher stepped into this room, there (host side: spawn it, as a visitor), or out of it; no `pose`: a link going there, spawned where newcomers go |
 | `enter_refused` | `channel`, `reason` (`"full"`, or `"moved"`: a visit to a room began, and this office stepped out) | stepping into a watched room was refused, or undone: outside it |
 | `online` / `offline` | `office`, `knocking` / `away`? | the lobby session came up (after a drop: the same office if it resumed), with this office's own knocks still waiting ([{`id`, `to`, `link`?}]) / went down: `away: true` when the page took it out (`leave_lobby`), `false` when it is on its way back (`join_lobby`), absent when the lobby is out of reach |
@@ -312,8 +339,8 @@ Both directions, one scene delta (or, from the host's page, one scene edit) per 
 | bytes | field |
 |---|---|
 | 0–1 | `channel`, u16 big-endian |
-| 2 | flags: bit 0 = a key delta (everything that has moved, 8.1); bit 1 = a scene edit (host page to visit-client only, alone); bit 2 = this office's avatar (8.6: page to visit-client only, alone, its channel 0); bit 3 = a packet of voice (8.7: from the page, its own user's, its channel saying where it may go: 1 the room they are in, 2 their calls, 3 both; to it, another office's, on the visit's channel); bit 4 = someone else's voice passed on (8.7, 8.8: to the page only, on the visit's channel it came by: who spoke, then the packet); bit 5 = this room's landscape (8.10: page to visit-client only, alone, its channel 0; gzipped JSON, at most 16 MiB); bit 6 = one of this office's possessions' models (8.11: page to visit-client only, alone, its channel its slot in the `possessions` list; gzipped JSON, at most 4 MiB) |
-| 3–10 | timestamp, u64 big-endian, microseconds: the host page's clock when it took the delta (unused for an edit) |
+| 2 | flags: bit 0 = a key delta (everything that has moved, 8.1); bit 1 = a scene edit (host page to visit-client only, alone); bit 2 = this office's avatar (8.6: page to visit-client only, alone, its channel 0); bit 3 = a packet of voice (8.7: from the page, its own user's, its channel saying where it may go, added: 1 in person, 2 their calls, 4 the room voice they are in; to it, another office's, on the visit's channel); bit 4 = someone else's voice passed on (8.7, 8.8: to the page only, on the visit's channel it came by: who spoke, an id or an office's key, then the packet); bit 5 = this room's landscape (8.10: page to visit-client only, alone, its channel 0; gzipped JSON, at most 16 MiB); bit 6 = one of this office's possessions' models (8.11: page to visit-client only, alone, its channel its slot in the `possessions` list; gzipped JSON, at most 4 MiB); bit 7 = a picture shared in chat (8.12: from the page, one to keep, alone, its channel a slot the page picks, answered by `media_ready`; to it, one it asked for, its channel 0: who it is (a length byte, its id), its type (a length byte, its MIME type), then its bytes; never dropped, unlike a frame) |
+| 3–10 | timestamp, u64 big-endian, microseconds: the host page's clock when it took the delta (unused for an edit). Voice to the page: byte 3 says how it came (8.7: 0 in person, 1 a call, 2 a room voice), the rest 0 |
 | 11… | the delta (8.1), or the edit, gzipped JSON |
 
 A delta larger than 1 MiB, an edit larger than 16 MiB, or an avatar larger than 4 MiB, is dropped. A visit-client sends deltas on the
@@ -457,11 +484,18 @@ Messages are JSON, each prefixed by its length (u32 big-endian). In order, relia
 | visitor | `{"point": {"yaw", "pitch"}}` | a point (8.3): passed to the host's page with only those two, clamped, at most 5 a second |
 | either | `{"phone": true}` / `{"phone": false}` | this side's room has a phone, or no longer (8.8): sent on every link, and on each new one while it has |
 | either | `{"call": "ring" \| "answer" \| "hangup"}` | a call (8.8), passed to the page as `call` |
-| visitor | `{"say": "<text>"}` | a line the visitor says in the host's room (8.9): only while in it; checked and rate-limited as the page's is; passed to the host's page as `chat` and on to everyone else who can see the room (its other visitors, and its watchers) |
+| visitor | `{"say": "<text>", "media"?, "links"?}` | a line the visitor says in the host's room (8.9): only while in it; checked and rate-limited as the page's is; passed to the host's page as `chat` and on to everyone else who can see the room (its other visitors, and its watchers) |
 | host | `{"said": {"key", "name", "text", "id"? \| "owner"?}}` | a line said in the host's room (8.9), by its owner or one of its visitors (by its visit's id): to everyone who can see the room (in it, or watching it); checked, passed to the page as `chat` |
-| either | `{"sim_say": "<text>"}` | a line said into the other office's room (8.9), by this office's user, wherever they are; checked and rate-limited as a page's is; passed to that room's page as `chat` (`scope: "sim"`, `home: true`) and on to each visitor in it |
-| host | `{"sim_said": {"key", "name", "text"}}` | a line said into the host's room from a linked office (8.9): to each visitor in it but its sayer; checked, passed to the page as `chat` (`scope: "sim"`) |
-| host | `{"near": [{"key", "name", "distance", "id"?, "phone"?}]}` | who is near the visitor in the host's room (8.7), as the host's visit-client has it: checked, passed to the page as `voice_near` |
+| either | `{"sim_say": "<text>"}` | a line said into the other office's room's chat (8.9), by this office's user, wherever they are; checked and rate-limited as a page's is; passed to that room's page as `chat` (`scope: "sim"`, `home: true`) and on to everyone else in its chat (`sim_said`) |
+| either | `{"sim_said": {"key", "name", "text"}}` | a line said in this office's room's chat (8.9), by its owner or into it from a linked office: to every office linked with it, either way, once each (on its visit, to one in the room), but its sayer; checked, passed to the page as `chat` (`scope: "sim"`, on this link's channel). Before 0.19.1: host only, to each visitor in the room |
+| host | `{"near": [{"key", "name", "distance", "id"?, "phone"?}]}` | who is near the visitor in the host's room (8.7), as the host's visit-client has it: checked, passed to the page as `voice_near`; kept (who the visitor hears in person) |
+| either | `{"media_want": "<id>"}` | a picture a line over this link named (8.12): the other side sends it (stream 5), or says `{"media_none": "<id>"}`. A visit-client answers for any picture it has (its id, a hash of it, is what is needed to ask); one passing a line on has its pictures, or is getting them |
+| either | `{"whisper": {"text", "media"?, "links"?}}` | a whisper with pictures or links (8.12), over a link rather than through the lobby: passed to the page as `chat` (`scope: "whisper"`) |
+| either | `{"world_near": true}` / `false` | this side's world has the other side's user within reach of its own (8.7: 45 m and the 15 m margin), both at home: sent when it changes, and on each link that comes up. Both sides saying so, they hear each other across a plot's side |
+| either | `{"voice_join": true}` / `false` | into the other side's room's voice, or out of it (8.7); refused with `voice_out` |
+| either | `{"voice_members": [{"key", "name"}]}` | who is in this side's room's voice, to each in it, when that changes: checked, passed to the page as `room_voice` |
+| either | `{"voice_out": "kicked"}` / `"banned"` | out of this side's room's voice (8.7), and why: passed to the page as `room_voice` null, with `out` |
+| either | `{"banned": {"voice", "chat"}}` | this side keeps the other side's user out of its room's voice, its chat, or neither now (8.9): sent when it changes, and on each link that comes up; passed to the page as `banned`. Its visit-client refuses their lines into that room's chat, and joining its voice, itself (`banned`) |
 | host | `{"avatar_want": true}` | send this office's avatar (8.6): now, on a stream of its own (7.4), and again whenever its page gives a new one. Its page has given none: `{"avatar_none": true}` back (passed to the host's page as `avatar_none`) |
 | host | `{"body": {"look", "eyes", "problem"}}` | how the host's room draws the visitor (8.6): `look` "theirs" (its own model) or "mine" (the room's), `eyes` over its feet (the room's units), and why not its own, if the room would show it (`problem`, at most 200 characters). Sent as it changes; checked, passed to the page as `body` |
 | visitor | `{"possessions": [{"id", "name", "mount", "fly", "speed", "lift"}]}` | what the visitor owns (8.11): sent each time the link is up and whenever its page says; checked, passed to the host's page as `possessions` |
@@ -516,13 +550,20 @@ And visitor to host, once its host asked (`possession_want`):
 
 And host to visitor, once the visitor asked (`landscape_want`):
 
+- **5, a picture** (8.12), either way, as the other side asked for it (`media_want`): its id (a length byte, then
+  it), its type (likewise), its length (u32 big-endian, at most 8 MiB), then its bytes. The receiving visit-client
+  takes it only if it asked for it, its bytes hash to its id (blake3) and are a PNG, JPEG, WebP or GIF; at most 30 a
+  minute from a link.
 - **3, its landscape** (8.10): its length (u32 big-endian, at most 16 MiB) then the gzipped JSON, the stream then
   finished. The visitor's visit-client unpacks it to check it (as an edit), keeps it as it came if its blake3 hash
   is the one the host named (else drops it), and passes it to its page as `landscape`.
 
 Datagrams (unreliable): the visitor's input (7.3), JSON, so starting with `{`; either side's own user's voice (8.7),
 one byte 0xA0 then one Opus packet (at most 100 a second taken, each at most 1 000 bytes); and someone else's voice
-passed on by a room's visit-client (8.7, 8.8), one byte 0xA1 then who spoke and the packet (at most 400 a second).
+passed on by a room's visit-client (8.7, 8.8), one byte 0xA1 then who spoke and the packet (at most 400 a second);
+and a room voice's (8.7), who spoke (an office's key) and the packet: a member's to the room's owner, one byte 0xA2,
+and the owner's (its own, or a member's passed on) to a member, 0xA3 (at most 400 a second; an older Visit ignores
+them).
 
 ### 7.5 Blips
 
@@ -749,13 +790,32 @@ How to make one, and every point it is measured by: [MODELS.md](MODELS.md).
 
 ### 8.7 Voice
 
-Voice goes by where people are, in the same room: nothing to join. Those in one room hear each other the nearer
-the louder, from where each stands, and nobody farther than 45 m away (`voice_range`). Nobody hears into another
-room: not next door in a world, not across a plot's side.
+Voice goes by where people are: nothing to join. Those in one room hear each other the nearer the louder, from
+where each stands, and nobody farther than 45 m away (`voice_range`). Two friends each at home in their own room
+hear each other across a plot's side (Visit 0.20) when both worlds have them near: each world is its own, so each
+side's own world must put the other within reach. A room's voice (0.20) is the one thing joined: as a game's voice
+chat, everyone in it hears everyone else, wherever they are.
+
+- **Across a plot's side.** A page at home tells its visit-client where its world has each friend whose room is a
+  plot in it, at home there (`voice_where`'s `world`: their room's `visit:me`, placed as the plot is). Its
+  visit-client tells that friend whether it has them within reach (`world_near`: 45 m and the 15 m margin). When
+  both say so, each sends its user's voice to the other, and each hears it from where its own world has the other,
+  by its own world's distance (`voice_near` says so, `world`). Neither user in another's room; else as above.
+- **One way a person.** Two people may reach each other more than one way (standing near each other and on a
+  call, in a room's voice and near): each hears the other one way only, the first of: in person (in the same room,
+  or across a plot's side, within 45 m), on a call, in a room voice. The listener's visit-client chooses, by what it
+  knows (who is near, as the room says; its calls; its room voice); a voice comes to the page saying which (5.4).
+  So no voice is heard twice, behind itself.
+- **A room's voice.** Every room has one; whoever is in its chat (8.9: in it, or linked with it) may join it
+  (`v.joinVoice`, the chat window's 🎧), one room voice at a time. Its owner's visit-client carries it: a member
+  sends its voice there (0xA2), and it passes each on to everyone else in it (0xA3), as its owner's own. In it,
+  everyone hears everyone else, not by distance, while their microphones are on. Its owner may take one out
+  (`v.voiceKick`), or keep them out (8.9). The page hears who is in it (`room_voice`, `voice_members`).
 
 - **The microphone** is each user's to turn on (`v.setMic`, the panel's 🎙), remembered in their browser (on again
   at the next load, once permission is given); off, they still hear. It is asked for with echo cancellation, noise
-  suppression and gain control. Nothing is encoded or sent while nobody is near.
+  suppression and gain control. Nothing is encoded or sent while nobody is near, nobody shares a room voice, and no
+  call is on.
 - **Where people are.** Each room's page tells its own visit-client where everyone in it stands (`voice_where`): its
   own user while they are at home (where its world, or `v.listener`, has them), its phone, and each visitor (where
   the room has them: it moves them, so it is the room's word, not the visitor's). It also keeps an empty object
@@ -813,11 +873,16 @@ As in a game's chat, a line goes one of four ways (its scope). Nothing to join.
 - **Whisper** (`v.say(text, { whisper })`, an office's id or key): one person, the user of an office in the lobby
   (`v.whisperTargets`: those whose Visit takes whispers), wherever they are, in their chat alone. The lobby passes it
   on (`whisper`), as a game's server does, and keeps nothing; linked or not.
-- **Into a linked room** (`v.say(text, { key })`): everyone in the room of an office linked with the speaker's,
-  either way (in a corner, in a world, visiting, visited: `v.chatTargets`), wherever the speaker is. It shows in
-  their chat, not over a head (the speaker is not there). It goes over the link (`sim_say`) to that room's
-  visit-client, which gives it to its page (`chat`, `scope: "sim"`, `home`) and to each visitor in it
-  (`sim_said`; an older Visit ignores it).
+- **A room's chat** (Visit 0.19.1), as a game's party: every room has one, and everyone in the room, and every
+  office linked with it, either way (in a corner, in a world, visiting, visited), has every line said in it, wherever
+  they are. Its owner says a line in it with `v.say(text, "room")`; one linked with it, with `v.say(text, { key })`
+  (`v.chatTargets`: the rooms linked with yours). It shows in chat, not over a head. A line into another's room goes
+  over the link (`sim_say`) to that room's visit-client, which gives it to its page (`chat`, `scope: "sim"`,
+  `home`). That visit-client gives every line in its room's chat (its owner's, and those said into it) to every
+  office linked with it, once each, but its sayer (`sim_said`: on its visit, to one in the room); each gives it to
+  its page (`chat`, `scope: "sim"`, on that link's channel: the room is the office at its other end). Before 0.19.1,
+  only those in the room had a line said into it, and its owner could say none: an older Visit has lines in a room
+  only while in it.
 - **Lobby** (`v.say(text, "lobby")`): everyone in the lobby whose Visit takes it, in their chat. The lobby relays
   it (`chat`, `lobby_chat`) to each office whose `hello` said `chat`, the sayer's too, in one order, and keeps
   nothing. A lobby that carries it says so in `welcome` (`chat: true`; the page: `v.lobbyChat`).
@@ -832,8 +897,23 @@ As in a game's chat, a line goes one of four ways (its scope). Nothing to join.
   it, Esc to stop; `/` opens it with the `/` typed, for a command. Where a line goes is before the box (Say, Tell
   <name>, To <name>'s room, Lobby), picked there or with `/s`, `/w <name>` (`/t`, `/tell`), `/r` (back to whoever
   last whispered to you), `/room <name>`, `/1` (`/l`) and a space, and it stays for the next line. Every line of
-  every scope shows in it, coloured by scope (say white, a whisper pink, a room's blue, the lobby's gold). It fades
-  20 s after the last line, and comes back with the next one, or Enter.
+  every scope shows in it, coloured by scope (say white, a whisper pink, a room's blue, the lobby's gold), a room's
+  and the lobby's as channels (`[Gooshy's room] [Ann]: hi`, `[Your room] [Ann]: hi`, `[Lobby] [Ann]: hi`). `/room`
+  alone is your own room's chat ("To your room", among the choices while anyone is linked with you); `/r`, with
+  nobody having whispered to you, is whom you last whispered. Tab finishes the name after `/w` or `/room` (again:
+  the next one it could be), from those shown over the box; a name is taken once a space follows it, or on Enter
+  (all of it, or the one name it starts). It fades 20 s after the last line, and comes back with the next one, or
+  Enter.
+- **Keeping people out** (0.20). A room's owner keeps anyone out of its voice, its chat, or both (`v.ban`; the
+  panel's person row: ban voice, ban chat), kept in its database (8.12) until lifted. Out of its voice: their voice is
+  not heard in the room (in person, across its plot's side, or in its voice), they hear none of it, and they are
+  out of its voice. Out of its chat: their lines are not said in it (in the room or into it), and they get none of
+  its lines. Their own visit-client is told (`banned`), so it refuses those lines, and joining that voice, itself.
+  Calls are apart: they ring, the owner answers or not.
+- **Kept** (0.20). A visit-client keeps every line its user has had, theirs too, in its database (8.12), and gives
+  the last 100 to a page that connects (`chat_log`): a reload, or a restart, keeps the chat, with the lines that came
+  while it reloaded. Older lines: the chat window's log, scrolled to its top (`history`). They come as `chat` events marked `old` (no sound, no bubble), before the
+  window's first note; the window keeps where lines go across a reload too (this tab).
 - **Text is text.** A page shows a line as text (a canvas, `textContent`), never as markup.
 
 ### 8.10 Landscapes
@@ -893,6 +973,37 @@ names, paces), puts it under its rider in the room they are in, and leaves the d
   they look), so your visitors see it too. Your page lifts your user onto it (`v.rideLift`, metres), walks them at
   its pace (`v.rideSpeed`), and flies them if it flies (`v.rideFly`; `air`, 8.2).
 
+### 8.12 What a visit-client keeps: its database; pictures and links in chat
+
+A visit-client has a database beside it (Visit 0.20; required): Postgres, its own (one per office), on its machine
+or its machine's own network. It keeps there what its user has had, never anyone else's:
+
+- **The chat**: every line its user has had (8.9), their own too, as their page had it, by conversation: a room's
+  (`room:<its owner's key>`: said in it, or in its chat), a person's (`person:<their key>`: whispers), the lobby's.
+  The page gets the last 100 when it connects (`chat_log`), and older lines as it asks (`history`).
+- **Pictures shared** (`media`), each once, by its id: the blake3 hash of its bytes (64 hex characters). A PNG, JPEG,
+  WebP or GIF of at most 8 MiB, by what its bytes are (not what it is called).
+- **Links shared**, with the preview their sender made (`links`).
+- **Whom its room keeps out** (8.9; a state file of the release before kept them: they move once).
+
+What was shared in a conversation, the page asks for (`shared`): its pictures, or its links, newest first. Its schema
+is made, and brought up to date after every upgrade, by `visit-client migrate` (4.1), never by a run.
+
+**Pictures.** A page shares one (`v.share(blob)`: pasted, dropped) as a binary message (5.4, bit 7); its
+visit-client checks it, keeps it, and says its id (`media_ready`). A line names its pictures (`say`'s `media`:
+`{ id, mime, size }`, at most 4) and goes as any line does, its pictures named with it: in a room, into a room's chat,
+or, for a whisper with pictures, over a link with that person (`whisper`, not the lobby). The lobby carries text
+only: a line to it with pictures or links is refused (`not_supported`), and so is a whisper with them to someone
+not linked (`no_link`). A visit-client that gets a line naming a picture it does not have asks the link the line
+came by for it (`media_want`), once; that side has it (it said it, or passed it on and is getting it) and sends it
+(stream 5). Meanwhile a page asking for it (`media_get`) waits. One not had in a minute is said none (`media_none`).
+
+**Links.** As a link is typed, the page asks its own visit-client for a preview (`preview`): it fetches the page
+(http or https; 6 s at most, 4 redirects, its first 512 KiB) and reads what it says of itself (its Open Graph
+title, description, site and picture, else its `<title>` and description), and fetches its picture (at most 2 MiB:
+kept as a picture). The line carries the preview (`links`: `{ url, title, description, site, image }`, at most 2), so
+those it goes to show it and never contact the site (as messaging apps do).
+
 ## 9. The library: `visit.js`
 
 The normative surface; INTEGRATING.md shows it in use. Loaded with
@@ -950,23 +1061,41 @@ v.possessions([{ id, name, object, unit, mount, fly, speed, lift }])   // what y
 v.mounts                    // what they can ride: [{ id, name, fly, speed, lift }] (none until your room gives some)
 v.ride(id); v.riding; v.mount   // get on a mount (null: off); what they ride; the one M (the panel's) gets them on
 v.rideSpeed; v.rideLift; v.rideFly   // their mount's, for your own room at home: times walking pace, metres up, flies
-v.setMic(on); v.mic         // your microphone (8.7): on, those near your user in the same room hear them (remembered)
-v.voices; v.voiceRange      // who your user can hear, near them (as the room's visit-client says): [{ key, name, distance (m), speaking }]; metres (45)
+v.setMic(on); v.mic         // your microphone (8.7): on, those near your user hear them, and those in a room voice with them (remembered)
+v.voices; v.voiceRange      // who your user can hear, near them (as the room's visit-client says; across a plot's side, too): [{ key, name,
+                            //   distance (m), speaking }]; metres (45)
+v.share(blob)               // a picture to share (8.12): kept by visit-client; resolves to { id, mime, size } (a bigger one,
+                            //   or another kind, made smaller as WebP first)
+v.media(id)                 // a picture by its id: a promise of a URL this page can show (null: not to be had)
+v.preview(url)              // a link's preview, made by visit-client: a promise of { url, title, description, site, image } or null
+v.history({ before, limit })   // the chat before then (8.12), from the database: a promise of { lines, more }, newest last
+v.shared(conversation, kind, { before })   // the pictures ("media") or links ("links") shared in a conversation (a line's
+                            //   `conversation`), newest first: a promise of { items, more }
+v.joinVoice(key)            // into a room voice (8.7): a linked office's room's (its key), yours ("room"), or none (null); false: not
+                            //   possible. "room_voice" event: the one you are in ({ key, name, members }), or none ({ key: null, out })
+v.roomVoice; v.voiceMembers // the room voice you are in: { key, name, members: [{ key, name, speaking }], joining } or null; who is in
+                            //   your own room's voice: [{ key, name, speaking }]; the "voice" event: one of them starts or stops speaking
+v.voiceKick(key)            // one out of your room's voice now (they may come back)
+v.ban(key, { voice, chat }) // keep someone out of your room's voice, its chat, both, or neither (8.9; kept until lifted)
+v.bans; v.banOf(key)        // whom you keep out: [{ key, name, voice, chat }]; one of them, or null
+v.bannedBy                  // rooms that keep you out: [{ key, name, voice, chat }]; the "banned" event as it changes
 v.listener({ x, y, z, yaw })   // where your user is in your room, for a room that draws no world (a world says it)
 v.landscapeChanged()        // something marked userData.visitStatic (8.10) changed in itself: its landscape goes again
 v.perf(on); v.perfReport()  // telemetry (the panel's ⏱; remembered in this browser; ?visit-perf=1): a corner of the page,
                             //   each second, this page's frames and stalls (long tasks) and Visit's own work by part (ms);
                             //   perfReport(): the last two minutes, a row a second. Nothing leaves the page
+v.say(text, to, { media, links })   // with pictures (v.share's) or links (v.preview's) (8.12); a line may be them alone
 v.say(text, to)             // a line (8.9): true if said. No to: everyone who can see your user (over their head);
-                            //   { whisper: id or key }: that person alone; { key } (or a key): into that linked
-                            //   office's room; "lobby": everyone in the lobby
+                            //   { whisper: id or key }: that person alone; "room": your room's chat (everyone in it,
+                            //   and linked with it); { key } (or a key): that linked office's room's chat; "lobby":
+                            //   everyone in the lobby
 v.whisperTargets            // whom say(text, { whisper }) can reach: those in the lobby who take whispers: [{ id, key, name }]
 v.chatTargets; v.lobbyChat  // whom say(text, { key }) can reach: [{ key, name }]; the lobby carries chat
 v.chats                     // the lines over heads still showing where you are and in your room: [{ key, name, text, mine,
                             //   owner, id, channel }]
 v.chatLog                   // the last 100 lines of every scope: [{ at, scope ("say", "whisper", "sim", "lobby"), key, name,
-                            //   text, mine, owner, id, channel, to (yours: whom you whispered; a "sim" line's: the room it
-                            //   went into) }]; and the
+                            //   text, mine, owner, id, channel, to (yours: whom you whispered; a "sim" line's: the room
+                            //   whose chat it was), old (from before this page: a reload keeps the chat) }]; and the
                             //   "chat" event, each as it comes
 v.phone(on, { at, model })  // a phone in your room (8.8), at that spot (your units): Visit's own there (model: false, yours)
 v.phones; v.calls           // those linked to you whose rooms have phones: [{ key, name }]; your calls: [{ key, name,

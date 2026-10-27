@@ -7,6 +7,9 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
 out="${OUT:-$(mktemp -d)}"; mkdir -p "$out"
 "$here/../cargo" build
+# Postgres for the two visit-clients (a database each), on this machine's loopback only, gone with the test.
+db="visit-browser-db-$$"
+docker run -d --rm --name "$db" -e POSTGRES_HOST_AUTH_METHOD=trust -p 127.0.0.1:15432:5432 postgres:17-alpine >/dev/null
 pids=()
 for p in 9351 9352; do
   google-chrome --headless=new --remote-debugging-port=$p --user-data-dir="$(mktemp -d)" --window-size=1280,720 \
@@ -15,8 +18,9 @@ for p in 9351 9352; do
     --no-first-run --no-default-browser-check about:blank >/dev/null 2>&1 &
   pids+=($!)
 done
-trap 'kill "${pids[@]}" 2>/dev/null || true' EXIT
-sleep 2
-docker run --rm --network host -u "$(id -u):$(id -g)" -e HOME=/tmp -v visit-target:/target:ro -v "$repo":/repo:ro -v "$out":/out -w /repo \
+trap 'kill "${pids[@]}" 2>/dev/null || true; docker rm -f "$db" >/dev/null 2>&1 || true' EXIT
+for _ in $(seq 1 120); do docker exec "$db" pg_isready -q -h 127.0.0.1 -U postgres && break; sleep 0.5; done
+for d in a b; do docker exec "$db" createdb -h 127.0.0.1 -U postgres "$d"; done
+docker run --rm --network host -u "$(id -u):$(id -g)" -e HOME=/tmp -e VISIT_TEST_DB=postgres://postgres@127.0.0.1:15432 -v visit-target:/target:ro -v "$repo":/repo:ro -v "$out":/out -w /repo \
   python:3.13-slim-bookworm sh -c 'pip install -q --user websockets==15.0.1 2>/dev/null && python3 -u visit/client/tests/browser_test.py /target/debug/visit-client 9351 9352 /out'
 echo "screenshots and logs: $out"

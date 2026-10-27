@@ -113,6 +113,7 @@ async fn page(mut sock: WebSocket, st: Arc<PageState>) {
                 biased;   // what the page is told goes before the next frame
                 out = text_rx.recv() => match out {
                     Some(PageOut::Text(s)) => sink.send(Message::Text(s.into())).await,
+                    Some(PageOut::Binary(b)) => sink.send(Message::Binary(b)).await,
                     Some(PageOut::Close(code, why)) => {
                         let _ = sink.send(Message::Close(Some(CloseFrame { code, reason: why.into() }))).await;
                         return;

@@ -7,6 +7,7 @@ machine's loopback; the visit-clients link directly (no relay).
 """
 import asyncio
 import gzip
+import http.server
 import json
 import os
 import re
@@ -14,6 +15,8 @@ import secrets
 import struct
 import sys
 import tempfile
+import threading
+import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "lobby", "server"))
 import lobby  # noqa: E402
@@ -90,7 +93,22 @@ class Page:
         self.pump.cancel()
 
 
+DB = os.environ["VISIT_TEST_DB"]   # Postgres (run-e2e.sh's): a database for each visit-client, by its name
+
+
+async def run_bin(*args, timeout=40):
+    """visit-client run to its end: its exit code, what it printed, what it said on stderr."""
+    p = await asyncio.create_subprocess_exec(BIN, *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    out, err = await asyncio.wait_for(p.communicate(), timeout)
+    return p.returncode, out.decode(), err.decode()
+
+
 async def start_client(name, port, url, *extra, binary=None):
+    database = "%s/%s" % (DB, name.lower())
+    code, _, err = await run_bin("migrate", "--database", database)   # (made ready, or already: nothing to do)
+    if code != 0:
+        raise AssertionError("visit-client migrate: " + err)
+    extra = ("--database", database) + extra
     token = secrets.token_hex(32)
     path = os.path.join(TMP, name + ".token")
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -128,6 +146,24 @@ async def main():
         url = "ws://127.0.0.1:%d" % server.sockets[0].getsockname()[1]
         state = os.path.join(TMP, "A.state.json")   # where A keeps whether it is away
         a_flags = ("--origins", "http://room.test", "--state-file", state)
+
+        print("\nits database (8.12): required, made ready by visit-client migrate, checked at every start")
+        tok = os.path.join(TMP, "check.token")
+        with open(tok, "w") as f:
+            f.write(secrets.token_hex(32))
+        bare = ("--lobby", url, "--name", "A", "--port", "7411", "--token-file", tok, "--relays", "none")
+        code, _, err = await run_bin(*bare)
+        check("without a database: it will not run, and says how to have one", (code, "a database is required" in err, "visit-client migrate" in err), (2, True, True))
+        code, _, err = await run_bin(*bare, "--database", DB + "/a")
+        check("with one not made ready: it will not run, and says what to run", (code, "needs 1" in err, "visit-client migrate --database" in err), (5, True, True))
+        code, out, _ = await run_bin("migrate", "--status", "--database", DB + "/a")
+        check("migrate --status: where it is, what is pending, changing nothing", (code, "at version 0" in out, "pending: 1 chat" in out), (0, True, True))
+        code, out, _ = await run_bin("migrate", "--database", DB + "/a")
+        check("migrate: each migration applied, once", (code, "applied: 1 chat" in out), (0, True))
+        code, out, _ = await run_bin("migrate", "--database", DB + "/a")
+        check("and again: nothing to do", (code, "up to date" in out), (0, True))
+        code, _, err = await run_bin("migrate", "--database", "postgres://postgres@127.0.0.1:1/a", timeout=60)
+        check("a database it cannot reach: said, and a failure", (code, "cannot reach the database" in err), (1, True))
         (pa, ta), (pb, tb) = await start_client("A", 7411, url, *a_flags), await start_client("B", 7412, url, "--cache-dir", os.path.join(TMP, "B.lands"))
 
         print("\npage connection")
@@ -670,6 +706,7 @@ async def main():
               ({"channel": va["channel"], "key": kb, "text": "hi both", "owner": True, "id": None}, {"channel": vc["channel"], "text": "hi both", "owner": True}))
         await asyncio.sleep(0.3)
         check("nobody's own line comes back to them", ([t for t in quiet_types(a) if t == "chat"], [t for t in quiet_types(b) if t == "chat"]), ([], []))
+        c_said = time.monotonic()
         await c.send(type="say", text="é" * 500)
         check("a long line: cut to 200 characters", len((await b.until(chat))["text"]), 200)
         await c.send(type="say", text=" \n\t ")
@@ -733,6 +770,24 @@ async def main():
               {"scope": "sim", "home": None, "key": ka, "name": "A", "text": "hello B's room", "channel": vc["channel"]})
         await asyncio.sleep(0.3)
         check("A's own line does not come back to it", [t for t in quiet_types(a) if t == "chat"], [])
+        await b.send(type="say", text="B's room, all", to="room")
+        x, y = await a.until(chat), await c.until(chat)
+        check("B says a line in its own room's chat (to: room): A, linked and outside it, has it, on its link", pick(x, "scope", "home", "key", "name", "text", "channel"),
+              {"scope": "sim", "home": None, "key": kb, "name": "B", "text": "B's room, all", "channel": la["channel"]})
+        check("and C, in B's room, by its visit there", pick(y, "scope", "key", "text", "channel"), {"scope": "sim", "key": kb, "text": "B's room, all", "channel": vc["channel"]})
+        await asyncio.sleep(max(0, 10.5 - (time.monotonic() - c_said)))   # C's 5 lines in 10 s (above): that window past
+        await c.send(type="say", text="from C", to={"key": kb})
+        x, y = await b.until(chat), await a.until(chat)
+        check("C, in B's room, says a line into its chat: B's page has it, and A, linked with B and outside, too",
+              (pick(x, "scope", "home", "key", "text"), pick(y, "scope", "key", "name", "text", "channel")),
+              ({"scope": "sim", "home": True, "key": kc, "text": "from C"}, {"scope": "sim", "key": kc, "name": "C", "text": "from C", "channel": la["channel"]}))
+        await a.send(type="say", text="A's room, all", to="room")
+        x = await b.until(chat)
+        check("A says one in its own room's chat: B, linked with A (from the other side), has it", pick(x, "scope", "home", "key", "name", "text"),
+              {"scope": "sim", "home": None, "key": ka, "name": "A", "text": "A's room, all"})
+        await asyncio.sleep(0.3)
+        check("nobody else: not C (no link with A), and none back to its sayer",
+              ([t for t in quiet_types(c) if t == "chat"], [t for t in quiet_types(a) if t == "chat"], [t for t in quiet_types(b) if t == "chat"]), ([], [], []))
         await a.send(type="say", text="x", to={"key": kc})
         check("into the room of an office A has no link with (C): refused", (await a.until(lambda m: m["type"] == "error"))["code"], "no_link")
         await a.send(type="say", text="x", to=5)
@@ -768,8 +823,173 @@ async def main():
         check("back to B's ear: A to B only; C heard by B, not in the call", [sorted(x) for x in await no_voice(a, b, c)], [[], sorted([(8, opus(9)), (8, opus(10))]), []])
         await b.send(type="speaker", channel=999, on=True)
         check("a speaker for no call: refused", (await b.until(lambda m: m["type"] == "error"))["code"], "no_call")
+
+        print("\nvoice across a plot's side (both at home, each near the other in its own world); one way a person, in person first; a room's voice; keeping people out")
+        route = lambda f: (f[2], f[3], f[11:])   # its flag (8 voice, 16 passed on), how it came (0 in person, 1 a call, 2 a room voice), the rest
+        async def heard(*pgs):
+            await asyncio.sleep(0.5)
+            return [[route(f) for f in drain_frames(pg) if f[2] in (8, 16)] for pg in pgs]
+        world_near = lambda m: m["type"] == "voice_near" and m.get("channel") is None
+        b_where = dict(me=[0, 1.6, 0], phone=None, visitors=[[vbc["channel"], 2, 0, 5]])
+        await b.send(type="voice_where", world=[[ka, 30, 0, 0], ["not a key", 1, 0, 0]], **b_where)
+        await a.send(type="voice_where", me=[0, 1.6, 0], phone=None, visitors=[], world=[[kb, 100, 0, 0]])
+        await asyncio.sleep(0.3)
+        drain_frames(a); drain_frames(b); drain_frames(c)
+        await a.ws.send(voice(3, 11))
+        check("A on a call with B, far off in A's world (B's has A near): B has A on the call only", await heard(b), [[(8, 1, opus(11))]])
+        await a.send(type="voice_where", me=[0, 1.6, 0], phone=None, visitors=[], world=[[kb, 20, 0, 0]])
+        nb = await b.until(lambda m: world_near(m) and any(n.get("world") for n in m["near"]))
+        na = await a.until(lambda m: world_near(m) and any(n.get("world") for n in m["near"]))
+        check("near in both worlds: each told the other is near, by its own world's measure (B: A 30 m off; A: B 20 m)",
+              ([(n["name"], n["distance"]) for n in nb["near"] if n.get("world")], [(n["name"], n["distance"]) for n in na["near"] if n.get("world")]), ([("A", 30)], [("B", 20)]))
+        drain_frames(a); drain_frames(b); drain_frames(c)
+        await a.ws.send(voice(3, 12))
+        check("A speaks, on the call and near B across the side: B has it once, in person (the call quiet for A); not C", await heard(b, c), [[(8, 0, opus(12))], []])
+        await b.ws.send(voice(1, 13))
+        check("and B, in person, near A: A has it (B speaking to the room only)", await heard(a), [[(8, 0, opus(13))]])
+        await b.send(type="voice_where", world=[[ka, 50, 0, 0]], **b_where)
+        await b.until(lambda m: world_near(m) and not any(n.get("world") for n in m["near"]))
+        drain_frames(a); drain_frames(b)
+        await a.ws.send(voice(3, 14))
+        check("B's world has A 50 m off now (past hearing, fading in): B has A on the call again", await heard(b), [[(8, 1, opus(14))]])
+        await b.send(type="voice_where", world=[[ka, 30, 0, 0]], **b_where)
         await a.send(type="call", channel=la["channel"], act="hangup")
         await b.until(lambda m: m["type"] == "call")
+        await a.send(type="voice_where", me=[0, 1.6, 0], phone=None, visitors=[], world=[[kb, 100, 0, 0]])
+        await b.until(lambda m: world_near(m) and not any(n.get("world") for n in m["near"]))
+        drain_frames(a); drain_frames(b)
+        await a.ws.send(voice(3, 15))
+        check("no call, and A's world has B far off: B hears nothing of A, whatever B's world says", await heard(b), [[]])
+
+        await b.send(type="voice_join", key=kb)
+        vm = await b.until(lambda m: m["type"] == "room_voice")
+        await a.send(type="voice_join", key=kb)
+        ra = await a.until(lambda m: m["type"] == "room_voice")
+        await c.send(type="voice_join", key=kb)
+        rc = await c.until(lambda m: m["type"] == "room_voice")
+        bm = await b.until(lambda m: m["type"] == "voice_members" and len(m["members"]) == 3)
+        check("B in its own room's voice; A (linked) and C (in B's room) join it: each told who is in it",
+              ([x["name"] for x in vm["members"]], ra["key"], sorted(x["name"] for x in rc["members"]), sorted(x["name"] for x in bm["members"])), (["B"], kb, ["A", "B", "C"], ["A", "B", "C"]))
+        await a.send(type="call", channel=la["channel"], act="ring")
+        await b.until(lambda m: m["type"] == "call")
+        await b.send(type="call", channel=lb["channel"], act="answer")
+        await a.until(lambda m: m["type"] == "call")
+        drain_frames(a); drain_frames(b); drain_frames(c)
+        await a.ws.send(voice(4, 16))
+        check("A speaks in it: C has it (who spoke: A's key), as a room voice; B, on a call with A, does not (the call first)",
+              await heard(a, b, c), [[], [], [(16, 2, said(ka, "A", 16))]])
+        await c.ws.send(voice(5, 17))
+        check("C speaks (to the room near it, and the voice): A has it in the voice; B, next to C, in person only",
+              await heard(a, b, c), [[(16, 2, said(kc, "C", 17))], [(8, 0, opus(17))], []])
+        await b.ws.send(voice(4, 18))
+        check("B speaks in its voice: A (on a call with B) and C (next to B) hear B their own way only, so nothing more", await heard(a, b, c), [[], [], []])
+        await a.send(type="call", channel=la["channel"], act="hangup")
+        await b.until(lambda m: m["type"] == "call")
+        await b.ws.send(voice(4, 19))
+        check("the call over: A has B in the voice", await heard(a), [[(16, 2, said(kb, "B", 19))]])
+        await b.send(type="voice_kick", key=kc)
+        out = await c.until(lambda m: m["type"] == "room_voice")
+        bm = await b.until(lambda m: m["type"] == "voice_members")
+        check("B kicks C from its voice: C is out, told why; B's voice is B and A", (out["key"], out["out"]["why"], [x["name"] for x in bm["members"]]), (None, "kicked", ["B", "A"]))
+        await b.send(type="ban", key=kc, voice=True, chat=True)
+        bn, bb = await c.until(lambda m: m["type"] == "banned"), await b.until(lambda m: m["type"] == "bans")
+        check("B keeps C out of its room's voice and chat: B's page says so, and C's", ((bn["key"], bn["name"], bn["voice"], bn["chat"]), bb["bans"]),
+              ((kb, "B", True, True), [{"key": kc, "name": "C", "voice": True, "chat": True}]))
+        await c.send(type="voice_join", key=kb)
+        await c.send(type="say", text="into B's chat", to={"key": kb})
+        check("C into B's voice again, or a line into B's chat: refused by C's own visit-client",
+              [(await c.until(lambda m: m["type"] == "error"))["code"] for _ in range(2)], ["banned", "banned"])
+        drain_frames(a); drain_frames(b)
+        await c.send(type="say", text="let me in")
+        await c.ws.send(voice(1, 20))
+        await asyncio.sleep(0.5)
+        check("C, in B's room, says a line and speaks: B has neither", ([t for t in quiet_types(b) if t == "chat"], [route(f) for f in drain_frames(b) if f[2] in (8, 16)]), ([], []))
+        await b.ws.send(voice(1, 21))
+        check("and C hears none of B's room", await heard(c), [[]])
+        await b.send(type="ban", key=kc)
+        bn = await c.until(lambda m: m["type"] == "banned")
+        check("B lifts it: C told", (bn["voice"], bn["chat"]), (False, False))
+        await a.send(type="ban", key=kb, chat=True)
+        check("A keeps B out of its chat (kept in its database, until lifted: see A's restart)", (await a.until(lambda m: m["type"] == "bans"))["bans"],
+              [{"key": kb, "name": "B", "voice": False, "chat": True}])
+        print("\npictures and links (8.12): kept in each one's database, asked for over the link a line came by")
+        async def next_media(pg):
+            while True:
+                f = await asyncio.wait_for(pg.frames.get(), 10)
+                if f[2] == 128:
+                    n = f[11]
+                    m = f[12 + n]
+                    return f[12:12 + n].decode(), f[13 + n:13 + n + m].decode(), f[13 + n + m:]
+        png = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 40   # (what its bytes start with makes it a picture)
+        await asyncio.sleep(10.5)   # A's lines in the voice checks above: their 10 s window past (5 lines in it at most)
+        await a.ws.send(struct.pack(">HBQ", 5, 128, 0) + png)
+        mr = await a.until(lambda m: m["type"] in ("media_ready", "error"))
+        check("A's page shares a picture: A's visit-client keeps it, its id the hash of it", (mr["type"], mr["slot"], mr["mime"], mr["size"], len(mr["id"])), ("media_ready", 5, "image/png", len(png), 64))
+        pic = {"id": mr["id"], "mime": "image/png", "size": len(png)}
+        await a.ws.send(struct.pack(">HBQ", 6, 128, 0) + b"<svg xmlns='http://www.w3.org/2000/svg'/>")
+        e = await a.until(lambda m: m["type"] == "error")
+        check("one that is no picture (an SVG): refused, by its slot", (e["code"], e["ref"], e["slot"]), ("bad_media", "media_put", 6))
+        await a.send(type="say", text="look", to={"key": kb}, media=[pic])
+        x, y = await b.until(chat), await c.until(chat)
+        check("A says a line with it into B's room's chat: B's page has it, and C's (in B's room)",
+              (pick(x, "text", "media", "conversation"), pick(y, "text", "media")), ({"text": "look", "media": [pic], "conversation": "room:" + kb}, {"text": "look", "media": [pic]}))
+        await b.send(type="media_get", id=pic["id"])
+        check("B's page asks for it: B's visit-client has it from A (over the link the line came by), and gives it", await next_media(b), (pic["id"], "image/png", png))
+        await c.send(type="media_get", id=pic["id"])
+        check("and C's, from B (the room that passed the line on)", await next_media(c), (pic["id"], "image/png", png))
+        await b.send(type="media_get", id="0" * 64)
+        check("a picture nobody has: media_none", (await b.until(lambda m: m["type"] == "media_none"))["id"], "0" * 64)
+        await a.send(type="say", text="x", to="lobby", media=[pic])
+        check("a picture into the lobby: refused (it carries text only)", (await a.until(lambda m: m["type"] == "error"))["code"], "not_supported")
+        await a.send(type="say", text="psst", to={"whisper": lobby.BY_NAME2["c"]}, media=[pic])
+        check("a whisper with a picture to C, not linked with A: refused", (await a.until(lambda m: m["type"] == "error"))["code"], "no_link")
+        hits = []
+        class Site(http.server.BaseHTTPRequestHandler):   # a site with a page to preview, and its picture
+            def do_GET(self):
+                hits.append(self.path)
+                body, kind = (png, "image/png") if self.path == "/pic.png" else (
+                    b'<html><head><title>Plain</title><meta property="og:title" content="A page"><meta name="description" content="About &amp; it">'
+                    b'<meta property="og:image" content="/pic.png"></head></html>', "text/html; charset=utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", kind)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def log_message(self, *a):
+                pass
+        site = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Site)
+        threading.Thread(target=site.serve_forever, daemon=True).start()
+        page_url = "http://127.0.0.1:%d/page" % site.server_address[1]
+        await a.send(type="preview", url=page_url, req=7)
+        pv = await a.until(lambda m: m["type"] == "preview")
+        check("A's page asks a link's preview: A's visit-client fetches the page (and its picture), and says what it is",
+              (pv["req"], pv["title"], pv["description"], pv["site"], pv["image"]["mime"], pv["image"]["id"] == pic["id"]), (7, "A page", "About & it", "127.0.0.1:%d" % site.server_address[1], "image/png", True))
+        link = {"url": page_url, "title": pv["title"], "description": pv["description"], "site": pv["site"], "image": pv["image"]}
+        await a.send(type="say", text="just for you", to={"whisper": ids["B"]}, media=[pic])
+        x = await b.until(chat)
+        check("a whisper with a picture to B, linked: over the link, not the lobby", pick(x, "scope", "id", "key", "text", "media"),
+              {"scope": "whisper", "id": ids["A"], "key": ka, "text": "just for you", "media": [pic]})
+        await a.send(type="say", text="see " + page_url, to={"key": kb}, links=[link])
+        x = await b.until(chat)
+        check("A says the link in B's room's chat: B has its preview with it, and never fetched the page", (pick(x, "links"), sorted(hits)), ({"links": [link]}, ["/page", "/pic.png"]))
+        await b.send(type="shared", conversation="room:" + kb, kind="links", req=8)
+        sh = await b.until(lambda m: m["type"] == "shared")
+        check("B's links shared in its room's chat, from its database: that one, from A", [(i["url"], i["title"], i["name"], i["image"]["id"]) for i in sh["items"]], [(page_url, "A page", "A", pic["id"])])
+        await b.send(type="shared", conversation="room:" + kb, kind="media", req=9)
+        check("and its pictures: A's", [(i["id"], i["name"]) for i in (await b.until(lambda m: m["type"] == "shared"))["items"]], [(pic["id"], "A")])
+        await a.send(type="history", limit=2, req=10)
+        h = await a.until(lambda m: m["type"] == "history")
+        check("A's history: its last lines, newest last, and more before", ([l["text"] for l in h["lines"]], h["more"]), (["just for you", "see " + page_url], True))
+        await a.send(type="history", before=h["lines"][0]["at"], limit=1, req=11)
+        check("and the one before them", [l["text"] for l in (await a.until(lambda m: m["type"] == "history"))["lines"]], ["look"])
+        site.shutdown()
+
+        await a.send(type="voice_join", key=None)
+        check("A leaves B's voice: B's voice is B alone", [x["name"] for x in (await b.until(lambda m: m["type"] == "voice_members" and len(m["members"]) == 1))["members"]], ["B"])
+        await b.send(type="voice_join", key=None)
+        await a.send(type="voice_where", me=None, phone=None, visitors=[], world=[])
+        await b.send(type="voice_where", **b_where)
+        await a.drain(); await b.drain(); await c.drain()
         for pg in (a, b):
             await pg.send(type="phone", on=False)
         await a.send(type="end", visit=la["id"])
@@ -831,6 +1051,13 @@ async def main():
         b = await Page(7412, tb).open()   # B's page again (the old one closed: 4409)
         rb = await b.expect("ready")
         check("B's page comes back: A's plot kept, to draw while A is away", rb["kept"], [{"key": ka, "name": "A", "plot": plot, "unit": 1}])
+        cl = await b.until(lambda m: m["type"] == "chat_log")
+        got = [(l.get("scope"), l.get("mine"), l["text"]) for l in cl["lines"] if l["text"] in ("hi both", "B's room, all", "from C", "just you", "hello lobby")]
+        ats = [l.get("at") for l in cl["lines"]]
+        check("and the chat B's user had, kept by its visit-client (a reload keeps it): its own lines too, in order, each with when",
+              (got, all(isinstance(t, int) for t in ats) and ats == sorted(ats)),
+              ([("say", True, "hi both"), ("sim", True, "B's room, all"), ("sim", None, "from C"), ("whisper", None, "just you"), ("lobby", None, "hello lobby")], True))
+        check("its own line in its room's chat says whose room", next(l["to"] for l in cl["lines"] if l["text"] == "B's room, all"), {"key": kb, "name": "B"})
         ln = await b.until(lambda m: m["type"] == "landscape")
         check("and the watch's landscape again, from B's disk", (ln["channel"], ln["json"]), (wb["channel"], land2))
         await b.send(type="plot_load", key=ka)
@@ -877,6 +1104,11 @@ async def main():
         check("A restarted with its state file: still away, and not in the lobby",
               (ra["away"], ra["online"], "a" in lobby.BY_NAME2), (True, False, False))
         check("and the same key as before: the same office to its friends", ra["key"], ka)
+        check("whom it keeps out, from its database: B, out of its chat", ra["bans"], [{"key": kb, "name": "B", "voice": False, "chat": True}])
+        cl = await a.until(lambda m: m["type"] == "chat_log")
+        check("and the chat it had before, from its database: its own lines too", [l["text"] for l in cl["lines"] if l.get("mine")][-2:], ["just for you", "see " + page_url])
+        await a.send(type="ban", key=kb)
+        await a.until(lambda m: m["type"] == "bans")
         await a.send(type="join_lobby")
         back = await a.until(lambda m: m["type"] == "offline")
         check("A joins again: its page hears it is no longer away", back.get("away"), False)

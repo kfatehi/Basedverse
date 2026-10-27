@@ -149,6 +149,16 @@ function myPhysics(pose, input, dt, riding) {
 }
 ```
 
+**Leave Visit's things out of your physics.** Visit puts things in your scene: your visitors' bodies (marked
+`userData.visitor`), their mounts (`userData.visitRider`), its phone (`visit:phone-model`). Your floor, your walls
+and your raycasts must not count them (skip any object marked so, or under one): a floor check that hits a rider's
+own mount stands them on top of it, and a wall that is someone's body stops everyone else.
+
+```js
+const visits = o => { for (; o; o = o.parent) if (o.userData && (o.userData.visitor || o.userData.visitRider) || o.name === "visit:phone-model") return true; return false; };
+const hits = raycaster.intersectObjects(myScene.children, true).filter(h => !visits(h.object));   // your floor, not theirs
+```
+
 Say `walk: { speed: 2.5, mounts: true }` in `visit.host` when your `move` walks with `Visit.walk` at that speed
 (and riders at their mount's pace): a visitor's page walks at once, before your answer. `mounts: false` keeps
 mounts out of your room.
@@ -166,6 +176,7 @@ another way than they look). Draw your user yourself, lifted onto it (`visit.rid
       `walk` clips (and `ride`); `Visit.checkModel` says ok.
 - [ ] Possessions the same; a mount with `seat` (or `lift`), `speed`, `fly`, and `walk`/`fly` clips.
 - [ ] Your visitors: your own figure only where `look` is "mine", at their feet, marked `userData.visitor`.
-- [ ] Your physics in `move`: what happens to someone above your floor, to `up`, to `riding`.
+- [ ] Your physics in `move`: what happens to someone above your floor, to `up`, to `riding`; Visit's things (bodies,
+      mounts, its phone) left out of your floors, walls and raycasts.
 - [ ] With a friend: each of you visits the other; each looks like their own model, standing on the floor, seeing
       from their own eyes; nobody's panel says a model can't be shown.

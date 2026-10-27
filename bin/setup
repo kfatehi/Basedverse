@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Set up Visit for a workroom. It asks for the lobby (an address you have, or one deployed on your own
 server), the office's name, the sim, and the workroom page's address; gets visit-client for this machine;
-and writes it all into the workroom's .env, as the VISIT_* settings of .env.example (with a state file
-of the user's own, where visit-client remembers whether they went offline). Run again, it offers
-what the .env already says. Given flags, it asks only for what they leave out; with --yes, nothing.
+gives it its database (Postgres: one it starts in Docker, or one you have) and makes it ready (visit-client
+migrate); and writes it all into the workroom's .env, as the VISIT_* settings of .env.example (with a state
+file of the user's own, where visit-client remembers whether they went offline). Run again (after an upgrade,
+say), it offers what the .env already says, and brings the database up to date. Given flags, it asks only for
+what they leave out; with --yes, nothing.
 
   python3 bin/setup --env ../my-workroom/.env        (Windows: py bin\\setup --env ..\\my-workroom\\.env)
 
@@ -15,7 +17,10 @@ import io
 import os
 import platform
 import re
+import secrets
 import shutil
+import socket
+import time
 import subprocess
 import sys
 import tarfile
@@ -327,6 +332,68 @@ def default_state(name):
     return (base / "basedverse" / (slug + ".json")).as_posix()
 
 
+# -- its database (visit/SPEC.md 8.12) ---------------------------------------------------------------
+def free_port(start):
+    """The first port from start that nothing on 127.0.0.1 listens on."""
+    for port in range(start, start + 100):
+        with socket.socket() as s:
+            if s.connect_ex(("127.0.0.1", port)) != 0:
+                return port
+    die("no free port from %d" % start)
+
+
+def docker_db(name):
+    """Postgres in Docker for this office (postgres:17-alpine, its data in a volume, on 127.0.0.1 only), started
+    if it is not, made if there is none -> its URL (None: it is there, made before, and the .env has its URL)."""
+    if not shutil.which("docker"):
+        die("Docker is not here: install it (https://docs.docker.com/get-docker/), or --database <a postgres:// URL you have>")
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "office"
+    box = "basedverse-db-" + slug
+    there = subprocess.run(["docker", "inspect", "-f", "{{.State.Running}}", box], capture_output=True, text=True)
+    if there.returncode == 0:
+        if there.stdout.strip() != "true":
+            subprocess.run(["docker", "start", box], check=True, capture_output=True)
+        say("  its database: the Docker container %s, there already" % box)
+        return None
+    password, port = secrets.token_hex(16), free_port(7432)
+    say("  starting Postgres in Docker: %s, on 127.0.0.1:%d, its data in the volume %s" % (box, port, box))
+    subprocess.run(["docker", "run", "-d", "--name", box, "--restart", "unless-stopped", "-e", "POSTGRES_USER=visit",
+                    "-e", "POSTGRES_PASSWORD=" + password, "-e", "POSTGRES_DB=visit", "-v", box + ":/var/lib/postgresql/data",
+                    "-p", "127.0.0.1:%d:5432" % port, "postgres:17-alpine"], check=True, capture_output=True)
+    for _ in range(120):
+        if subprocess.run(["docker", "exec", box, "pg_isready", "-q", "-h", "127.0.0.1", "-U", "visit"]).returncode == 0:
+            break
+        time.sleep(0.5)
+    return "postgres://visit:%s@127.0.0.1:%d/visit" % (password, port)
+
+
+def get_database(args, ask, env, name):
+    """visit-client's database -> its URL ('' if skipped and there is none)."""
+    have = env.get("VISIT_DATABASE_URL", "")
+    how = "url" if args.database else args.db
+    if how is None:
+        options = {"docker": "start Postgres in Docker for it (kept in a volume, on 127.0.0.1 only)",
+                   "url": "I have one: its postgres:// URL",
+                   "skip": "keep the .env's" if have else "skip: I will give it one myself (VISIT_DATABASE_URL)"}
+        how = ask.choose("\nvisit-client's database (Postgres: its chat, the pictures and links shared, whom it keeps out):", options, "skip" if have else "docker")
+    if how == "docker":
+        return docker_db(name) or have
+    if how == "url":
+        url = args.database or ask.ask("Its URL (postgres://user:password@host:port/database)", have,
+                                       lambda a: None if a.startswith(("postgres://", "postgresql://")) else "a postgres:// URL", "--database")
+        return url
+    return have
+
+
+def migrate(client, database):
+    """The database made ready for visit-client, or brought up to date after an upgrade (visit-client migrate)."""
+    r = subprocess.run([str(client), "migrate"], env=dict(os.environ, VISIT_DATABASE_URL=database), capture_output=True, text=True)
+    for line in (r.stdout + r.stderr).strip().splitlines():
+        say("  " + line)
+    if r.returncode != 0:
+        die("visit-client migrate failed (above): fix it and run setup again, or run it yourself: visit-client migrate --database <url>")
+
+
 # -- the rest ----------------------------------------------------------------------------------------
 def gitignored(env_path, ask):
     """Warn (or, asked, fix) when the .env is in a git repository that does not ignore it."""
@@ -361,6 +428,8 @@ def main():
     p.add_argument("--port", type=int, help="visit-client's port on 127.0.0.1 (default 7401)")
     p.add_argument("--max-visitors", type=int, help="visitors at once, 0-8 (default 3)")
     p.add_argument("--client", choices=["download", "build", "skip"], help="visit-client for this machine")
+    p.add_argument("--db", choices=["docker", "url", "skip"], help="visit-client's database: start Postgres in Docker, one you have, or keep the .env's")
+    p.add_argument("--database", help="the database you have: postgres://user:password@host:port/database")
     p.add_argument("--yes", action="store_true", help="ask nothing: the flags, else what the .env has, else the defaults")
     args = p.parse_args()
 
@@ -395,15 +464,23 @@ def main():
     Path(state).expanduser().parent.mkdir(parents=True, exist_ok=True)
 
     client = get_client(args, ask, env)
+    database = get_database(args, ask, env, name)
+    if database and (client or env.get("VISIT_CLIENT_PATH")):
+        say("\nIts database, made ready (or brought up to date):")
+        migrate(client or env["VISIT_CLIENT_PATH"], database)
+    elif database:
+        say("  ⚠ no visit-client yet: once there is, make its database ready: visit-client migrate")
 
     values = {"VISIT_LOBBY": lobby, "VISIT_NAME": name, "VISIT_SIM": sim, "VISIT_ORIGINS": allowed,
               "VISIT_PORT": port, "VISIT_MAX_VISITORS": mv, "VISIT_STATE_FILE": state}
     if client:
         values["VISIT_CLIENT_PATH"] = client
+    if database:
+        values["VISIT_DATABASE_URL"] = database
     write_env(env_path, values)
     say("\nWrote %s:" % env_path.resolve())
     for k, v in values.items():
-        say("  %s=%s" % (k, quoted(v)))
+        say("  %s=%s" % (k, quoted(re.sub(r"(://[^:/@]+:)[^@]+@", r"\1•••@", v) if k == "VISIT_DATABASE_URL" else v)))
     gitignored(env_path.resolve(), ask)
     if deployed:
         say("\nYour lobby is %s: give that address to the workrooms you want to meet there." % lobby)
