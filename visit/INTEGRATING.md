@@ -43,8 +43,9 @@ take them unless your user asks for something else. The defaults are Visit's own
 - **the chat window** (the panel's, `Visit.chat`): bottom left, as in a game. Enter to type, and say a line to
   everyone who can see you, whisper to one person (`/w name`), say it into a linked friend's room (`/room name`), or
   to the lobby (`/1`); it fades when nobody has said anything for a while;
-- **mounts** (`visit.ride`, M, the panel's "your mount"): Visit's own horse and flying carpet for everyone, and
-  your user's own (`visit.possessions`); the room they ride into draws the mount under them;
+- **mounts** (`visit.ride`, M, the panel's "your mount"): Visit carries them and puts them under their rider in
+  the room they ride into; what they are (models, names, paces) is your room's to say (`visit.possessions`), and the
+  panel shows them once you give some;
 - **the stage** (`Visit.stage`): the room you visit, full-window or in the corner;
 - **the Map** (`Visit.map`, from the panel): your world from above;
 - **in your world** (`visit.world`): chat bubbles over whoever said something, and a 🔊 over whoever you hear
@@ -594,8 +595,8 @@ marked offline, walked into but not through its walls; start it again, and the p
 - [ ] A phone, if you have one: a call rings, is picked up, heard on the handset; on speaker, by those near it.
 - [ ] Flying, if your room allows it: a visitor holding Space rises and stays up; without it, one stepping in from a
       world in the air floats down to your floor.
-- [ ] Mounts: a visitor pressing M rides into your room on a horse, under it, lifted onto it, at twice the pace; on
-      the flying carpet, Space lifts them (unless `fly: false`); your user's own, at home, under their feet.
+- [ ] Mounts: a visitor pressing M rides into your room on theirs, under them, lifted onto it, at its pace; on one
+      that flies, Space lifts them (unless `fly: false`); your user's own (if you give any), at home, under their feet.
 - [ ] Chat: Enter opens the chat window, bottom left; a line said shows over its speaker's head for everyone who
       can see them, and in their chat; `/w name` whispers, `/room name` reaches a linked friend's room, `/1` the lobby; your own keys
       ignore a text box (typing "w" there does not walk), and nothing of yours hides the window.

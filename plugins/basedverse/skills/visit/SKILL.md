@@ -84,7 +84,7 @@ feature in a workroom's code. If the changelog has something newer than the tabl
 | chat window, scopes (say, whisper, a linked room, the lobby) | 0.15, 0.16 | vanilla | the panel's chat window (`chat: false`: their own), `visit.say(text, to)` |
 | one panel row a person (their look, Kick, Unlink in it) | 0.16 | vanilla | the panel; visitors' own look by default (`visit.useAvatars(`) |
 | landscapes, offline plots | 0.12 | step 5 | `userData.visitStatic`, `visit.landscapeChanged(` |
-| mounts (possessions: Visit's horse and carpet, your own) | 0.18 | vanilla, step 5 | `visit.ride(`, `visit.possessions(`, `mounts:`, `eye:` in `visit.host(` |
+| mounts (possessions: the room's own; Visit carries them) | 0.18 | vanilla, step 5 | `visit.ride(`, `visit.possessions(`, `mounts:`, `eye:` in `visit.host(` |
 | flying (the room's choice) | 0.17 | step 5 | `fly:` in `visit.host(`; `air` in `world.frame(` |
 | telemetry (⏱) | 0.14 | troubleshooting | the panel's ⏱, `visit.perf(`: nothing to integrate, a tool for when a room feels slow |
 

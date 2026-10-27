@@ -9,6 +9,23 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.18.1 — 2026-10-26
+
+**Mounts are your room's, not Visit's.** Visit is the plumbing: it carries what your room makes and puts it under its
+rider wherever they go. What there is to ride is your room's call. So Visit's own horse and flying carpet are gone
+(`visit:horse`, `visit:carpet`). `v.mounts` lists only what your room gives with `v.possessions`, and the panel's
+"your mount" row and M appear only then. The Sweatshop's horse and carpet are now its own.
+
+**Worlds: rooms drawn farthest first.** At a plot's edge, something see-through in a nearer room (a name over a
+head, a window) could disappear under the farther room's ground, drawn after it. Now the sky is drawn first, then
+the ground between plots, then each room from the farthest to the nearest.
+
+### What an integration does
+
+1. Get visit-client 0.18.1.
+2. If your room used Visit's horse or carpet (`v.ride("visit:horse")`), give your own (`v.possessions([...])`): a
+   model each, with `idle`, `walk` and `fly` clips if you like.
+
 ## v0.18.0 — 2026-10-26
 
 **Mounts: possessions you bring along.** What an office's user owns now goes with them to the rooms they visit.

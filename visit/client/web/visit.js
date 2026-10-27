@@ -13,7 +13,7 @@
 // visitor's page walks at once and the host corrects it), and a host renders and encodes nothing for anyone.
 "use strict";
 (function () {
-  const VERSION = "0.18.0", PROTO = "basedverse-visit-local/2";
+  const VERSION = "0.18.1", PROTO = "basedverse-visit-local/2";
   const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, LOOK = 0.0025;
   const POINT_MS = 200, AIM_MS = 125;   // a visitor's points, at most one this often; what it aims at, looked for this often
   // Flying (SPEC 8.2): how fast a visitor rises or sinks in a room that lets it fly (v.host fly: true), and how gently
@@ -23,9 +23,9 @@
   // most SCENE_KEY_MS on, is).
   const FLY_SPEED = 4, FLOAT_DOWN = 1.5, FLOAT_KEYS = 2;
   const UP_KEYS = ["Space", "PageUp"], DOWN_KEYS = ["KeyX", "PageDown"];   // as WoW flies
-  // Possessions (SPEC 8.11): what an office's user owns and brings along; for now, mounts. A page gives at most
-  // POSSESSIONS of its own (each as big as an avatar may be); MOUNT_KEY gets your user on their mount and off again
-  // (the panel's). A room's visitor pose is EYES metres above its floor unless the room says (`eye`): a mount
+  // Possessions (SPEC 8.11): what an office's user owns and brings along, as their own room makes them; for now,
+  // mounts. A page gives at most POSSESSIONS (each as big as an avatar may be); MOUNT_KEY gets your user on their
+  // mount and off again (the panel's, once your room gives one). A room's visitor pose is EYES metres above its floor unless the room says (`eye`): a mount
   // stands on that floor.
   const POSSESSIONS = 8, MOUNT_KEY = "KeyM", EYES = 1.6;
   // What the host hears many times a second: none of it changes what the page shows, so none fires "change".
@@ -646,7 +646,7 @@
       this.links = [];         // your links (8.5): [{ id, host, where ("corner", "aside" or "world"), inside }]
       this.avatars = { default: "theirs", by: [] };
       this.riding = null;      // the mount your user rides (8.11): its id, or null
-      this.mount = "visit:horse";   // the one M (the panel's) gets them on, as they last chose
+      this.mount = null;       // the one M (the panel's) gets them on, as they last chose
       try { const m = localStorage.getItem("visit:mount"); if (m) this.mount = m; } catch (e) { /* none kept */ }
       this._own = [];          // your page's own possessions (8.11): [{ id, name, object, unit, mount, fly, speed, lift }]   // whose look your visitors have in your room (8.6): "theirs" or "mine"
       this.mic = false;        // your microphone on (8.7): those near you hear you
@@ -965,8 +965,8 @@
       this._ws.send(buf);
     }
     // ---------- possessions (8.11): what your user owns and brings along; for now, mounts ----------
-    // possessions([{ id, name, object, unit, mount, fly, speed, lift }]): your page's own, besides Visit's own (a
-    // horse, a flying carpet): a three.js object each (its origin at its feet, facing −z, in `unit` metres; clips
+    // possessions([{ id, name, object, unit, mount, fly, speed, lift }]): what your user owns, as your room makes
+    // them (Visit has none of its own: what they are is your room's to say): a three.js object each (its origin at its feet, facing −z, in `unit` metres; clips
     // named idle, walk, run and fly, if it has them); `mount`: it can be ridden; `fly`: it flies; `speed`: times
     // walking pace (1); `lift`: how far up its rider is, in metres (0). A room your user is in is told what they
     // own, and gets a model when it would show it. v.mounts: what they can ride, [{ id, name, fly, speed, lift }];
@@ -1003,10 +1003,7 @@
       buf.set(gz, 11);
       this._ws.send(buf);
     }
-    get mounts() {
-      return [...Object.entries(MOUNTS).map(([id, m]) => ({ id, name: m.name, fly: m.fly, speed: m.speed, lift: m.lift })),
-        ...this._own.filter(p => p.mount).map(({ id, name, fly, speed, lift }) => ({ id, name, fly, speed, lift }))];
-    }
+    get mounts() { return this._own.filter(p => p.mount).map(({ id, name, fly, speed, lift }) => ({ id, name, fly, speed, lift })); }
     _mountOf(id) { return id ? this.mounts.find(m => m.id === id) || null : null; }
     ride(id) {
       const m = id == null ? null : this._mountOf(String(id));
@@ -2513,21 +2510,21 @@
     }
 
     // ---------- possessions here (8.11): visitors' mounts ----------
-    // What a visitor rides here: Visit's own, or one of its possessions that is a mount; none where the room keeps
-    // mounts out (`mounts: false`).
+    // What a visitor rides here: one of its possessions that is a mount; none where the room keeps mounts out
+    // (`mounts: false`).
     _rideOf(h, input) {
       const id = typeof input.riding === "string" ? input.riding : null;
       if (!id || this._hooks.mounts === false) return null;
-      const b = MOUNTS[id], p = !b && (h.possessions || []).find(x => x.id === id && x.mount);
-      return b ? { id, name: b.name, fly: b.fly, speed: b.speed, lift: b.lift, own: false } : p ? { id, name: p.name, fly: p.fly, speed: p.speed, lift: p.lift, own: true } : null;
+      const p = (h.possessions || []).find(x => x.id === id && x.mount);
+      return p ? { id, name: p.name, fly: p.fly, speed: p.speed, lift: p.lift } : null;
     }
     // A visitor gets on a mount here, or off: its model in this room's scene under it (marked as its mount,
     // userData.visitRider: it does not see it from its own eyes, nor click it), and gone again.
     _rideSet(h, ride) {
       const r = h.ride;
-      if (r && r.object) { if (r.object.parent) r.object.parent.remove(r.object); if (!r.own) dispose(r.object); }   // Visit's own: made each ride
+      if (r && r.object && r.object.parent) r.object.parent.remove(r.object);   // (its model kept, for the next ride)
       if (r && r.mixer) r.mixer.stopAllAction();
-      h.ride = ride ? Object.assign({ object: null, step: null, mixer: null, clips: null, playing: null, at: null }, ride) : null;
+      h.ride = ride ? Object.assign({ object: null, mixer: null, clips: null, playing: null, at: null }, ride) : null;
       if (ride) this._rideModel(h);
       this._visitorsList();
       this._changed();
@@ -2535,18 +2532,12 @@
     _rideModel(h) {
       const r = h.ride, hk = this._hooks;
       if (!r || r.object || !hk) return;
-      if (!r.own) {
-        const made = MOUNTS[r.id].make(hk.scene.three);
-        made.object.scale.multiplyScalar(1 / this._unit());
-        Object.assign(r, made);
-      } else {
-        const m = h.models.get(r.id);
-        if (!m) {   // not here yet: asked for, once a visit; it rides as soon as it comes
-          if (!h.wanted.has(r.id)) { h.wanted.add(r.id); this._send({ type: "possession_want", channel: h.channel, id: r.id }); }
-          return;
-        }
-        Object.assign(r, { object: m.object, mixer: m.mixer, clips: m.clips });
+      const m = h.models.get(r.id);
+      if (!m) {   // not here yet: asked for, once a visit; it rides as soon as it comes
+        if (!h.wanted.has(r.id)) { h.wanted.add(r.id); this._send({ type: "possession_want", channel: h.channel, id: r.id }); }
+        return;
       }
+      Object.assign(r, { object: m.object, mixer: m.mixer, clips: m.clips });
       r.object.name = "mount:" + (h.visitor.name || ""); r.object.userData.visitRider = h.id;
       hk.scene.root.add(r.object);
       if (h.pose) this._ridePlace(h, (Number(h.pose.y) || 0) - (h.air || 0) - (h.lift || 0));
@@ -2820,75 +2811,9 @@
     return pose;
   }
 
-  // ---------- Visit's own mounts (8.11) ----------
-  // Made with the room's own three.js (every Visit has them: nothing is sent), in metres, facing −z, standing on
-  // their origin. Each moves by its `step(dt, how, speed)` (how: "idle", "walk" or "fly"; speed in metres a second):
-  // its parts turned, which every visitor's copy of the room sees as any moving thing. `lift`: how far up the rider
-  // is; `speed`: times walking pace.
-  function horseModel(T) {
-    const g = new T.Group(), mat = c => new T.MeshLambertMaterial({ color: c }), coat = mat(0x8b5a2b), dark = mat(0x2b1a0e);
-    const box = (w, h, d, m, x, y, z, parent = g) => { const o = new T.Mesh(new T.BoxGeometry(w, h, d), m); o.position.set(x, y, z); parent.add(o); return o; };
-    const pivot = (x, y, z, parent = g) => { const o = new T.Group(); o.position.set(x, y, z); parent.add(o); return o; };
-    box(0.55, 0.6, 1.5, coat, 0, 1.05, 0);   // body
-    box(0.6, 0.08, 0.55, mat(0x8b1e1e), 0, 1.39, 0.05);   // saddle
-    const neck = pivot(0, 1.2, -0.6);
-    neck.rotation.x = 0.55;
-    box(0.3, 0.8, 0.36, coat, 0, 0.38, -0.02, neck); box(0.08, 0.72, 0.3, dark, 0, 0.4, 0.17, neck);   // neck, mane
-    const head = pivot(0, 1.72, -1.0);
-    box(0.28, 0.3, 0.62, coat, 0, 0, -0.1, head); box(0.07, 0.14, 0.07, coat, 0.08, 0.2, 0.12, head); box(0.07, 0.14, 0.07, coat, -0.08, 0.2, 0.12, head);
-    const legs = [[0.17, -0.55], [-0.17, -0.55], [0.17, 0.55], [-0.17, 0.55]].map(([x, z]) => {
-      const l = pivot(x, 0.8, z);
-      box(0.15, 0.72, 0.15, coat, 0, -0.36, 0, l); box(0.17, 0.09, 0.17, mat(0x1a1a1a), 0, -0.76, 0, l);
-      return l;
-    });
-    const tail = pivot(0, 1.22, 0.76);
-    box(0.1, 0.65, 0.12, dark, 0, -0.3, 0, tail);
-    let t = 0, phase = 0;
-    const step = (dt, how, speed) => {
-      t += dt;
-      if (how !== "idle") phase += dt * (3 + Math.min(speed, 8) * 1.4);
-      const swing = how === "walk" ? Math.sin(phase) * Math.min(0.75, 0.3 + speed * 0.1) : how === "fly" ? 0.5 : 0;
-      legs.forEach((l, i) => { l.rotation.x = how === "fly" ? (i < 2 ? -swing : swing) : i === 0 || i === 3 ? swing : -swing; });
-      tail.rotation.x = -0.4 - (how === "idle" ? 0 : 0.3);
-      tail.rotation.z = Math.sin(t * 1.7) * 0.25;
-      head.rotation.x = how === "idle" ? Math.sin(t * 0.8) * 0.06 : Math.sin(phase * 2) * 0.05;
-    };
-    step(0, "idle", 0);
-    return { object: g, step };
-  }
-  // A flying carpet: strips that ripple, gold-edged, tasselled, hovering a little above the floor.
-  function carpetModel(T) {
-    const g = new T.Group(), N = 9, L = 1.8, W = 1.1, strips = [], gold = new T.MeshLambertMaterial({ color: 0xd4a017 });
-    const reds = [new T.MeshLambertMaterial({ color: 0x9b1b30 }), new T.MeshLambertMaterial({ color: 0x6e1230 })];
-    for (let i = 0; i < N; i++) {
-      const s = new T.Group();
-      s.position.set(0, 0.42, -L / 2 + (i + 0.5) * L / N);
-      s.add(new T.Mesh(new T.BoxGeometry(W, 0.03, L / N + 0.01), reds[i % 2]));
-      for (const x of [-W / 2, W / 2]) { const e = new T.Mesh(new T.BoxGeometry(0.06, 0.04, L / N + 0.01), gold); e.position.x = x; s.add(e); }
-      if (i === 0 || i === N - 1) for (let k = 0; k < 5; k++) {
-        const ts = new T.Mesh(new T.BoxGeometry(0.04, 0.02, 0.12), gold);
-        ts.position.set(-W / 2 + 0.1 + k * (W - 0.2) / 4, 0, (i === 0 ? -1 : 1) * (L / N / 2 + 0.06));
-        s.add(ts);
-      }
-      g.add(s); strips.push(s);
-    }
-    let t = 0;
-    const step = (dt, how, speed) => {
-      t += dt * (how === "idle" ? 1.6 : 3 + Math.min(speed, 10) * 0.5);
-      const a = how === "idle" ? 0.02 : 0.045;
-      strips.forEach((s, i) => { s.position.y = 0.42 + Math.sin(t - i * 0.7) * a; s.rotation.x = Math.cos(t - i * 0.7) * a * 1.5; });
-    };
-    step(0, "idle", 0);
-    return { object: g, step };
-  }
-  const MOUNTS = {
-    "visit:horse": { name: "Horse", fly: false, speed: 2, lift: 0.55, make: horseModel },
-    "visit:carpet": { name: "Flying carpet", fly: true, speed: 2, lift: 0.45, make: carpetModel },
-  };
-  // A mount's moves: Visit's own by its step; one of a page's own by its clips (fly, run when fast, walk, idle),
-  // eased from one to the next.
+  // ---------- possessions (8.11) ----------
+  // A mount's moves, by its clips (fly, run when fast, walk, idle), eased from one to the next.
   function rideAnimate(r, how, mps, dt) {
-    if (r.step) return r.step(dt, how, mps);
     const c = r.clips;
     if (!c || !r.mixer) return;
     const want = how === "fly" ? c.fly || c.walk || c.idle : how === "walk" ? (mps > 4 && c.run) || c.walk || c.idle : c.idle;
@@ -3370,14 +3295,29 @@
           if (this.mineSig !== sig) { this.mineSig = sig; this.minePlanes = [new T.Plane(new T.Vector3(1, 0, 0), -x0), new T.Plane(new T.Vector3(-1, 0, 0), x1), new T.Plane(new T.Vector3(0, 0, 1), -z0), new T.Plane(new T.Vector3(0, 0, -1), z1)]; }
           return this.minePlanes;
         })();
-        r.render(this.scene, camera);
+        const own = r.clippingPlanes;
+        // Your scene's sky alone first (its background: nothing of it drawn, nor its shadows worked out again), then the
+        // ground between plots; then the rooms farthest first, the nearest last, so that each one's see-through things
+        // (a name over a head, a window) land on what is behind them, not under a farther room drawn after it.
+        const mask = camera.layers.mask, su = r.shadowMap.autoUpdate;
+        r.clippingPlanes = []; r.shadowMap.autoUpdate = false; camera.layers.set(31);
+        try { r.render(this.scene, camera); } finally { camera.layers.mask = mask; r.shadowMap.autoUpdate = su; }
         r.autoClear = false;
-        r.clippingPlanes = [];
         this.commons.fog = this.scene.fog || null;
         r.render(this.commons, camera);
-        for (const x of list) {
+        const eye = camera.getWorldPosition(this._eye || (this._eye = new this.T.Vector3()));
+        const far = q => Math.hypot(Math.max(q[0] - eye.x, 0, eye.x - q[2]), Math.max(q[1] - eye.z, 0, eye.z - q[3]));
+        const home = [mine.center[0] - mine.size[0] / 2, mine.center[1] - mine.size[1] / 2, mine.center[0] + mine.size[0] / 2, mine.center[1] + mine.size[1] / 2];
+        const passes = [{ x: null, d: far(home) }, ...list.filter(x => x.kept || (x.w && x.w.scene)).map(x => ({ x, d: far(x.rect) }))].sort((a, b) => b.d - a.d);
+        for (const { x } of passes) {
+          if (!x) {   // your own room (its sky already drawn)
+            const bg = this.scene.background;
+            this.scene.background = null;
+            r.clippingPlanes = own;
+            try { r.render(this.scene, camera); } finally { this.scene.background = bg; }
+            continue;
+          }
           if (x.kept) { const h = this._holder(x); r.clippingPlanes = h.planes; r.render(h.holder, camera); continue; }   // a guest away: its kept plot
-          if (!x.w || !x.w.scene) continue;
           const h = this._holder(x), s = x.w.scene;
           if (s.offset !== null) v._sceneInterp(s, now - s.offset - INTERP_MS);
           for (const o of s.own) o.visible = false;
@@ -3417,18 +3357,14 @@
     // walks them at its pace (v.rideSpeed); on a plot, its host draws it.
     _homeRide(me, dt) {
       const v = this.v, id = me ? v.riding : null, r = this.ride;
-      if (r && r.id !== id) { if (r.object.parent) r.object.parent.remove(r.object); if (!r.own) dispose(r.object); if (r.mixer) r.mixer.stopAllAction(); this.ride = null; }
+      if (r && r.id !== id) { if (r.object.parent) r.object.parent.remove(r.object); if (r.mixer) r.mixer.stopAllAction(); this.ride = null; }
       if (!id || !this.scene) return;
       if (!this.ride) {
-        const b = MOUNTS[id], p = !b && v._own.find(x => x.id === id);
-        if (!b && !p) return;
-        let made;
-        if (b) { made = b.make(this.T); made.object.scale.multiplyScalar(1 / v._unit()); }
-        else {
-          const mixer = new this.T.AnimationMixer(p.object), clip = n => (p.object.animations || []).find(c => new RegExp(n, "i").test(c.name));
-          made = { object: p.object, mixer, clips: Object.fromEntries(["idle", "walk", "run", "fly"].map(n => [n, (c => c ? mixer.clipAction(c) : null)(clip(n))])) };
-        }
-        this.ride = Object.assign({ id, own: !b, fly: b ? b.fly : p.fly, step: null, mixer: null, clips: null, playing: null, at: null }, made);
+        const p = v._own.find(x => x.id === id);
+        if (!p) return;
+        const mixer = new this.T.AnimationMixer(p.object), clip = n => (p.object.animations || []).find(c => new RegExp(n, "i").test(c.name));
+        const clips = Object.fromEntries(["idle", "walk", "run", "fly"].map(n => [n, (c => c ? mixer.clipAction(c) : null)(clip(n))]));
+        this.ride = { id, fly: p.fly, object: p.object, mixer, clips, playing: null, at: null };
         this.ride.object.name = "visit:my-mount";
         this.scene.add(this.ride.object);
       }
@@ -3503,7 +3439,7 @@
     // M, anywhere but a box of the page's own: on your mount, or off (8.11).
     const mountChosen = () => v._mountOf(v.mount) ? v.mount : v.mounts[0].id;
     const mountKey = e => {
-      if (e.code !== MOUNT_KEY || e.repeat || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented) return;
+      if (e.code !== MOUNT_KEY || e.repeat || e.ctrlKey || e.metaKey || e.altKey || e.defaultPrevented || !v.mounts.length) return;
       const t = e.target;
       if (t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
       v.ride(v.riding ? null : mountChosen());
@@ -3561,8 +3497,8 @@
       // Voice (8.7): those near you in the room you are in; your microphone on or off.
       if (v.state === "online") rows.push(`<div class="row"><span class="grow">${v.voices.length ? "near you: " + v.voices.map(x => `<b class="${x.speaking ? "speaking" : ""}">${x.speaking ? "🔊 " : ""}${esc(x.name)}</b>`).join(", ") : `voice <span class="muted">· nobody near you</span>`}</span>
         <button data-v="mic" class="${v.mic ? "go" : ""}" title="${v.mic ? "those near you hear you (click: microphone off)" : "your microphone: those near you hear you, the nearer the louder (headphones are best)"}">${v.mic ? "🎙 on" : "🎙 off"}</button></div>`);
-      // Your mount (8.11): which one M gets you on, and on or off.
-      rows.push(`<div class="row"><span class="grow">${v.riding ? "riding" : "your mount"}</span><select data-v="mount" title="the one M gets you on" style="max-width: 9em">${v.mounts.map(m =>
+      // Your mount (8.11), once your room gives one: which one M gets you on, and on or off.
+      if (v.mounts.length) rows.push(`<div class="row"><span class="grow">${v.riding ? "riding" : "your mount"}</span><select data-v="mount" title="the one M gets you on" style="max-width: 9em">${v.mounts.map(m =>
         `<option value="${esc(m.id)}"${m.id === v.mount ? " selected" : ""}>${esc(m.name)}${m.fly ? " (flies)" : ""}</option>`).join("")}</select><button data-v="ride" class="${v.riding ? "go" : ""}" title="M: on your mount, or off">${v.riding ? "Get off" : "Ride"}</button></div>`);
       if (v._world && v.state === "online") rows.push(`<div class="row"><span class="grow">your world: ${v._world.plots.length} ${v._world.plots.length === 1 ? "room" : "rooms"} round yours${(n => n ? ` (${n} offline)` : "")(v._world.plots.filter(p => p.offline).length)}</span><button data-v="map" title="where your friends' rooms sit round yours, from above">Map</button></div>`);
       // People: one row each, whoever is in the lobby and whoever you are linked with, either way, linked first. A

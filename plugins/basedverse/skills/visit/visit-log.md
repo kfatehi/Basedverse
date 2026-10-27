@@ -23,7 +23,7 @@ How this workroom uses basedverse's Visit, and every way it differs from Visit's
 | chat bubbles | vanilla | |
 | chat window (say, whisper, a linked room, the lobby) | vanilla | |
 | landscapes, offline plots | vanilla | (what is marked `visitStatic`, and how) |
-| mounts | vanilla | (vanilla: Visit's horse and carpet; riders drawn at their pose's height) |
+| mounts | vanilla | (what they are is the room's: its possessions; riders drawn at their pose's height) |
 | flying | vanilla | (vanilla: none, arrivals in the air float down; `fly` if visitors may fly here) |
 
 State is one of:

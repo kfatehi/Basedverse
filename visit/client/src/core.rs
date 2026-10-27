@@ -638,8 +638,8 @@ impl Core {
             // host's page asks for a visitor's (`avatar_want`). Whose look visitors have here (`avatars`: by default;
             // `avatar_use`: for a key, or back to the default): kept in the state file.
             "avatar_clear" => self.avatar = None,
-            // Possessions (8.11): what this office's user owns and brings along (Visit's own are not said: every Visit
-            // has them). Every host it visits is told what they are; a host's page asks for one's model
+            // Possessions (8.11): what this office's user owns and brings along, as its room makes them (Visit has none
+            // of its own). Every host it visits is told what they are; a host's page asks for one's model
             // (`possession_want`), which goes as it came, its frame (by its slot in this list).
             "possessions" => match possessions_from(m.get("list")) {
                 Some(list) => {
@@ -2016,9 +2016,8 @@ fn possessions_from(l: Option<&Value>) -> Option<Vec<Value>> {
 fn clamp_input(m: &Value) -> Value {
     let step = |k: &str| m.get(k).and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0, |x| x.round().clamp(-1.0, 1.0) as i64);
     let angle = |k: &str, lim: f64| m.get(k).and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0.0, |x| x.clamp(-lim, lim));
-    // What the visitor rides (8.11): one of its possessions, or Visit's own (`visit:` and a name); the host decides.
-    let riding = m.get("riding").and_then(Value::as_str)
-        .filter(|r| link::possession_id_ok(r) || r.strip_prefix("visit:").is_some_and(link::possession_id_ok));
+    // What the visitor rides (8.11): one of its possessions; the host decides.
+    let riding = m.get("riding").and_then(Value::as_str).filter(|r| link::possession_id_ok(r));
     json!({
         "forward": step("forward"), "strafe": step("strafe"), "up": step("up"), "run": m.get("run").and_then(Value::as_bool).unwrap_or(false),
         "riding": riding,
@@ -2076,9 +2075,8 @@ mod tests {
         assert_eq!(i, json!({ "forward": 1, "strafe": -1, "up": 1, "run": false, "riding": null, "yaw": 3.0, "pitch": -1.4, "t": 0.0 }));
         let j = clamp_input(&json!({ "t": 1234.5 }));
         assert_eq!(j, json!({ "forward": 0, "strafe": 0, "up": 0, "run": false, "riding": null, "yaw": 0.0, "pitch": 0.0, "t": 1234.5 }));
-        assert_eq!(clamp_input(&json!({ "riding": "visit:horse" }))["riding"], json!("visit:horse"));
         assert_eq!(clamp_input(&json!({ "riding": "my-dragon.2" }))["riding"], json!("my-dragon.2"));
-        for bad in [json!("a b"), json!("other:horse"), json!(5), json!("x".repeat(41))] {
+        for bad in [json!("a b"), json!("visit:horse"), json!(5), json!("x".repeat(41))] {
             assert_eq!(clamp_input(&json!({ "riding": bad }))["riding"], Value::Null);
         }
     }
@@ -2089,7 +2087,7 @@ mod tests {
         assert_eq!(l, vec![json!({ "id": "dragon", "name": "Smaug", "mount": true, "fly": true, "speed": 5.0, "lift": 0.0 }),
             json!({ "id": "cat", "name": "cat", "mount": false, "fly": false, "speed": 1.0, "lift": 0.0 })]);
         assert!(possessions_from(Some(&json!([{ "id": "a" }, { "id": "a" }]))).is_none());   // twice the same
-        assert!(possessions_from(Some(&json!([{ "id": "visit:horse" }]))).is_none());   // Visit's own are not a page's
+        assert!(possessions_from(Some(&json!([{ "id": "my:horse" }]))).is_none());   // not an id
         assert!(possessions_from(Some(&json!((0..9).map(|i| json!({ "id": format!("p{i}") })).collect::<Vec<_>>()))).is_none());
         assert!(possessions_from(Some(&json!("dragon"))).is_none() && possessions_from(None).is_none());
         assert_eq!(possessions_from(Some(&json!([]))), Some(vec![]));

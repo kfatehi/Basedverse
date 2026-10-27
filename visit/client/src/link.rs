@@ -691,7 +691,7 @@ async fn read_possession(mut stream: RecvStream, visit: String, core: mpsc::Unbo
     }
 }
 
-/// A possession's id (8.11): 1 to 40 letters, digits, `_`, `.` or `-` (Visit's own are `visit:` and a name).
+/// A possession's id (8.11): 1 to 40 letters, digits, `_`, `.` or `-`.
 pub fn possession_id_ok(id: &str) -> bool {
     (1..=40).contains(&id.len()) && id.chars().all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c))
 }

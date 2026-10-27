@@ -247,7 +247,7 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `link_where` | `channel`, `where` (`"world"` \| `"corner"`) | where the page put a link (8.5): kept, and said again in `visit_started` to a page that reloads |
 | `avatar_clear` | — | this office has no avatar (8.6) from now on (its own goes as a binary frame, 5.4) |
 | `avatar_want` | `channel` | ask a visitor for its avatar (host side, 8.6): its visit-client sends it, now and whenever its page gives a new one |
-| `possessions` | `list`: [{`id`, `name`, `mount`, `fly`, `speed`, `lift`}] | what this office's user owns (8.11), besides Visit's own: at most 8, ids 1 to 40 letters, digits, `_` `.` `-` (`visit:` is Visit's), each once; `speed` 0.25 to 5 (times walking pace), `lift` 0 to 5 m. Every host this office visits is told (now, and at each link). Each model goes as a binary frame (5.4, bit 6, its slot in this list as its channel) |
+| `possessions` | `list`: [{`id`, `name`, `mount`, `fly`, `speed`, `lift`}] | what this office's user owns (8.11), as its room makes them: at most 8, ids 1 to 40 letters, digits, `_` `.` `-`, each once; `speed` 0.25 to 5 (times walking pace), `lift` 0 to 5 m. Every host this office visits is told (now, and at each link). Each model goes as a binary frame (5.4, bit 6, its slot in this list as its channel) |
 | `possession_want` | `channel`, `id` | ask a visitor for one of its possessions' models (host side, 8.11): its visit-client sends it, now and whenever its page gives a new one |
 | `avatars` | `default` (`"mine"` \| `"theirs"`) | whose look visitors have in this room by default: this room's models, or their own avatars (`"theirs"` until this office's user chooses; the state file says it was chosen: `set`); kept in the state file |
 | `avatar_use` | `key`, `use` (`"mine"` \| `"theirs"` \| null: the default) | the same for one office, apart from the default; kept in the state file |
@@ -604,7 +604,7 @@ data.
 | `strafe` | −1, 0 or 1 | D/→ is 1 (right), A/← is −1 |
 | `up` | −1, 0 or 1 | Space or Page Up is 1 (up), X or Page Down is −1 (down), as in WoW: flying, where the room allows it |
 | `run` | boolean | Shift held |
-| `riding` | string or null | the mount the visitor rides (8.11): `visit:` and the name of Visit's own, or one of its possessions' ids; the host decides |
+| `riding` | string or null | the mount the visitor rides (8.11): one of its possessions' ids; the host decides |
 | `yaw` | radians | where the visitor is looking, left/right, relative to how it was facing when it arrived (positive: turned left) |
 | `pitch` | radians, −1.4 to 1.4 | up (positive) or down |
 | `t` | ms | the visitor page's clock when it sent this input (`performance.now()`); the host's deltas carry it back |
@@ -851,10 +851,11 @@ object makes it and everything under it landscape (the marker itself stays on th
 What an office's user owns and brings along to the rooms they go to. For now, **mounts**: something to ride, on
 the ground or in the air. Nothing to join: a room says nothing, and its visitors ride.
 
-- **Visit's own.** Every Visit has a horse (`visit:horse`: on the ground, twice walking pace) and a flying carpet
-  (`visit:carpet`: it flies, twice walking pace), made by the room's own page with its own three.js: nothing is
-  sent.
-- **A page's own** (`v.possessions([{ id, name, object, unit, mount, fly, speed, lift }])`): a three.js object
+**What they are is each room's to say.** Visit has none of its own: it carries what a room makes (its models,
+names, paces), puts it under its rider in the room they are in, and leaves the deciding to rooms: the rider's
+(what there is) and the host's (what it lets in).
+
+- **A room's own** (`v.possessions([{ id, name, object, unit, mount, fly, speed, lift }])`): a three.js object
   each (its origin at its feet, facing −z, in `unit` metres; clips named `idle`, `walk`, `run` and `fly` in its
   `animations`, if it has them); `mount`: it can be ridden; `fly`: it flies; `speed`: times walking pace (1);
   `lift`: how far up its rider is, in metres (0). Its visit-client keeps the list and the models (in memory, at
@@ -862,8 +863,8 @@ the ground or in the air. Nothing to join: a room says nothing, and its visitors
   model when it would show it (`possession_want`; 7.4, stream 4).
 - **Riding** (`v.ride(id)`, null to get off; `v.riding`; M, the panel's): what the user rides goes with their
   input (`riding`) wherever they are; at home, their own room's to show (below).
-- **The room decides.** A host's page takes it (`riding`) if it is Visit's own, or one of the visitor's
-  possessions that is a mount, and the room does not keep mounts out (`mounts: false`). Then:
+- **The room decides.** A host's page takes it (`riding`) if it is one of the visitor's possessions that is a
+  mount, and the room does not keep mounts out (`mounts: false`). Then:
   - the mount is in the room's scene, under the visitor (`mount:<name>`, its `userData.visitRider` the visit's
     id: the visitor does not see it from its own eyes, nor click it; in its world, it sees it under itself),
     standing on the floor the room's `move` gives (the pose is `eye` metres above it: 1.6 unless the room says),
@@ -929,8 +930,8 @@ v.toWorld(id)      // a link's room as a plot in your world (v.world first), whi
 v.unlink(id)       // end a link
 v.watching(officeId)        // whether a plot of theirs is in your world (a guest's, or a link put there)
 v.avatar(object, { unit })  // your own body, for rooms that show their visitors' own looks (8.6); null: none
-v.possessions([{ id, name, object, unit, mount, fly, speed, lift }])   // what your user owns (8.11), besides Visit's own
-v.mounts                    // what they can ride: [{ id, name, fly, speed, lift }] (Visit's horse and carpet first)
+v.possessions([{ id, name, object, unit, mount, fly, speed, lift }])   // what your user owns (8.11), as your room makes them
+v.mounts                    // what they can ride: [{ id, name, fly, speed, lift }] (none until your room gives some)
 v.ride(id); v.riding; v.mount   // get on a mount (null: off); what they ride; the one M (the panel's) gets them on
 v.rideSpeed; v.rideLift; v.rideFly   // their mount's, for your own room at home: times walking pace, metres up, flies
 v.setMic(on); v.mic         // your microphone (8.7): on, those near your user in the same room hear them (remembered)

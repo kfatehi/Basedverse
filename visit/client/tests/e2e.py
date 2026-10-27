@@ -604,7 +604,7 @@ async def main():
         got = await b.until(lambda m: m["type"] == "input")
         check("A rides it: its input says so", got["riding"], "dragon")
         await a.send(type="possessions", list=[{"id": "visit:horse"}])
-        check("Visit's own are not a page's to say", (await a.until(lambda m: m["type"] == "error"))["ref"], "possessions")
+        check("an id that is not one (no `:`): refused", (await a.until(lambda m: m["type"] == "error"))["ref"], "possessions")
 
         print("\nvoice: the room's visit-client decides who hears whom, by where its page has everyone (C visits B too)")
         voice = lambda to, n: struct.pack(">HBQ", to, 8, 0) + bytes([0xFC, n]) + b"opus"   # a stand-in Opus packet, to the room (1) or calls (2)

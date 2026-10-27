@@ -597,36 +597,46 @@ async def main():
         await a.js("(s => { s.value = 'theirs'; s.dispatchEvent(new Event('change', { bubbles: true })); })(document.querySelector('.visit-panel select[data-v=looks]'))")
         await a.until("v.avatars.default === 'theirs' && !!v.visitors[0].avatar")
 
-        print("\nmounts: B rides in A's room (8.11)")
-        check("Visit's own mounts, for everyone: a horse, a flying carpet", await b.js("v.mounts.map(m => m.id + (m.fly ? '^' : '')).join()"), "visit:horse,visit:carpet^")
+        print("\nmounts: B rides in A's room, on B's room's own (8.11)")
+        check("no mounts of Visit's own: none until B's room gives some, and no row for them in its panel", await b.js(
+            "v.mounts.length === 0 && !document.querySelector('.visit-panel select[data-v=mount]')"), True)
+        await b.js("""(T => {
+          const box = (name, w, h, d, y, color) => { const m = new T.Mesh(new T.BoxGeometry(w, h, d), new T.MeshBasicMaterial({ color })); m.name = name; m.position.y = y; return m; };
+          const bob = (name, a) => new T.AnimationClip(name, 0.5, [new T.NumberKeyframeTrack('pony-body.position[y]', [0, 0.25, 0.5], [0.9, 0.9 + a, 0.9])]);
+          const pony = new T.Group(); pony.add(box('pony-body', 0.5, 0.6, 1.4, 0.9, 0x8b5a2b)); pony.animations = [bob('idle', 0.01), bob('walk', 0.12)];
+          const rug = new T.Group(); rug.add(box('rug-body', 1, 0.04, 1.6, 0.4, 0x9b1b30));
+          v.possessions([{ id: 'pony', name: 'Pony', object: pony, mount: true, speed: 2, lift: 0.55 },
+            { id: 'rug', name: 'Rug', object: rug, mount: true, fly: true, speed: 2, lift: 0.45 },
+            { id: 'crate', name: 'Crate', mount: true, lift: 0.3, object: box('crate-box', 1, 0.3, 1.4, 0.15, 0xaa7733) }]);
+        })(v._hooks.scene.three)""")
+        check("B's room gives its own: its mounts, and a row for them in its panel", (await b.js("v.mounts.map(m => m.id + (m.fly ? '^' : '')).join()"),
+              await b.until("!!document.querySelector('.visit-panel select[data-v=mount]')")), ("pony,rug^,crate", True))
         y0 = await a.js("v.visitors[0].pose.y")
-        await b.js("v.ride('visit:horse')")
-        check("B gets on the horse: A's room has it under B, on A's floor, B lifted onto it", await a.until(
-            "(o => !!o && !!v.visitors[0].riding && v.visitors[0].riding.id === 'visit:horse' && Math.abs(v.visitors[0].pose.y - %r - 0.55) < 0.01"
+        await b.js("v.ride('pony')")
+        check("B gets on its pony: A asks for it, has it under B, on A's floor, B lifted onto it", await a.until(
+            "(o => !!o && !!o.getObjectByName('pony-body') && !!v.visitors[0].riding && v.visitors[0].riding.id === 'pony' && Math.abs(v.visitors[0].pose.y - %r - 0.55) < 0.01"
             " && Math.abs(o.position.x - v.visitors[0].pose.x) < 0.01 && Math.abs(o.position.y) < 0.01)(room.scene.getObjectByName('mount:B'))" % y0), True)
-        check("A's move hears what B rides, at the horse's pace", await a.until("window.movedWith && window.movedWith.riding && window.movedWith.riding.speed"), 2)
-        await a.shot("a_horse.png")
-        check("B's copy of A's room has the horse, unseen from B's own eyes", await b.until("(s => !!s && s.ownMount.length === 1 && !s.ownMount[0].visible)(v._viewer && v._viewer.scene)"), True)
+        await a.shot("a_pony.png")
+        check("A's move hears what B rides, at the pony's pace", await a.until("window.movedWith && window.movedWith.riding && window.movedWith.riding.speed"), 2)
+        check("B's copy of A's room has the pony, unseen from B's own eyes", await b.until("(s => !!s && s.ownMount.length === 1 && !s.ownMount[0].visible)(v._viewer && v._viewer.scene)"), True)
         await b.key("KeyW", "w", 87, True)
-        check("B walks on: the horse's legs move", await a.until("(o => !!o && o.children.some(c => c.isGroup && Math.abs(c.rotation.x) > 0.1 && c.position.y < 1))(room.scene.getObjectByName('mount:B'))"), True)
+        check("B walks on: A plays the pony's own walk clip", await a.until("(r => !!r && !!r.playing && r.playing === r.clips.walk)([...v._hosted.values()][0].ride)"), True)
         await b.key("KeyW", "w", 87, False)
-        await b.js("v.ride('visit:carpet')")
-        check("the flying carpet instead: under B, the horse gone", await a.until(
-            "(o => !!o && v.visitors[0].riding.id === 'visit:carpet' && room.scene.children.filter(c => c.name === 'mount:B').length === 1)(room.scene.getObjectByName('mount:B'))"), True)
+        await b.js("v.ride('rug')")
+        check("the flying rug instead: under B, the pony gone", await a.until(
+            "(o => !!o && !!o.getObjectByName('rug-body') && v.visitors[0].riding.id === 'rug' && room.scene.children.filter(c => c.name === 'mount:B').length === 1)(room.scene.getObjectByName('mount:B'))"), True)
         await b.key("Space", " ", 32, True)
-        check("A's room says nothing of flying: B's carpet flies (Space, up)", await a.until("v.visitors[0].pose.y > %r + 0.45 + 1" % y0), True)
-        await a.shot("a_carpet.png")
+        check("A's room says nothing of flying: B's rug flies (Space, up)", await a.until("v.visitors[0].pose.y > %r + 0.45 + 1" % y0), True)
+        await a.shot("a_rug.png")
         await b.key("Space", " ", 32, False)
         await a.js("window.room.fly = false")
-        check("A's room says no flying (fly: false): B floats down, carpet and all", await a.until("Math.abs(v.visitors[0].pose.y - %r - 0.45) < 0.01" % y0, 20), True)
+        check("A's room says no flying (fly: false): B floats down, rug and all", await a.until("Math.abs(v.visitors[0].pose.y - %r - 0.45) < 0.01" % y0, 20), True)
         await a.js("window.room.fly = undefined; window.room.mounts = false")
         check("A's room keeps mounts out (mounts: false): B is off, on the floor", await a.until(
             "!room.scene.getObjectByName('mount:B') && !v.visitors[0].riding && Math.abs(v.visitors[0].pose.y - %r) < 0.01" % y0), True)
         await a.js("window.room.mounts = undefined")
-        await b.js("(T => v.possessions([{ id: 'crate', name: 'Crate', mount: true, lift: 0.3, object: Object.assign(new T.Mesh(new T.BoxGeometry(1, 0.3, 1.4), new T.MeshBasicMaterial({ color: 0xaa7733 })), { name: 'crate-box' }) }]))(v._hooks.scene.three)")
-        check("B's own possession, a mount, with Visit's", await b.js("v.mounts.map(m => m.id).join()"), "visit:horse,visit:carpet,crate")
         await b.js("v.ride('crate')")
-        check("B rides it in A's room: A asks for it, and has it under B", await a.until(
+        check("B rides its crate in A's room: under B", await a.until(
             "(o => !!o && !!o.getObjectByName('crate-box') && Math.abs(v.visitors[0].pose.y - %r - 0.3) < 0.01)(room.scene.getObjectByName('mount:B'))" % y0), True)
         await b.key("KeyM", "m", 77, True)
         await b.key("KeyM", "m", 77, False)
