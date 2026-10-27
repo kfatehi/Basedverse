@@ -35,8 +35,10 @@ pub struct Saved {
     pub guests: Vec<Guest>,
     pub layout: Vec<Place>,
     /// Whether visitors have their own avatars in this room by default (else its models; ../SPEC.md 8.6), and the
-    /// keys for which it is the other way: (key, their own).
+    /// keys for which it is the other way: (key, their own). Their own unless this office's user chose (`avatars_set`:
+    /// a file from before Visit 0.16 has "mine", the default then, written whether chosen or not: their own now).
     pub avatars_theirs: bool,
+    pub avatars_set: bool,
     pub avatars_by: Vec<(String, bool)>,
 }
 
@@ -58,8 +60,11 @@ impl Saved {
         let list = |k: &str| v.get(k).and_then(Value::as_array).cloned().unwrap_or_default();
         let layout = list("layout").iter().filter_map(place_from).take(MAX_PLACES).collect();
         let av = v.get("avatars").cloned().unwrap_or(Value::Null);
+        let avatars_set = av.get("set").and_then(Value::as_bool) == Some(true);
+        let avatars_theirs = if avatars_set { use_from(av.get("default")).unwrap_or(true) } else { true };
         let avatars_by = av.get("by").and_then(Value::as_array).into_iter().flatten()
             .filter_map(|x| Some((x.get("key").and_then(Value::as_str).filter(|k| key_ok(k))?.to_string(), use_from(x.get("use"))?)))
+            .filter(|(_, t)| *t != avatars_theirs)   // the same as the default: not apart
             .take(MAX_GUESTS)
             .collect();
         let saved = Saved {
@@ -68,7 +73,8 @@ impl Saved {
             door_open: v.get("door").and_then(Value::as_str) != Some("closed"),
             guests,
             layout,
-            avatars_theirs: use_from(av.get("default")).unwrap_or(false),
+            avatars_theirs,
+            avatars_set,
             avatars_by,
         };
         (saved, fresh)
@@ -84,7 +90,7 @@ impl Saved {
 
     pub fn avatars_json(&self) -> Value {
         let word = |theirs: bool| if theirs { "theirs" } else { "mine" };
-        json!({ "default": word(self.avatars_theirs), "by": self.avatars_by.iter().map(|(k, t)| json!({ "key": k, "use": word(*t) })).collect::<Vec<_>>() })
+        json!({ "default": word(self.avatars_theirs), "set": self.avatars_set, "by": self.avatars_by.iter().map(|(k, t)| json!({ "key": k, "use": word(*t) })).collect::<Vec<_>>() })
     }
 
     pub fn layout_json(&self) -> Value {
@@ -197,6 +203,16 @@ mod tests {
         std::fs::write(&path, r#"{"away": true, "guests": [{"key": "not a key", "name": "x"}]}"#).unwrap();
         let (s, fresh) = Saved::load(Some(&path));
         assert!(fresh && s.away && s.guests.is_empty());
+        // Visitors' own look by default; a file from before 0.16 says "mine" (its default then, never chosen): theirs
+        // now, and a friend set apart as theirs is no longer apart. Chosen ("set"), it stays.
+        assert!(Saved::load(None).0.avatars_theirs);
+        let k = SecretKey::generate().public().to_string();
+        std::fs::write(&path, json!({ "avatars": { "default": "mine", "by": [{ "key": k, "use": "theirs" }] } }).to_string()).unwrap();
+        let (s, _) = Saved::load(Some(&path));
+        assert!(s.avatars_theirs && !s.avatars_set && s.avatars_by.is_empty());
+        std::fs::write(&path, json!({ "avatars": { "default": "mine", "set": true, "by": [{ "key": k, "use": "theirs" }] } }).to_string()).unwrap();
+        let (s, _) = Saved::load(Some(&path));
+        assert!(!s.avatars_theirs && s.avatars_set && s.avatars_by == vec![(k, true)]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

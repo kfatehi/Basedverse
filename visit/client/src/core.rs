@@ -672,18 +672,20 @@ impl Core {
             }
             // A line this office's user says (8.9): to everyone in the room they are in, and nobody else.
             // Where it goes (`to`): none (or "here"), everyone who can see this office's user (the room they are in, and
-            // those who have it in their worlds or corners); { key }, into a linked office's room; "lobby", everyone
-            // in the lobby.
+            // those who have it in their worlds or corners); { key }, into a linked office's room; { whisper }, to the
+            // user of the office with that id alone, through the lobby; "lobby", everyone in the lobby.
             "say" => {
                 let Some(text) = m.get("text").and_then(Value::as_str).and_then(said) else {
                     return self.page_error("bad_message", &format!("text is 1 to {SAY_LEN} characters"), Some("say"));
                 };
                 let to = m.get("to").filter(|t| !t.is_null() && t.as_str() != Some("here"));
+                let lobby = to.and_then(Value::as_str) == Some("lobby");
                 let key = to.and_then(|t| t.get("key")).and_then(Value::as_str).filter(|k| state::key_ok(k)).map(str::to_string);
-                if to.is_some() && to.and_then(Value::as_str) != Some("lobby") && key.is_none() {
-                    return self.page_error("bad_message", "to is \"here\", \"lobby\" or { key } of an office linked with this one", Some("say"));
+                let whisper = to.and_then(|t| t.get("whisper")).and_then(Value::as_str).filter(|id| !id.is_empty() && id.len() <= 40).map(str::to_string);
+                if to.is_some() && !lobby && key.is_none() && whisper.is_none() {
+                    return self.page_error("bad_message", "to is \"here\", \"lobby\", { key } of an office linked with this one, or { whisper } an office's id", Some("say"));
                 }
-                if to.and_then(Value::as_str) == Some("lobby") && !(self.online && self.lobby_chat) {
+                if (lobby || whisper.is_some()) && !(self.online && self.lobby_chat) {
                     return self.page_error("not_supported", "this lobby takes no chat (or this office is not in it)", Some("say"));
                 }
                 if let Some(k) = &key {
@@ -694,10 +696,14 @@ impl Core {
                 if !counted(&mut self.says) {
                     return self.page_error("rate_limited", &format!("at most {SAYS} lines every {} s", SAY_WINDOW.as_secs()), Some("say"));
                 }
-                match (to, key) {
-                    (None, _) => self.say_out(text),
-                    (_, Some(k)) => { self.to_peer(&k, json!({ "sim_say": text })); }
-                    _ => self.to_lobby(json!({ "type": "chat", "text": text })),
+                if let Some(id) = whisper {
+                    self.to_lobby(json!({ "type": "whisper", "to": id, "text": text }));
+                } else if let Some(k) = key {
+                    self.to_peer(&k, json!({ "sim_say": text }));
+                } else if lobby {
+                    self.to_lobby(json!({ "type": "chat", "text": text }));
+                } else {
+                    self.say_out(text);
                 }
             }
             // Where everyone in this office's room is (8.7), in metres, as its page has them: its own user (null:
@@ -721,6 +727,7 @@ impl Core {
             "avatars" => match state::use_from(m.get("default")) {
                 Some(theirs) => {
                     self.saved.avatars_theirs = theirs;
+                    self.saved.avatars_set = true;
                     self.saved.avatars_by.retain(|(_, t)| *t != theirs);   // the same as the default now: no longer apart
                     self.save_state();
                     self.tell_avatars();
@@ -1290,12 +1297,14 @@ impl Core {
                 self.to_page(m);
             }
             // A line said to everyone in the lobby (8.9), checked as any line is, to the page.
-            "lobby_chat" => {
+            // A line said to everyone in the lobby, or whispered to this office's user (8.9): checked as any line is, to the page.
+            "lobby_chat" | "whisper" => {
                 let from = m.get("from").cloned().unwrap_or(Value::Null);
                 let s = |x: &Value, n: usize| x.as_str().map(|s| s.chars().filter(|c| !c.is_control()).take(n).collect::<String>());
                 if let (Some(text), Some(id)) = (m.get("text").and_then(Value::as_str).and_then(said), s(&from["id"], 40)) {
                     let key = s(&from["key"], 100).filter(|k| state::key_ok(k));
-                    self.to_page(json!({ "type": "chat", "scope": "lobby", "id": id, "key": key, "name": s(&from["name"], 24).unwrap_or_default(), "text": text }));
+                    let scope = if t == "whisper" { "whisper" } else { "lobby" };
+                    self.to_page(json!({ "type": "chat", "scope": scope, "id": id, "key": key, "name": s(&from["name"], 24).unwrap_or_default(), "text": text }));
                 }
             }
             "knock_cancelled" => {

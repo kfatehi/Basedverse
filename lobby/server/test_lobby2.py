@@ -542,12 +542,37 @@ async def t_chat():
         await c_.send(type="bye")
 
 
+async def t_whisper():
+    """Whispers (Visit 0.16): a line to one office alone, through the lobby; only to one whose hello said whisper."""
+    a, b = await join("W A", proto=lobby.PROTO3, chat=True, whisper=True), await join("W B", proto=lobby.PROTO3, chat=True, whisper=True)
+    c, old = await join("W C", proto=lobby.PROTO3, chat=True, whisper=True), await join("W Old", proto=lobby.PROTO3, chat=True)
+    lob = await a.last_lobby()
+    check("the lobby says who takes whispers", (office(lob, "W B")["whisper"], office(lob, "W Old")["whisper"]), (True, False))
+    await a.send(type="whisper", to=b.id, text="  psst\n ")
+    w = await b.expect("whisper")
+    check("A whispers to B: B has it, from A, plain", (w["text"], w["from"]["name"], w["from"]["id"], w["from"]["key"]), ("psst", "W A", a.id, "ep-W A"))
+    check("and nobody else: not C, not A", ([m["type"] for m in await c.quiet() if m["type"] != "lobby"], [m["type"] for m in await a.quiet() if m["type"] != "lobby"]), ([], []))
+    await a.send(type="whisper", to=old.id, text="hi")
+    e = await a.expect("error")
+    check("to an office that takes none: refused, by name", (e["code"], e.get("ref"), "W Old" in e["message"]), ("not_supported", "whisper", True))
+    for to in ("nobody", a.id, 5):
+        await a.send(type="whisper", to=to, text="hi")
+    check("to nobody, to itself, to no id: not_found", [(await a.expect("error"))["code"] for _ in range(3)], ["not_found"] * 3)
+    for i in range(4):
+        await a.send(type="whisper", to=b.id, text="w%d" % i)
+    await a.send(type="chat", text="and one in the lobby")
+    got = [m for m in await a.quiet() if m["type"] in ("lobby_chat", "error")]
+    check("whispers and lobby lines count together: the sixth refused", [m.get("code") for m in got], ["rate_limited"])
+    for c_ in (a, b, c, old):
+        await c_.send(type="bye")
+
+
 async def main():
     global URL
     async with serve(lobby.handler, "127.0.0.1", 0, max_size=lobby.LIMITS["frame"], process_request=lobby.health) as server:
         URL = "ws://127.0.0.1:%d" % server.sockets[0].getsockname()[1]
         for t in (t_hello, t_hello_rules_and_separation, t_knock_refusals, t_visit, t_end_and_full, t_resume, t_resume_replays_visits, t_rename,
-                  t_resume_window_and_bye, t_knock_timeout_and_health, t_version_3, t_keys, t_watch, t_link, t_chat):
+                  t_resume_window_and_bye, t_knock_timeout_and_health, t_version_3, t_keys, t_watch, t_link, t_chat, t_whisper):
             print("\n" + t.__name__[2:])
             try:
                 await t()

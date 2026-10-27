@@ -390,6 +390,7 @@ class Office2:
         self.world = False           # it takes knocks to watch (Visit 0.7 on: its hello said world: true)
         self.links = False           # it takes links: a knock answered with a watch, seen in a corner (Visit 0.8 on)
         self.chat = False            # it takes lobby chat (Visit 0.15 on: its hello said chat: true)
+        self.whisper = False         # it takes whispers (Visit 0.16 on: its hello said whisper: true)
         self.said = collections.deque()   # when it said its last lines of lobby chat
         self.visiting = None         # the visit it is on, as a visitor
         self.hosting = set()         # the visits to it, as a host
@@ -421,7 +422,8 @@ def lobby_view2(proto):
     return {"type": "lobby", "offices": [
         {"id": o.id, "name": o.name, "status": o.status, "sim": o.sim, "max_visitors": o.max_visitors,
          "visitors": len(o.hosting), "visiting": VISITS2[o.visiting]["host"] if o.visiting else None,
-         "ready": o.link is not None, "key": o.key, "watchers": len(o.watched), "world": o.world, "links": o.links}
+         "ready": o.link is not None, "key": o.key, "watchers": len(o.watched), "world": o.world, "links": o.links,
+         "whisper": o.whisper}
         for o in sorted(OFFICES2.values(), key=lambda o: o.name.casefold()) if o.proto == proto]}
 
 
@@ -639,31 +641,53 @@ def on2_rename(me, m):
     announce2()
 
 
-def on2_chat(me, m):
-    """A line for everyone in the lobby (Visit 0.15, like a game's general channel): to every office of the same
-    lobby that takes them (its hello said chat: true), the one who said it too, so that it shows in order. Plain text:
-    what is not printable becomes a space, trimmed, at most LIMITS2["chat"] characters; LIMITS2["chats_per_10s"] a
-    10 s at most. Nothing is kept."""
+def chat_text(me, m, ref):
+    """A line's text, as chat and whispers take it: plain (what is not printable becomes a space), trimmed, at most
+    LIMITS2["chat"] characters; and LIMITS2["chats_per_10s"] of them in 10 s at most, of both. None (said why) if not."""
     text = m.get("text")
     if not isinstance(text, str):
-        return error2(me, "bad_message", "text is a string", "chat")
+        return error2(me, "bad_message", "text is a string", ref)
     text = "".join(c if c.isprintable() else " " for c in text).strip()[:LIMITS2["chat"]].strip()
     if not text:
-        return error2(me, "bad_message", "text is 1 to %d characters" % LIMITS2["chat"], "chat")
+        return error2(me, "bad_message", "text is 1 to %d characters" % LIMITS2["chat"], ref)
     now = time.monotonic()
     while me.said and now - me.said[0] >= 10:
         me.said.popleft()
     if len(me.said) >= LIMITS2["chats_per_10s"]:
-        return error2(me, "rate_limited", "at most %d lines every 10 s" % LIMITS2["chats_per_10s"], "chat")
+        return error2(me, "rate_limited", "at most %d lines every 10 s" % LIMITS2["chats_per_10s"], ref)
     me.said.append(now)
+    return text
+
+
+def on2_chat(me, m):
+    """A line for everyone in the lobby (Visit 0.15, like a game's general channel): to every office of the same
+    lobby that takes them (its hello said chat: true), the one who said it too, so that it shows in order. Nothing
+    is kept."""
+    text = chat_text(me, m, "chat")
+    if text is None:
+        return
     line = {"type": "lobby_chat", "from": {"id": me.id, "name": me.name, "key": me.key}, "text": text}
     for o in OFFICES2.values():
         if o.chat and o.proto == me.proto:
             tell2(o, line)
 
 
+def on2_whisper(me, m):
+    """A line for one office's user (Visit 0.16, a game's whisper): `to`, an office of the same lobby whose hello said
+    whisper: true; to it alone. Checked as chat is, and counted with it. Nothing is kept."""
+    to = OFFICES2.get(m.get("to")) if isinstance(m.get("to"), str) else None
+    if not to or to.proto != me.proto or to is me:
+        return error2(me, "not_found", "no such office in the lobby", "whisper")
+    if not to.whisper:
+        return error2(me, "not_supported", "%s takes no whispers (an older Visit)" % to.name, "whisper")
+    text = chat_text(me, m, "whisper")
+    if text is None:
+        return
+    tell2(to, {"type": "whisper", "from": {"id": me.id, "name": me.name, "key": me.key}, "text": text})
+
+
 HANDLERS2 = {"link": on2_link, "status": on2_status, "max_visitors": on2_max_visitors, "knock": on2_knock,
-             "answer": on2_answer, "end": on2_end, "rename": on2_rename, "chat": on2_chat}
+             "answer": on2_answer, "end": on2_end, "rename": on2_rename, "chat": on2_chat, "whisper": on2_whisper}
 
 
 def welcome2(me, resumed):
@@ -728,6 +752,7 @@ def hello2(ws, m):
     me.world = m.get("world") is True
     me.links = m.get("links") is True
     me.chat = m.get("chat") is True
+    me.whisper = m.get("whisper") is True
     OFFICES2[me.id], BY_NAME2[name.casefold()] = me, me.id
     welcome2(me, False)
     announce2()

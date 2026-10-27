@@ -9,6 +9,36 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.16.0 — 2026-10-26
+
+**Whispers, and one row a person.**
+
+- **`/w name` whispers** to one person: them alone, wherever they are, linked or not, as in WoW. The lobby passes
+  it on and keeps nothing. `/r` answers whoever last whispered to you. Saying into a friend's linked room, which
+  `/w` did in 0.15, is now `/room name`. Colours: a whisper pink, a room blue (WoW's party), the lobby gold. In
+  code: `v.say(text, { whisper: id })`, `v.whisperTargets`, `chat` events with `scope: "whisper"`.
+- **The panel: one row a person.** Everyone in the lobby and everyone you are linked with, either way, appears once,
+  linked first: "Gooshy · linked", "· in your room", "· you are in their room". Click the row for the rest: where
+  each of you sees the other, Go there, Put in my world, how they look in your room (their model / our model),
+  Kick, and Unlink (every link between you two, both ways, and no longer a guest, since their world would only come
+  back). No more separate rows for your links, your visitors, who watches you, and the lobby.
+- **Visitors look like their own model by default** ("visitors look like: their model"). A room's state from before
+  0.16 said "your models" whether its user chose it or not: it reads as their model now. Choose "our model" in the
+  panel to have it back (for everyone, or for one person in their row).
+- `/` opens the chat window with the `/` typed, as WoW's slash key does, for a command.
+
+**The lobby**: whispers are new in it (`whisper`; the lobby view says who takes them). Update it
+(`bin/deploy-lobby`).
+
+### What an integration does
+
+1. Get visit-client 0.16.0 (`bin/setup` again, download; or this release).
+2. With the panel and its chat window, nothing more.
+3. If your room's VISIT.md wants visitors as your models, set it once (`visit.useAvatars("mine")`, or the panel's
+   "visitors look like"): a state from before 0.16 now reads as their own.
+4. A room with its own chat: `/w` is a whisper now (`v.say(text, { whisper })`); `chat` events can have
+   `scope: "whisper"`.
+
 ## v0.15.0 — 2026-10-26
 
 **Chat, as in a game.** A chat window, bottom left: Enter to type a line, Enter to say it, Esc to stop. It fades

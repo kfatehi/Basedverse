@@ -319,7 +319,8 @@ async def main():
         await a.js("window.knocksSeen = 0; v.on('knock', () => window.knocksSeen++)")
         await b.js("v.knock(v.offices.find(o => o.name === 'A').id)")
         check("B knocks: in A's room at once, the door being open", await b.until("v.visiting && v.visiting.host.name"), "A")
-        check("A's panel never asked: B walked in", (await a.until("v.visitors.length === 1 && document.querySelector('.visit-panel').textContent.includes('walked in')"),
+        check("A's panel never asked: B walked in (one row for B: in your room)", (await a.until(
+            "v.visitors.length === 1 && document.querySelector('.visit-panel').textContent.includes('B · in your room') && document.querySelectorAll('.visit-panel button.star[data-name=B]').length === 1"),
                                                      await a.js("window.knocksSeen")), (True, 0))
         await b.js("v.leave()")
         await a.until("v.visitors.length === 0")
@@ -509,7 +510,11 @@ async def main():
         check("drawn with B's own three.js (r160), from above, going round", await a.until(
             "(w => !!(w.scene && w.scene.T.REVISION === '160' && w.count > 10 && w.scene.camera.position.y > 3))(v._viewer)"), True)
         check("B's panel: A is linked, seeing B's room, not in it", await b.until(
-            "v.watchers.length === 1 && v.watchers[0].link && v.visitors.length === 0 && document.querySelector('.visit-panel').textContent.includes('is linked')"), True)
+            "v.watchers.length === 1 && v.watchers[0].link && v.visitors.length === 0 && document.querySelector('.visit-panel').textContent.includes('A · linked')"), True)
+        await b.js("document.querySelector('.visit-panel button.who').click()")
+        check("B opens A's row: A sees B's room; A's look in B's room, their model by default; Kick, no; Unlink", await b.until(
+            "(r => !!r && [r.querySelector('.muted').textContent, [...r.querySelectorAll('button')].map(b => b.textContent + (b.classList.contains('on2') ? '*' : '')).join()])(document.querySelector('.visit-panel .sub'))"),
+            ["they see your room", "their model*,our model,Unlink"])
         await a.shot("a_link_corner.png")
         await a.js("document.querySelector('.visit-stage').click()")
         check("a click on the corner: go there, put it in my world, unlink", await a.js(
@@ -537,7 +542,9 @@ async def main():
         check("A's page reloads: the link comes back in A's world, not the corner", await a.until(
             "window.v && window.room && room.world && v.links.length === 1 && v.links[0].where === 'world' && room.world.plots.some(p => p.name === 'B') && document.querySelector('.visit-stage').hidden", 30), True)
         await a.shot("a_link_world.png")
-        await a.js("document.querySelector('.visit-panel button[data-v=unlink]').click()")
+        await a.js("document.querySelector('.visit-panel button.who').click()")
+        check("A opens B's row: B's room in A's world", await a.until("(r => !!r && r.querySelector('.muted').textContent)(document.querySelector('.visit-panel .sub'))"), "their room is in your world")
+        await a.js("document.querySelector('.visit-panel .sub button[data-v=cut]').click()")
         check("A unlinks from its panel: gone for both", (await a.until("v.links.length === 0 && room.world.plots.length === 0"), await b.until("v.watchers.length === 0")), (True, True))
         await b.js("v.removeGuest(v.guests[0].key)")
         await b.until("v.guests.length === 0")
@@ -546,21 +553,24 @@ async def main():
         await b.js("v.knock(v.offices.find(o => o.name === 'A').id, 'as myself?')")
         await a.until("!!document.querySelector('.visit-panel .knock button[data-v=in]')")
         await a.js("document.querySelector('.visit-panel .knock button[data-v=in]').click()")
-        check("B visits A: A shows B as one of its own models (A's default)", await a.until(
-            "v.visitors.length === 1 && v.visitors[0].avatar === null && !!room.scene.getObjectByName('body:B')"), True)
-        await a.js("document.querySelector('.visit-panel button[data-v=look]').click()")
-        check("A's panel: B's own look, apart from the default: A asks, B's avatar comes, A draws B as it", await a.until(
-            "v.avatarUse(v.visitors[0].visitor.key) === 'theirs' && !!v.visitors[0].avatar && !!room.scene.getObjectByName('avatar:B') && !room.scene.getObjectByName('body:B')"), True)
+        check("B visits A: A shows B as their own model (Visit's default)", await a.until(
+            "v.avatars.default === 'theirs' && v.visitors.length === 1 && !!v.visitors[0].avatar && !!room.scene.getObjectByName('avatar:B') && !room.scene.getObjectByName('body:B')"), True)
         check("read with A's three.js (r128, from B's r160): B's torso and head, its walk and idle", await a.js(
             "(h => [h.avatar.object.getObjectByName('torso').geometry.type, !!h.avatar.object.getObjectByName('head'), !!h.avatar.walk, !!h.avatar.idle])([...v._hosted.values()].find(h => h.avatar))"),
             ["CylinderGeometry", True, True, True])
         check("and B, in A's room, does not see itself", await b.until("(s => !!s && s.own.some(o => o.name === 'avatar:B'))(v._viewer && v._viewer.scene)"), True)
         await a.shot("a_avatar.png")
-        await a.js("(s => { s.value = 'theirs'; s.dispatchEvent(new Event('change', { bubbles: true })); })(document.querySelector('.visit-panel select[data-v=looks]'))")
-        check("A: everyone's own look by default; B no longer set apart", await a.until("v.avatars.default === 'theirs' && v.avatars.by.length === 0 && !!v.visitors[0].avatar"), True)
+        await a.js("document.querySelector('.visit-panel button.who').click()")
+        await a.js("document.querySelector('.visit-panel .sub button[data-v=look][data-use=mine]').click()")
+        check("A opens B's row, our model: B set apart, one of A's own (a box)", await a.until(
+            "v.avatarUse(v.visitors[0].visitor.key) === 'mine' && v.avatars.by.length === 1 && v.visitors[0].avatar === null && !!room.scene.getObjectByName('body:B')"), True)
+        await a.js("document.querySelector('.visit-panel .sub button[data-v=look][data-use=theirs]').click()")
+        check("their model again: the default, so no longer apart", await a.until("v.avatars.by.length === 0 && !!v.visitors[0].avatar && !!room.scene.getObjectByName('avatar:B')"), True)
         await a.js("(s => { s.value = 'mine'; s.dispatchEvent(new Event('change', { bubbles: true })); })(document.querySelector('.visit-panel select[data-v=looks]'))")
-        check("and back to A's models: B a box again", await a.until(
-            "v.visitors[0].avatar === null && !!room.scene.getObjectByName('body:B') && !room.scene.getObjectByName('avatar:B')"), True)
+        check("visitors look like: our model: B a box", await a.until(
+            "v.avatars.default === 'mine' && v.visitors[0].avatar === null && !!room.scene.getObjectByName('body:B') && !room.scene.getObjectByName('avatar:B')"), True)
+        await a.js("(s => { s.value = 'theirs'; s.dispatchEvent(new Event('change', { bubbles: true })); })(document.querySelector('.visit-panel select[data-v=looks]'))")
+        await a.until("v.avatars.default === 'theirs' && !!v.visitors[0].avatar")
         await b.js("v.leave()")
         await a.until("v.visitors.length === 0")
 
@@ -618,7 +628,21 @@ async def main():
         check("and B's world draws B's own over B's head too", await b.until("room.world.bubbles.by.size === 2"), True)
         await enter(b)
         await b.call("Input.insertText", text="/w A ")
-        check("/w A and a space: the box goes to A's room, the command gone", await b.until(
+        check("/w A and a space: the box whispers to A, the command gone", await b.until(
+            f"(c => c.dataset.scope === 'whisper' && c.querySelector('select').selectedOptions[0].textContent === 'Tell A:' && c.querySelector('input').value === '')({cw})"), True)
+        await b.call("Input.insertText", text="psst")
+        await enter(b)
+        check("whispered: A has it, from B, and nobody's bubble", await a.until(
+            "(l => l && l.scope === 'whisper' && l.name === 'B' && !v.chats.some(c => c.text === 'psst') && l.text)(v.chatLog.at(-1))"), "psst")
+        check("A's window: [B] whispers; B's: To [A]", (await a.js(f"{cw}.querySelector('.log').lastChild.textContent"), await b.js(f"{cw}.querySelector('.log').lastChild.textContent")),
+              ("[B] whispers: psst", "To [A]: psst"))
+        await enter(a)
+        await a.call("Input.insertText", text="/r back at you")
+        await enter(a)
+        check("A: /r, a whisper back to B", await b.until(f"(t => t.includes('whispers') && t)({cw}.querySelector('.log').lastChild.textContent)"), "[A] whispers: back at you")
+        await enter(b)
+        await b.call("Input.insertText", text="/room A ")
+        check("/room A and a space: the box goes to A's room", await b.until(
             f"(c => c.dataset.scope === 'sim' && c.querySelector('select').selectedOptions[0].textContent === \"To A's room:\" && c.querySelector('input').value === '')({cw})"), True)
         await b.call("Input.insertText", text="into your room")
         await enter(b)

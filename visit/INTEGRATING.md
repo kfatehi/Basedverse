@@ -37,12 +37,12 @@ the world. Your page never opens any connection to another machine itself.
 Every room that takes Visit's defaults looks and works the same for the people visiting it, and that is the point:
 take them unless your user asks for something else. The defaults are Visit's own ready-made pieces:
 
-- **the panel** (`Visit.panel`): the lobby, links and knocks, your door and guests, your visitors and their looks,
-  your world's Map, the microphone and who is near, calls (📞 call, Pick up, speaker / handset, Hang up), notes (where
+- **the panel** (`Visit.panel`): one row a person (in the lobby, or linked with you: in your room, linked; open it
+  for Go there, their look in your room, Kick, Unlink), knocks, your door and guests, your world's Map, the microphone and who is near, calls (📞 call, Pick up, speaker / handset, Hang up), notes (where
   a friend's world put your room), and ⏱ (how this page is doing);
 - **the chat window** (the panel's, `Visit.chat`): bottom left, as in a game. Enter to type, and say a line to
-  everyone who can see you, into a linked friend's room (`/w name`), or to the lobby (`/1`); it fades when nobody
-  has said anything for a while;
+  everyone who can see you, whisper to one person (`/w name`), say it into a linked friend's room (`/room name`), or
+  to the lobby (`/1`); it fades when nobody has said anything for a while;
 - **the stage** (`Visit.stage`): the room you visit, full-window or in the corner;
 - **the Map** (`Visit.map`, from the panel): your world from above;
 - **in your world** (`visit.world`): chat bubbles over whoever said something, and a 🔊 over whoever you hear
@@ -350,7 +350,8 @@ visit.host({
   agents): those go as before. If something marked does change in itself, call `visit.landscapeChanged()`.
 - **Chat**: the panel's chat window, bottom left: your user presses Enter, types a line, and Enter says it. Said
   (the default), everyone who can see them has it over their head for a few seconds, and in their chat; `/w name`
-  says it into a linked friend's room, `/1` to the whole lobby (`visit.say(text, to)` from code). With a world (step
+  whispers it to one person, `/room name` says it into a linked friend's room, `/1` to the whole lobby
+  (`visit.say(text, to)` from code). With a world (step
   9) Visit draws the bubbles in your room too; without one, draw them yourself from `visit.chats`
   (`Visit.bubble(THREE, text, unit)` makes one). Make sure your room's keys ignore a text box (WASD there is typing,
   not walking), and leave Enter and `/` to the chat window. Something of yours bottom left: move the window
@@ -441,9 +442,11 @@ Visit.panel(document.getElementById("visit-panel"), visit);
 
 It lists the workrooms online (with whether each is available, how many visitors it has and takes), lets
 your user **link** with one (with a message): once they say yes, their room shows in the stage's corner (step 6),
-and your user chooses to go there, put it in their world, or unlink. It shows links asked of you with **Link** /
-**Not now** and **★ always** (make them a guest as you say yes), your links, your visitors and who is linked to
-you (with **Kick** / **Unlink**, and **their look** / **your model**), whose look your visitors have by default,
+and your user chooses to go there, put it in their world, or unlink. Each person is one row: linked, it says where
+you two stand (in your room, in theirs, linked), and opened, the rest (**Go there**, **Put in my world**, **their
+model** / **our model** for how they look in your room, **Kick**, **Unlink**). It shows links asked of you with
+**Link** / **Not now** and **★ always** (make them a guest as you say yes), whose look your visitors have by
+default (their model),
 **Map** (your world, from above: step 9), the microphone (🎙) and who is near, calls, the chat window (Enter), sets your
 status and max visitors, and has **Go offline** / **Go online**. A
 star (☆) by each office makes it a **guest**: while your door is open (the panel's "your door"), a guest's link
@@ -575,7 +578,7 @@ marked offline, walked into but not through its walls; start it again, and the p
 - [ ] Voice: with the microphone on, a visitor near your user hears them, and they the visitor; farther, neither.
 - [ ] A phone, if you have one: a call rings, is picked up, heard on the handset; on speaker, by those near it.
 - [ ] Chat: Enter opens the chat window, bottom left; a line said shows over its speaker's head for everyone who
-      can see them, and in their chat; `/w name` reaches a linked friend's room, `/1` the lobby; your own keys
+      can see them, and in their chat; `/w name` whispers, `/room name` reaches a linked friend's room, `/1` the lobby; your own keys
       ignore a text box (typing "w" there does not walk), and nothing of yours hides the window.
 - [ ] Your landscape (what never changes) marked `userData.visitStatic`; nothing that moves or changes under it,
       or `visit.landscapeChanged()` when it does.

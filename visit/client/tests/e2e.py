@@ -715,6 +715,15 @@ async def main():
         check("into the room of an office A has no link with (C): refused", (await a.until(lambda m: m["type"] == "error"))["code"], "no_link")
         await a.send(type="say", text="x", to=5)
         check("a `to` that is no scope: refused", (await a.until(lambda m: m["type"] == "error"))["code"], "bad_message")
+        await a.send(type="say", text="just you", to={"whisper": ids["B"]})
+        x = await b.until(chat)
+        check("A whispers to B (to: B's office id): B's page has it, from A, through the lobby", pick(x, "scope", "id", "key", "name", "text"),
+              {"scope": "whisper", "id": ids["A"], "key": ka, "name": "A", "text": "just you"})
+        await asyncio.sleep(0.3)
+        check("nobody else: not C, in B's room", [t for t in quiet_types(c) if t == "chat"], [])
+        await a.send(type="say", text="x", to={"whisper": "o00000000"})
+        e = await a.until(lambda m: m["type"] == "error")
+        check("to an office not in the lobby: the lobby says so", (e["code"], e.get("ref")), ("not_found", "whisper"))
         await b.send(type="say", text="hello lobby", to="lobby")
         got = [pick(await pg.until(chat), "scope", "name", "text") for pg in (a, b, c)]
         check("B says a line to the lobby: everyone in it has it (B too, in the lobby's order)", got, [{"scope": "lobby", "name": "B", "text": "hello lobby"}] * 3)
@@ -756,7 +765,7 @@ async def main():
         await a.send(type="avatar_use", key=kb, use="mine")
         y = await a.until(lambda m: m["type"] == "avatars")
         check("A shows visitors' own looks by default, but B's as A's models: kept in its state file",
-              (x["default"], y["by"], json.load(open(state))["avatars"]), ("theirs", [{"key": kb, "use": "mine"}], {"default": "theirs", "by": [{"key": kb, "use": "mine"}]}))
+              (x["default"], y["by"], json.load(open(state))["avatars"]), ("theirs", [{"key": kb, "use": "mine"}], {"default": "theirs", "set": True, "by": [{"key": kb, "use": "mine"}]}))
         await a.send(type="avatar_use", key=kb, use=None)
         await a.send(type="avatars", default="mine")
         z = [await a.until(lambda m: m["type"] == "avatars"), await a.until(lambda m: m["type"] == "avatars")][-1]
