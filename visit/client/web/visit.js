@@ -1687,7 +1687,7 @@
       if (shares && (scope === "lobby" || (scope === "whisper" && !this.chatTargets.some(o => o.key === target.key)))) return false;   // pictures and links: not through the lobby
       this._said.push(now);
       this._send(scope === "say" ? { type: "say", text: t, ...att } : { type: "say", text: t, to: scope === "lobby" ? "lobby" : to === "room" ? "room" : scope === "whisper" ? { whisper: target.id } : { key: target.key }, ...att });
-      const me = { key: this.key || "", name: this.office ? this.office.name : "", text: t, mine: true, owner: false, id: null, ...att };
+      const me = { key: this.key || "", name: this._userName || (this.office ? this.office.name : ""), text: t, mine: true, owner: false, id: null, ...att };
       if (scope === "say") { const r = this._room(); this._chatIn({ ...me, room: r.kind === "home" ? "home" : r.w.channel, conversation: this._conversationHere() }); }
       else if (scope === "sim") this._chatIn({ ...me, scope, to: { key: target.key, name: target.name }, conversation: "room:" + target.key });
       else if (scope === "whisper") this._chatIn({ ...me, scope, to: { id: target.id, key: target.key, name: target.name }, conversation: "person:" + (target.key || "id:" + target.id) });
@@ -4078,6 +4078,14 @@
   // over the box says whose and who is in it (🔊: speaking), and stays. The rest fades `fade` ms after the last line,
   // and comes back with the next one, or Enter.
   // `element`: where it goes (the page). Its place: --visit-chat-left, --visit-chat-bottom.
+  // The colour of someone's name in chat, as WoW colours a name by its class: one of these, by their key (else
+  // their name), so the same on every page. None is a scope's (a whisper's pink, a room's blue).
+  const NAME_COLORS = ["#ff6b6b", "#ff9f43", "#d4a373", "#ffd93d", "#a3e048", "#2ee6a6", "#3dd5f3"];
+  const nameColor = key => {
+    let h = 2166136261;
+    for (const c of String(key)) h = Math.imul(h ^ c.codePointAt(0), 16777619);
+    return NAME_COLORS[(h >>> 0) % NAME_COLORS.length];
+  };
   const CHAT_CSS = `
 .visit-chat { position: fixed; left: var(--visit-chat-left, 16px); bottom: var(--visit-chat-bottom, 16px); z-index: 19; width: min(660px, calc(100vw - 32px)); font: 19.5px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif; color: #fff; transition: opacity .8s; }
 .visit-chat.idle { pointer-events: none; }
@@ -4116,6 +4124,9 @@
 .visit-chat .log { max-height: 11em; overflow-y: auto; padding: 4px 8px; border-radius: 6px; text-shadow: 0 1px 2px #000, 0 0 4px #000; scrollbar-width: none; overflow-wrap: anywhere; }
 .visit-chat .log:empty { display: none; }
 .visit-chat:hover .log, .visit-chat.typing .log { background: rgba(0,0,0,.4); }
+.visit-chat .line { padding-left: 1.25em; text-indent: -1.25em; }
+.visit-chat .line + .line { margin-top: 3px; }
+.visit-chat .line > img, .visit-chat .line > .card { text-indent: 0; }
 .visit-chat .line.whisper, .visit-chat[data-scope=whisper] form { color: #ff80ff; }
 .visit-chat .line.sim, .visit-chat[data-scope=sim] form { color: #aaaaff; }
 .visit-chat .line.lobby, .visit-chat[data-scope=lobby] form { color: #ffc864; }
@@ -4124,7 +4135,7 @@
 .visit-chat .names:empty { display: none; }
 .visit-chat .names button { font: inherit; color: #c9d1d9; background: rgba(22,27,34,.92); border: 1px solid #30363d; border-radius: 4px; padding: 0 6px; cursor: pointer; }
 .visit-chat .names button.on { color: #fff; background: #1f2a44; border-color: #aaaaff; }
-.visit-chat .line.mention { background: rgba(255,200,100,.16); border-left: 3px solid #ffc864; padding-left: 5px; border-radius: 3px; }
+.visit-chat .line.mention { background: rgba(255,200,100,.16); border-left: 3px solid #ffc864; padding-left: calc(1.25em + 5px); border-radius: 3px; }
 .visit-chat form { display: none; align-items: center; gap: 4px; margin-top: 4px; padding: 3px 6px; background: rgba(0,0,0,.7); border: 1px solid #6e7681; border-radius: 6px; }
 .visit-chat.typing form { display: flex; }
 .visit-chat select { font: inherit; color: inherit; background: none; border: 0; padding: 0; max-width: 45%; cursor: pointer; }
@@ -4187,13 +4198,14 @@
     const label = t => t.scope === "lobby" ? "Lobby" : t.scope === "whisper" ? `Tell ${t.name}` : t.scope === "sim" ? `To ${room(t)}` : "Say";
     const same = (a, b) => a.scope === b.scope && (a.key || a.id || null) === (b.key || b.id || null);
     const whom = t => v.whisperTargets.find(o => (t.key && o.key === t.key) || o.id === t.id);   // a whisper's person, now
-    const shown = l => {
-      const who = `[${l.name || "someone"}]`;
-      if (l.scope === "note") return l.text;
-      if (l.scope === "lobby") return `[Lobby] ${who}: ${l.text}`;
-      if (l.scope === "whisper") return l.mine ? `To [${l.to.name}]: ${l.text}` : `${who} whispers: ${l.text}`;
-      if (l.scope === "sim") { const r = room(l.to || {}); return `[${r[0].toUpperCase() + r.slice(1)}] ${who}: ${l.text}`; }
-      return `${who} says: ${l.text}`;
+    // A line's text, in parts: a name ({ name, key }), in its own colour, among the rest.
+    const parts = l => {
+      const who = { name: `[${l.name || "someone"}]`, key: l.key || l.name };
+      if (l.scope === "note") return [l.text];
+      if (l.scope === "lobby") return ["[Lobby] ", who, `: ${l.text}`];
+      if (l.scope === "whisper") { const t = l.to || {}; return l.mine ? ["To ", { name: `[${t.name || ""}]`, key: t.key || t.name }, `: ${l.text}`] : [who, ` whispers: ${l.text}`]; }
+      if (l.scope === "sim") { const r = room(l.to || {}); return [`[${r[0].toUpperCase() + r.slice(1)}] `, who, `: ${l.text}`]; }
+      return [who, ` says: ${l.text}`];
     };
     const wake = () => {
       root.classList.remove("idle");
@@ -4227,7 +4239,13 @@
     };
     const lineEl = l => {   // a line: its text, then its pictures and its links' previews
       const d = document.createElement("div");
-      d.className = "line " + l.scope + (l.mention ? " mention" : ""); d.textContent = shown(l);
+      d.className = "line " + l.scope + (l.mention ? " mention" : "");
+      for (const p of parts(l)) {
+        if (typeof p === "string") { d.appendChild(document.createTextNode(p)); continue; }
+        const n = document.createElement("span");
+        n.className = "who"; n.textContent = p.name; n.style.color = nameColor(p.key || "");
+        d.appendChild(n);
+      }
       if (l.at) d.dataset.at = String(l.at);
       for (const p of l.media || []) d.appendChild(picture(p.id, "pic"));
       for (const c of l.links || []) d.appendChild(card(c));

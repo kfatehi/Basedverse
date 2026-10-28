@@ -674,7 +674,7 @@ async def main():
         await b.key("KeyW", "w", 87, True)
         check("B walks on: A plays the pony's own walk clip", await a.until("(r => !!r && !!r.playing && r.playing === r.clips.walk)([...v._hosted.values()][0].ride)"), True)
         await b.key("KeyW", "w", 87, False)
-        await b.js("v.ride('rug')")
+        await b.js("v.ride('rug')")   # at once: its model may come sooner than a host takes them, and waits its turn
         check("the flying rug instead: under B, the pony gone", await a.until(
             "(o => !!o && !!o.getObjectByName('rug-body') && v.visitors[0].riding.id === 'rug' && room.scene.children.filter(c => c.name === 'mount:B').length === 1)(room.scene.getObjectByName('mount:B'))"), True)
         await b.key("Space", " ", 32, True)
@@ -696,9 +696,9 @@ async def main():
         await b.key("KeyM", "m", 77, True)
         await b.key("KeyM", "m", 77, False)
         check("M again: on the one B last rode", await b.until("v.riding"), "crate")
-        await a.js("v._ws.close()")   # A's page loses its visit-client a moment (it connects again by itself)
+        await a.js("window.oldWs = v._ws, v._ws.close()")   # A's page loses its visit-client a moment (it connects again by itself)
         check("A's page loses its visit-client and comes back while B rides: B's crate and B's body in A's room once each, not twice",
-              await a.until("v.state === 'online' && v.visitors.length === 1 && !!v.visitors[0].riding && !!room.scene.getObjectByName('crate-box')"
+              await a.until("v._ws !== window.oldWs && v._ws.readyState === 1 && v.state === 'online' && v.visitors.length === 1 && !!v.visitors[0].riding && !!room.scene.getObjectByName('crate-box')"
                             " && room.scene.children.filter(c => c.name === 'mount:B').length === 1 && room.scene.children.filter(c => c.name === 'avatar:B').length <= 1", 30), True)
         await b.js("v.ride(null)")
         await a.until("!room.scene.getObjectByName('mount:B')")
@@ -706,6 +706,7 @@ async def main():
         await a.until("v.visitors.length === 0")
 
         print("\nvoice: by who is near, in the same room")
+        await a.until("v.offices.some(o => o.name === 'B')")   # A's page just came back: the lobby's list again, first
         await a.js("v.knock(v.offices.find(o => o.name === 'B').id, 'talk?')")
         await b.until("v.knocks.length === 1")
         await b.js("v.answer(v.knocks[0].id, true)")
@@ -721,6 +722,9 @@ async def main():
         await a.js("v.setName('Ann')")
         check("A gives the name its user goes by: B's panel row and who is near B say it", (await b.until(
             "[...document.querySelectorAll('.visit-panel button.who')].some(b => b.textContent.includes('Ann (A)'))"), await b.until("v.voices.some(x => x.name === 'Ann')")), (True, True))
+        await a.js("v.say('named')")
+        check("and A's own line, in A's chat window, by that name too (as B has it)", await a.until(
+            "(t => t.endsWith('named') && t)(document.querySelector('.visit-chat .log').lastChild.textContent)"), "[Ann] says: named")
         await a.js("v.setName(null)")
         await b.until("v.voices.some(x => x.name === 'A')")
         check("B's panel shows A near, speaking", await b.until("document.querySelector('.visit-panel').textContent.includes('🔊 A')"), True)
@@ -759,6 +763,9 @@ async def main():
         check("and B's window shows it, the box gone again", await b.js(f"(c => [c.classList.contains('typing'), c.querySelector('.log').lastChild.textContent])({cw})"),
               [False, "[B] says: hi A, from my chat"])
         check("A's window too", await a.until(f"{cw}.querySelector('.log').lastChild.textContent"), "[B] says: hi A, from my chat")
+        who = f"(n => n ? [n.textContent, n.style.color] : null)({cw}.querySelector('.log').lastChild.querySelector('.who'))"
+        wa, wb = await a.js(who), await b.js(who)
+        check("B's name in it in B's own colour, the same in both windows (by B's key, as WoW colours a name by its class)", (wa, bool(wb and wb[1])), (wb, True))
         check("A's view of B's room draws it over B (B's mark), not A's own line (A's eyes are there)", await a.until(
             "(b => !!b && b.by.size === 1 && [...b.by.values()][0].text === 'hi A, from my chat')(v._viewer && v._viewer.scene && v._viewer.scene.bubbles)"), True)
         check("and B's world draws B's own over B's head too", await b.until("room.world.bubbles.by.size === 2"), True)

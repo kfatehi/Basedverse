@@ -57,8 +57,10 @@ const STREAM_POSSESSION: u8 = 4;
 const STREAM_MEDIA: u8 = 5;
 /// The most pictures taken from the other side a minute.
 const MEDIA_PER_MINUTE: u32 = 30;
-/// The least time between two possessions' models a host takes from one visitor.
+/// The least time between two possessions' models a host takes from one visitor: a sooner one waits its turn (its
+/// host asked for it, once), but not more than POSSESSIONS_QUEUED of them.
 const POSSESSION_EVERY: Duration = Duration::from_millis(500);
+const POSSESSIONS_QUEUED: u32 = 8;
 /// What a datagram of voice starts with (8.7), and of a visitor's voice a room passes on; an input's is JSON, and
 /// starts with `{`.
 const DATAGRAM_AUDIO: u8 = 0xA0;
@@ -704,8 +706,8 @@ async fn read_land(mut stream: RecvStream, visit: String, core: mpsc::UnboundedS
 }
 
 /// The host's side: the visitor's avatar, each time it sends one (at most every AVATAR_EVERY), and its possessions'
-/// models (8.11, at most every POSSESSION_EVERY), unpacked and checked as a scene edit is, then passed to the page;
-/// any other stream is ignored.
+/// models (8.11, one every POSSESSION_EVERY, a sooner one in its turn), unpacked and checked as a scene edit is,
+/// then passed to the page; any other stream is ignored.
 async fn read_avatars(conn: Connection, visit: String, core: mpsc::UnboundedSender<Ev>) {
     let (mut last, mut last_possession): (Option<Instant>, Option<Instant>) = (None, None);
     let mut media = (Instant::now(), 0u32);
@@ -721,12 +723,20 @@ async fn read_avatars(conn: Connection, visit: String, core: mpsc::UnboundedSend
             continue;
         }
         if kind[0] == STREAM_POSSESSION {
-            if last_possession.is_some_and(|t| t.elapsed() < POSSESSION_EVERY) {
-                debug!(%visit, "a possession sooner than the last allows: ignored");
+            // Its turn: now, or POSSESSION_EVERY after the last one's (its page asks for each once, and a mount
+            // switched to at once is no less wanted); too many waiting, and it is dropped.
+            let now = Instant::now();
+            let at = last_possession.map_or(now, |t| (t + POSSESSION_EVERY).max(now));
+            if at > now + POSSESSION_EVERY * POSSESSIONS_QUEUED {
+                debug!(%visit, "a possession with too many waiting before it: ignored");
                 continue;
             }
-            last_possession = Some(Instant::now());
-            tokio::spawn(read_possession(stream, visit.clone(), core.clone()));
+            last_possession = Some(at);
+            let (visit, core) = (visit.clone(), core.clone());
+            tokio::spawn(async move {
+                tokio::time::sleep_until(at).await;
+                read_possession(stream, visit, core).await;
+            });
             continue;
         }
         if kind[0] != STREAM_AVATAR {

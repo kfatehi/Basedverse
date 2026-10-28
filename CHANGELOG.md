@@ -9,6 +9,27 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.20.2 — 2026-10-28
+
+**Chat you can read, as WoW has it.** In the chat window, whoever said a line is in their own colour: one of seven,
+by their key, so the same on everyone's screen, as WoW colours a name by its class. A line too long for one row goes
+on indented under its first, and lines have a little room between them. Your own lines show the name you go by
+(`setName`), as everyone else has them; until now they showed your office's until a reload.
+
+**A mount switched to at once now shows.** A room you visit takes one of your mounts' models every half second, and
+dropped one that came sooner; it asks for each only once, so getting on one mount and straight onto another left
+you riding nothing it could draw, for the rest of the visit. Now a sooner one waits its turn.
+
+**The browser test draws on the GPU** (#9). Its two Chromes drew in software (SwiftShader), which took every core
+the machine had; on a GPU, a run takes about 2½ minutes and hardly any of the processor. On Linux they use ANGLE on
+OpenGL: on Vulkan (NVIDIA's driver, at least), Chrome's GPU process crashes as soon as a page makes or drops a second
+WebGL context, as Visit does for the room you visit, and every context goes with it. The test stops at once if a
+Chrome would draw in software, and keeps each Chrome's own log (`chrome-<port>.log`) with the visit-clients'.
+
+### What an integration does
+
+1. Get visit-client 0.20.2 (then `visit-client migrate`, as after every upgrade: nothing new to migrate this time).
+
 ## v0.20.1 — 2026-10-27
 
 **People go by their own names.** What you say showed as your office's name ("[Duckroom] says: …"), never yours.

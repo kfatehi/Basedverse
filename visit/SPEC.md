@@ -548,8 +548,9 @@ And visitor to host, once its host asked (`avatar_want`):
 And visitor to host, once its host asked (`possession_want`):
 
 - **4, a possession's model** (8.11): its id (one byte, its length, then the id), its length (u32 big-endian, at
-  most 4 MiB) then the gzipped JSON, the stream then finished. The host's visit-client takes at most one every
-  500 ms, checks the id, unpacks it as an avatar, and passes it to its page as `possession`.
+  most 4 MiB) then the gzipped JSON, the stream then finished. The host's visit-client takes one every 500 ms (a
+  sooner one waits its turn, at most 8 of them: its page asks for each once), checks the id, unpacks it as an
+  avatar, and passes it to its page as `possession`.
 
 And host to visitor, once the visitor asked (`landscape_want`):
 
@@ -906,7 +907,9 @@ when their office is linked with this one, else by their office's (the lobby kno
   <name>, To <name>'s room, Lobby), picked there or with `/s`, `/w <name>` (`/t`, `/tell`), `/r` (back to whoever
   last whispered to you), `/room <name>`, `/1` (`/l`) and a space, and it stays for the next line. Every line of
   every scope shows in it, coloured by scope (say white, a whisper pink, a room's blue, the lobby's gold), a room's
-  and the lobby's as channels (`[Gooshy's room] [Ann]: hi`, `[Your room] [Ann]: hi`, `[Lobby] [Ann]: hi`). `/room`
+  and the lobby's as channels (`[Gooshy's room] [Ann]: hi`, `[Your room] [Ann]: hi`, `[Lobby] [Ann]: hi`). As in
+  WoW (0.20.2), whoever said it is in their own colour (one of seven, by their key: the same on every page, as WoW
+  colours a name by its class), and a line too long for one row goes on indented under its first. `/room`
   alone is your own room's chat ("To your room", among the choices while anyone is linked with you); `/r`, with
   nobody having whispered to you, is whom you last whispered. The names the box could take are over it, to pick
   (up and down, Tab or Enter, or a click): after `/w` or `/room`, whom it goes to; after `@` (0.20.1), whom the line
