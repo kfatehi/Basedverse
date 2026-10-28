@@ -203,6 +203,19 @@ def main():
         check("every try kept: signed in, wrong, too soon", sorted(sql(AUTH_URL, "SELECT ok, waited, count(*) > 0 FROM auth.login_attempts GROUP BY 1, 2")),
               [(False, False, True), (False, True, True), (True, False, True)])
 
+        lsock.close()
+        noprobe = subprocess.Popen([AUTH, "--port", "7405", "--token-file", tfile, "--visit-port", "17401", "--visit-token-file", vfile, "--visit-probe", "false"],
+                                   env={**os.environ, "AUTH_DATABASE_URL": AUTH_URL, "AUTH_LOG": "warn"})
+        try:
+            until(lambda: call(7405, "/health", None, None)[0] == 200)
+            s6 = call(7405, "/v1/login", {"user": "aldo", "password": NEW_PASSWORD}, token)[1]["session"]
+            check("--visit-probe false: its token file there is enough (nothing need answer on its port)", call(7405, "/v1/visit", {"session": s6}, token), (200, {"port": 17401, "token": "ab" * 32}))
+            os.remove(vfile)
+            check("...and with the file gone, no visit-client: 404", call(7405, "/v1/visit", {"session": s6}, token)[0], 404)
+        finally:
+            noprobe.terminate()
+            noprobe.wait(5)
+
         print("\na session's two ends: unused, and in all")
         short = subprocess.Popen([AUTH, "--port", "7404", "--token-file", tfile, "--idle", "2s", "--max-age", "5s"],
                                  env={**os.environ, "AUTH_DATABASE_URL": AUTH_URL, "AUTH_LOG": "warn"})

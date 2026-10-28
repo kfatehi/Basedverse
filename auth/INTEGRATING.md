@@ -101,7 +101,9 @@ Beside visit-client, on every start:
 4. Stop it with the rest.
 
 In Docker, run it on the host's network (it listens on `127.0.0.1` only), or in your server's own network
-namespace.
+namespace (compose: `network_mode: "service:<your server>"`, recreated whenever your server is). There, with
+visit-client on the host's network, it cannot reach visit-client's port: set `AUTH_VISIT_PROBE=false`, and have
+your launcher remove visit-client's token file when visit-client stops (a file there then means it runs).
 
 **Check:** `curl -s http://127.0.0.1:7403/health` answers `{"ok":true,"version":"…"}`; a call without the token,
 `curl -s -X POST http://127.0.0.1:7403/v1/check -d '{}'`, answers 401.

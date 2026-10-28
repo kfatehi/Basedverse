@@ -43,8 +43,9 @@ pub struct Config {
     /// A session ends after this long unused, and this long in all.
     pub idle: Duration,
     pub max_age: Duration,
-    /// visit-client's port and token file, for /v1/visit.
+    /// visit-client's port and token file, for /v1/visit; and whether to make sure its port answers.
     pub visit: Option<(u16, PathBuf)>,
+    pub visit_probe: bool,
 }
 
 struct Live {
@@ -343,9 +344,11 @@ async fn visit(State(app): State<Arc<App>>, h: HeaderMap, body: Bytes) -> Reply 
         Ok(t) if !t.trim().is_empty() => t.trim().to_string(),
         _ => return none(),
     };
-    let up = tokio::time::timeout(Duration::from_millis(500), tokio::net::TcpStream::connect(("127.0.0.1", *port))).await;
-    if !matches!(up, Ok(Ok(_))) {
-        return none();
+    if app.cfg.visit_probe {
+        let up = tokio::time::timeout(Duration::from_millis(500), tokio::net::TcpStream::connect(("127.0.0.1", *port))).await;
+        if !matches!(up, Ok(Ok(_))) {
+            return none();
+        }
     }
     reply(StatusCode::OK, json!({ "port": port, "token": token }))
 }

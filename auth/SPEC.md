@@ -84,7 +84,7 @@ cannot be reached for a sign-in.
   session's `last_seen_at` and a key's `last_used_at` are written at most once a minute. The workroom's server may
   keep a valid answer for at most 5 seconds.
 - `/v1/visit` answers 404 when auth-client was given no visit-client token file (`VISIT_TOKEN_FILE`), the file is
-  missing or empty, or nothing answers on visit-client's port (`VISIT_PORT`).
+  missing or empty, or nothing answers on visit-client's port (`VISIT_PORT`; not asked with `AUTH_VISIT_PROBE=false`).
 
 ## 4. Sessions and keys
 
@@ -164,6 +164,7 @@ Each is a flag and a variable in its environment (`AUTH_PORT` is `--port`).
 | `AUTH_IDLE` | `7d` | a session ends after this long unused (a number and s, m, h or d) |
 | `AUTH_MAX_AGE` | `30d` | ...and after this long in all |
 | `VISIT_PORT`, `VISIT_TOKEN_FILE` | 7401, none | visit-client's, for `/v1/visit`: the same as visit-client is given |
+| `AUTH_VISIT_PROBE` | `true` | whether `/v1/visit` makes sure something answers on visit-client's port; `false` where auth-client cannot reach it (a container beside a visit-client on the host's network): its token file there is then taken for a running visit-client |
 | `VISIT_DATABASE_ADMIN_URL`, `VISIT_DATABASE_URL` | | for `migrate --admin` only |
 | `AUTH_LOG` | `info` | what it logs (to stderr): `warn`, `debug`, … |
 

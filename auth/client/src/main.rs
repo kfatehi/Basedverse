@@ -44,6 +44,11 @@ struct Args {
     /// visit-client's token file, read afresh for each /v1/visit; none: /v1/visit answers 404.
     #[arg(long, env = "VISIT_TOKEN_FILE")]
     visit_token_file: Option<PathBuf>,
+    /// Whether /v1/visit makes sure something answers on visit-client's port. false where auth-client cannot reach
+    /// it (another network namespace: a container beside a visit-client on the host's network): then its token
+    /// file there is taken for a running visit-client, and the launcher removes it when visit-client stops.
+    #[arg(long, env = "AUTH_VISIT_PROBE", default_value_t = true, action = clap::ArgAction::Set)]
+    visit_probe: bool,
 }
 
 #[derive(Subcommand)]
@@ -186,7 +191,8 @@ async fn serve(a: Args, url: String) -> ExitCode {
             return ExitCode::from(5);
         }
     };
-    let cfg = api::Config { database: url, port: a.port, token, idle: a.idle, max_age: a.max_age, visit: a.visit_token_file.map(|f| (a.visit_port, f)) };
+    let cfg = api::Config { database: url, port: a.port, token, idle: a.idle, max_age: a.max_age, visit: a.visit_token_file.map(|f| (a.visit_port, f)),
+                            visit_probe: a.visit_probe };
     match api::serve(cfg, client).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
