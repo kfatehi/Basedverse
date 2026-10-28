@@ -700,6 +700,7 @@
       this._kept = new Map();     // guests' plots kept while they are away (8.10): key -> { key, name, plot, unit, json, asked, built }
       this._landText = null;      // this room's landscape, as last given to visit-client
       this._said = [];            // when you last said lines (CHATS every CHAT_WINDOW)
+      this._saidAs = new Map();   // and each of your room's figures (sayAs), by its id
       this._nearHome = [];        // who is near your user in your room, as your visit-client says (voice_near)
       this._nearBy = new Map();   // and in another's room, as its owner's says: channel -> [{ key, name, distance, id, phone }]
       this._whereTold = { sig: "", at: 0 };   // where everyone in your room is, as last told to your visit-client
@@ -1693,6 +1694,20 @@
       else if (scope === "whisper") this._chatIn({ ...me, scope, to: { id: target.id, key: target.key, name: target.name }, conversation: "person:" + (target.key || "id:" + target.id) });
       return true;   // (a lobby line comes back from the lobby, in its order)
     }
+    // A line one of your room's own figures says (8.9: a receptionist, a guide; never a person): `id` names it, 1 to 40
+    // letters, digits, _ . or -, and its object in your scene is named "visit:npc:<id>" (its bubble goes over it);
+    // `name` is what it goes by in everyone's chat. Said in your room, to everyone who can see it, and kept in its
+    // chat; never as your user, and on a limit of its own (each figure CHATS lines every CHAT_WINDOW). False if not sent.
+    sayAs(id, name, text) {
+      const t = [...String(text == null ? "" : text).replace(/[ --]/g, " ").trim()].slice(0, CHAT_LEN).join("").trim(), now = Date.now();
+      const i = String(id == null ? "" : id), n = String(name == null ? "" : name).replace(/[ --]/g, " ").trim();
+      if (!/^[A-Za-z0-9_.-]{1,40}$/.test(i) || !n || !t || !this._ws || this._ws.readyState !== 1) return false;
+      const said = (this._saidAs.get(i) || []).filter(at => now - at < CHAT_WINDOW);
+      if (said.length >= CHATS) return false;
+      this._saidAs.set(i, said.concat(now));
+      this._send({ type: "say_as", id: i, name: n, text: t });
+      return true;   // (it comes back from the visit-client as your room's line, kept)
+    }
     // The conversation of the room your user is in (8.12): "room:" its owner's key.
     _conversationHere() {
       const r = this._room();
@@ -1803,7 +1818,7 @@
     }
     get chats() {
       const now = performance.now();
-      return [...this._chats.values()].filter(c => c.until > now).map(c => ({ key: c.key, name: c.name, text: c.text, mine: c.mine, owner: c.owner, id: c.id, channel: c.channel }));
+      return [...this._chats.values()].filter(c => c.until > now).map(c => ({ key: c.key, name: c.name, text: c.text, mine: c.mine, owner: c.owner, id: c.id, npc: c.npc || null, channel: c.channel }));
     }
     // A line (8.9) as the visit-client gives it: said in your room by a visitor (their channel), or in a room you are
     // in or see; in a room's chat ("sim"): into yours (home), or in a linked one's (its channel); whispered to you
@@ -1826,7 +1841,8 @@
           : rk ? { key: rk, name: this._nameOf(rk) || (this._peerOf(m.channel) || {}).name || "" } : this._peerOf(m.channel) || {};
         return { ...line, scope: "sim", channel: m.channel, to: { key: String(p.key || ""), name: String(p.name || "") } };
       }
-      return { ...line, id: typeof m.id === "string" ? m.id : null, owner: m.owner === true, channel: m.channel, room: this._hosted.has(m.channel) ? "home" : m.channel };
+      const npc = typeof m.npc === "string" ? m.npc : null;   // one of a room's own figures (sayAs): yours, said with no channel
+      return { ...line, id: typeof m.id === "string" ? m.id : null, npc, owner: m.owner === true, channel: m.channel, room: this._hosted.has(m.channel) || (npc && m.channel == null) ? "home" : m.channel };
     }
     // An office's name, by its key, as this page knows it (the lobby, its links).
     _nameOf(key) {
@@ -1835,7 +1851,7 @@
     }
     _hasContent(c) { return !!c.text || (c.media && c.media.length > 0) || (c.links && c.links.length > 0); }
     _lineOf(c, old) {
-      return { scope: c.scope || "say", key: c.key, name: c.name, text: c.text, mine: !!c.mine, owner: !!c.owner, id: c.id || null, channel: c.channel, to: c.to || null,
+      return { scope: c.scope || "say", key: c.key, name: c.name, text: c.text, mine: !!c.mine, owner: !!c.owner, id: c.id || null, npc: c.npc || null, channel: c.channel, to: c.to || null,
         media: c.media || [], links: c.links || [], conversation: c.conversation || null, mention: !c.mine && this._mentions(c.text),
         at: old ? c.at : Date.now(), ...(old ? { old: true } : {}) };
     }
@@ -2683,7 +2699,7 @@
       s.renderer.render(s.root, s.camera);
       if (this._chats.size || (this.voices.some(x => x.speaking) && !outside) || s.bubbles) {   // lines said in this room (seen from in it or outside), and who you hear speaking
         const b = s.bubbles || (s.bubbles = new Bubbles(s.T)), k = s.unit || 1, hostKey = (w.host || (this.visiting && this.visiting.host) || {}).key;
-        b.draw(s.renderer, s.camera, this._chatsIn(w.channel, c => c.mine ? null : b.over(c.id ? this._body(s, c.id) : s.root.getObjectByName("visit:me"), 2.4 / k, 0.6 / k))
+        b.draw(s.renderer, s.camera, this._chatsIn(w.channel, c => c.mine ? null : b.over(c.id ? this._body(s, c.id) : s.root.getObjectByName(c.npc ? "visit:npc:" + c.npc : "visit:me"), 2.4 / k, 0.6 / k))
           .concat(outside ? [] : this._speakersIn(key => this._speakerIn(s, hostKey, key, b, k))), k);
       }
       w.count++;
@@ -3740,13 +3756,14 @@
       const over = (h, up, gap) => b.over(v._body(this.homeBodies, h.id), up, gap) || (h.pose ? { x: h.pose.x, y: (Number(h.pose.y) || 0) + (h.eyes || 0) + gap * 2, z: h.pose.z } : null);
       let items = v._chatsIn("home", c => {
         if (c.mine) return mine();
+        if (c.npc) return b.over(hk.scene.root.getObjectByName("visit:npc:" + c.npc), 2.4 / u, 0.6 / u);   // one of your room's figures
         const h = v._hosted.get(c.channel);
         return h ? over(h, 2.4 / u, 0.6 / u) : null;
       }), speakers = [];
       for (const p of list) {
         if (!p.w || !p.w.scene) continue;
         const s = p.w.scene;
-        items = items.concat(v._chatsIn(p.w.channel, c => c.mine ? mine() : b.over(c.id ? v._body(s, c.id) : s.root.getObjectByName("visit:me"), 2.4 / u, 0.6 / u)));
+        items = items.concat(v._chatsIn(p.w.channel, c => c.mine ? mine() : b.over(c.id ? v._body(s, c.id) : s.root.getObjectByName(c.npc ? "visit:npc:" + c.npc : "visit:me"), 2.4 / u, 0.6 / u)));
       }
       if (this.showSpeaking && x && x.w.scene) { const s = x.w.scene, hostKey = (x.w.host || {}).key; speakers = v._speakersIn(key => v._speakerIn(s, hostKey, key, b, u)); }
       else if (this.showSpeaking) speakers = v._speakersIn(key => {
