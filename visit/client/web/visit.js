@@ -2337,11 +2337,16 @@
     async _watchStart(w, e) {
       const hk = this._hooks;
       if (!hk) throw new Error("a plot is drawn with this page's own three.js: v.host first");
+      // The whole room again (a resync, its host's page back) while your user is in it: still in, where its host has
+      // them. Dropping the old scene forgets the world's `in`, and the world, not told, would have them home while the
+      // host still has them in, and never step in again (the watch still says inside).
+      const wd = this._world, old = w.scene, stay = !!(old && w.inside && wd && wd.in === w.channel);
       this._sceneDrop(w);
       const T = hk.scene.three, s = this._sceneRead(T, e, w.id);
       s.plot = plotOf(e.plot, s.root, T);
       s.unit = Number(e.unit) > 0 ? Math.min(1000, Number(e.unit)) : 1;
       s.pose = { x: 0, y: 0, z: 0 }; s.yaw0 = 0; s.hostPose = null;
+      if (stay) { for (const k of ["pose", "yaw0", "hist", "vis", "hostPose", "inAt"]) s[k] = old[k]; wd.in = w.channel; }
       s.relight = [legacyLights(Number(e.three), isObj(e.renderer) ? e.renderer : null), legacyLights(Number(T.REVISION), hk.scene.renderer)];
       relight(s.root, ...s.relight);
       this._sceneOwn(s);

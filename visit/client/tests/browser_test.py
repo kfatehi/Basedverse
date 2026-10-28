@@ -427,6 +427,14 @@ async def main():
         await asyncio.sleep(0.4)
         check("B stops flying: A floats down, gently (not at once)", await b.js("v.visitors[0].pose.y") > 2.2, True)
         check("down to B's floor, in B's room and in A's world", (await b.until("Math.abs(v.visitors[0].pose.y) < 0.01", 15), await a.until("Math.abs(room.atY) < 0.05", 15)), (True, True))
+        # B's whole room again while A is in it (a resync, as a page that reloads may ask twice): A stays in, where it was
+        at0 = await a.js("[room.me.x, room.me.z]")
+        await a.js("([...v._watches.values()][0].scene.before = true, v._sceneResync([...v._watches.values()][0]), true)")
+        check("B's room sent whole again while A is in it: A's copy read anew", await a.until("(s => !!s && !s.before)([...v._watches.values()][0].scene)"), True)
+        await asyncio.sleep(1.0)
+        at1 = await a.js("[room.me.x, room.me.z]")
+        check("and A is still in B's room, where it was, and still B's visitor",
+              (await a.js("room.where && room.where.name"), await a.js("room.world.in !== null"), abs(at1[0] - at0[0]) + abs(at1[1] - at0[1]) < 0.3, await b.js("v.visitors.length")), ("B", True, True, 1))
         bx = await b.js("v.visitors[0].pose.x")
         await walk(a, await a.js("room.me.x"), await a.js("room.me.z"), 3.14159 / 2, 2.0, "room.where === null")   # turned round: back out west
         check("A walks back off B's plot: home again, and B's visitor gone", (await a.until("room.where === null && room.world.in === null"), await b.until("v.visitors.length === 0")), (True, True))
