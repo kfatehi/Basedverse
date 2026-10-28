@@ -112,16 +112,40 @@ async def start_client(name, port, url):
     return p, token
 
 
+# The WebGL renderer a page gets, by name: a software one draws on the processor, whose frames are not a GPU's.
+RENDERER = """(() => { const c = document.createElement('canvas'), gl = c.getContext('webgl2') || c.getContext('webgl');
+  if (!gl) return null; const x = gl.getExtension('WEBGL_debug_renderer_info'); return x ? gl.getParameter(x.UNMASKED_RENDERER_WEBGL) : 'masked'; })()"""
+SOFTWARE = re.compile(r"swiftshader|llvmpipe|softpipe|software|basic render", re.I)
+
+
+async def renderers(tabs):
+    """Each Chrome's renderer, said; False if one draws in software or not at all: the test never runs on the processor.
+    The GPU process can come up after the page does, so a software name is asked again for a few seconds."""
+    for t in tabs:
+        for _ in range(20):
+            r = await t.js(RENDERER)
+            if r and r != "masked" and not SOFTWARE.search(r):
+                break
+            await asyncio.sleep(0.5)
+        print("%s draws with %s" % (t.name, r), flush=True)
+        if not r or r == "masked" or SOFTWARE.search(r):
+            print("%s has no GPU renderer: the test does not run in software (SwiftShader takes every core)" % t.name, file=sys.stderr)
+            return False
+    return True
+
+
 async def main():
+    a, b = Tab(CDP_A, "A"), Tab(CDP_B, "B")
+    await a.start()
+    await b.start()
+    if not await renderers((a, b)):
+        return 2
     handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=HERE)
     web = http.server.ThreadingHTTPServer(("127.0.0.1", WEB_PORT), handler)
     threading.Thread(target=web.serve_forever, daemon=True).start()
     async with serve(lobby.handler, "127.0.0.1", LOBBY_PORT, max_size=lobby.LIMITS["frame"]):
         url = "ws://127.0.0.1:%d" % LOBBY_PORT
         (pa, ta), (pb, tb) = await start_client("A", PORT_A, url), await start_client("B", PORT_B, url)
-        a, b = Tab(CDP_A, "A"), Tab(CDP_B, "B")
-        await a.start()
-        await b.start()
         # A's room is made with three.js r128, B's with r160: each draws the other's with its own (a world), or with
         # the other's very release (a visit).
         room = "http://127.0.0.1:%d/room.html%s#port=%d&token=%s"
