@@ -45,7 +45,7 @@ integration log.
   If your server answers some requests elsewhere (a WebSocket upgrade, a static file handler, a second port),
   each of those needs the same check: list them now.
 - **List your routes**, from your router where it can tell you (Flask's `url_map`, Express's router stack,
-  FastAPI's `app.routes`, a table of handlers). Step 10 tests every one.
+  FastAPI's `app.routes`, a table of handlers). Step 12 tests every one.
 - **Ask the user** what, if anything, must work without signing in (a status badge, a webhook). The answer is
   usually nothing.
 
@@ -222,19 +222,71 @@ no use to another site.
 ## Step 9 — Relay what is powerful
 
 Anything your page reached directly on `127.0.0.1` with a token of its own (an agent's terminal, a console, an
-internal API) is now relayed by your server, behind the check: the page calls your server's route, your server
-calls the service with that service's token, which the browser never holds. Remove the token from every page and
-response.
+internal API) now goes through your server, behind the check: the page calls your server's route, and only your
+server reaches the service. The browser never holds the service's token, so every action passes your one gate
+(who, from which page, and later what each account may do), and works from another device too (step 10). Remove
+the token from every page and response, and the route that handed it out.
 
-**Check:** search your page's code and responses for those tokens: none.
+How your server reaches the service depends on where each runs:
 
-## Step 10 — Where it listens
+- **The same network** (both on this machine's, or both in one container's): your server calls the service on
+  `127.0.0.1` and adds its token.
+- **Your server in a container, the service on this machine** (the usual case: a container cannot reach this
+  machine's `127.0.0.1`, and `host.docker.internal` reaches it only on Docker Desktop for macOS and Windows, not
+  on Linux or in WSL): turn the connection around. **The service connects out to your server**, at the port your
+  server publishes on this machine (which any program on it can reach, on any OS), signed in with an API key of
+  its own (`auth-client key add <its name>`), and asks for work:
 
-Your server listens on `127.0.0.1` until this integration is done and checked. On any other address only over
-HTTPS (you, or a proxy in front of you, serve it), or over a network that encrypts its own traffic (WireGuard,
-Tailscale). auth-client and visit-client stay on `127.0.0.1` always.
+  ```
+  service ──GET /api/<it>/next (Bearer <its key>)──▶ server    held until there is work (or ~25 s: nothing, ask again)
+          ◀── {"id": 17, "do": "...", ...} ──                   a request your page made, queued by the server
+  service ──POST /api/<it>/answer {"id": 17, "status", "body"}──▶ server ──▶ the page's request answered
+  ```
 
-**Check:** `ss -ltnp` (or `netstat -an`): auth-client and visit-client on `127.0.0.1` only.
+  Long-polling, as above, is enough for request-and-answer traffic (a screen read every second, a reply); a
+  stream (audio, live video) wants a WebSocket the same way round. The service then listens on no port at all: no
+  token, no `Origin` or `Host` checks of its own. Your server accepts `/next` and `/answer` from that service's key
+  only, never a session or another key, and your page's routes from a session only. The service still checks each
+  job it takes (names, lengths, which keys it may press), so a fault in your server cannot make it do anything.
+
+**visit-client is the exception**: its page connects to it directly (its scene, input and voice are a stream, at
+up to 60 messages a second), with its token from `/v1/visit` (step 8). So Visit works on this machine's own
+browser only; from another device, your server refuses `/api/visit` (step 10), and your page goes on without it.
+
+**Check:** search your page's code and responses for those tokens: none. Each service's own port: none (`ss -ltnp`).
+Its key refused on your page's routes, a session refused on its `/next`.
+
+## Step 10 — Where it listens, and reaching it from another device
+
+Your server listens on `127.0.0.1` until this integration is done and checked, and auth-client and visit-client
+stay on `127.0.0.1` always. To reach your workroom from another device (a laptop or a phone on your network, or
+your tailnet), put an **HTTPS proxy** in front of it, never plain HTTP: your password and session cookie would
+cross the network readable by anyone on it. Any proxy will do; the user picks one:
+
+- **Tailscale**, if they have it: `tailscale serve --bg http://127.0.0.1:<your proxy port>` gives
+  `https://<machine>.<tailnet>.ts.net`, with a certificate every device trusts, on their tailnet only.
+- **Caddy**, beside your server (in its compose file): HTTPS on this machine's LAN address with its own certificate
+  authority (`tls internal`), accepting private addresses only (`remote_ip private_ranges`). Each device trusts
+  its root certificate once (install it, or accept the browser's warning). Find the LAN address in your launcher
+  (Python: connect a UDP socket to any public address and read `getsockname()`), so the user types nothing.
+- Their own (nginx, a router's, a domain with a real certificate).
+
+Give the proxy **a port of its own**: a second listener of your server's, on `127.0.0.1` (published only there
+from a container), where every request is another device's. There, and only there:
+
+- the session cookie is `__Host-session`, with `Secure` (SPEC.md 4);
+- your page's origin is `https://` and the request's `Host` (only the proxy reaches this port, and it serves
+  HTTPS for that name), so writes are checked against it with no setting;
+- the browser's address for `/v1/login` is the proxy's word for it: the last `X-Forwarded-For` entry (the proxy
+  adds it; earlier entries are the client's own claims), or your proxy's `X-Real-IP`;
+- `/api/visit` is refused (step 9).
+
+Your own listener (`127.0.0.1`, plain HTTP) stays as it is: the `session` cookie, your own origins, the connection's
+address. Nothing else changes.
+
+**Check:** `ss -ltnp` (or `netstat -an`): auth-client and visit-client on `127.0.0.1` only; your server's two
+listeners too (or published only there). From another device, through the proxy: you sign in, your pages and their
+relayed services work, `/api/visit` is refused, and plain `http://` to this machine's address answers nothing.
 
 ## Step 11 — Scripts and agents
 
@@ -294,8 +346,11 @@ for method, path in ROUTES:
 - [ ] The cookie: `HttpOnly; SameSite=Strict; Path=/`, `Max-Age` from `expires`; `Secure` and `__Host-` over HTTPS.
 - [ ] Writes with the cookie refused from another `Origin`.
 - [ ] visit-client's token from `/v1/visit`, behind the check; the old `/api/visit` gone; `VISIT_ORIGINS` set.
-- [ ] Local services relayed by the server; their tokens in no page or response.
-- [ ] The server on `127.0.0.1`, or HTTPS, or WireGuard/Tailscale; auth-client and visit-client on `127.0.0.1`.
+- [ ] Local services relayed by the server (in a container: they connect out to it, with keys of their own); their
+      tokens in no page or response, their own ports gone.
+- [ ] The server on `127.0.0.1`; from another device only through an HTTPS proxy, on a listener of its own (the
+      `__Host-` cookie, the origin from `Host`, the proxy's word for the address, no `/api/visit`); auth-client and
+      visit-client on `127.0.0.1`.
 - [ ] The route test (step 12) in your tests, passing.
 - [ ] Nothing logs a password, a session, a key or a token.
 
@@ -313,4 +368,5 @@ programs) and run `auth-client migrate` (and `visit-client migrate`).
   service's token.
 - Don't take a message for the login page from the URL, or redirect to a `next` that is not a path on your site.
 - Don't pass the superuser's URL (`VISIT_DATABASE_ADMIN_URL`) to visit-client, auth-client, or your server.
-- Don't listen beyond `127.0.0.1` without HTTPS or an encrypted network.
+- Don't listen beyond `127.0.0.1` without HTTPS or an encrypted network, and don't open a local service's port to
+  your server's container (`route_localnet`, binding it to `0.0.0.0` or Docker's bridge): have it connect out.

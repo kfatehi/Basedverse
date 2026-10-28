@@ -156,6 +156,9 @@ Write the plan in the conversation:
 - **Sign-in (auth-client)**, offered (the rules above): its steps from auth/INTEGRATING.md, each with its check; the
   public routes the user named (or none); the owner's account made by the user in a terminal; the route test (its
   step 12) added to the workroom's tests.
+- **From another device** (0.21.1, auth/INTEGRATING.md steps 9 and 10), once there is a sign-in: ask whether they want
+  it, and which proxy (Tailscale if they have it; Caddy on the LAN; their own). Local services the page used directly
+  (a console) connect out to the server instead. Visit stays on the workroom's machine.
 
 Wait for "go" (or the user's own word for it).
 

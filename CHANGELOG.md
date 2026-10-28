@@ -9,6 +9,23 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.21.1 — 2026-10-28
+
+**Your workroom from another device, and local services relayed** ([auth/INTEGRATING.md](auth/INTEGRATING.md),
+steps 9 and 10). A workroom's server in a container cannot reach this machine's `127.0.0.1` (on Linux and in WSL,
+`host.docker.internal` does not lead there), so a local service it relays (an agent's console, say) now **connects
+out to the server**, at the port the server publishes, with an API key of its own, and asks it for work: it listens on
+nothing, and the server, which checks the session first, is its only way in. And another device reaches the
+workroom through an **HTTPS proxy** of the user's choice (Tailscale's `tailscale serve`, Caddy with its own
+certificate on the LAN, their own), on a listener of the server's own, where every request is another device's:
+the `__Host-session` cookie, the page's origin from `Host`, the proxy's word for the address, and no Visit (its page
+connects to visit-client directly, so it stays on this machine). Nothing in visit-client or auth-client changed.
+
+### What an integration does
+
+1. Nothing, to stay as it is (visit-client and auth-client 0.21.1 are 0.21.0's, renumbered).
+2. To use the workroom from another device: offer it (the `/basedverse:visit` skill asks), then steps 9 and 10.
+
 ## v0.21.0 — 2026-10-28
 
 **auth-client: a sign-in for your workroom** ([auth/INTEGRATING.md](auth/INTEGRATING.md)). A workroom's server took
