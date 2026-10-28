@@ -9,7 +9,9 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
-## v0.20.2 — 2026-10-28
+## v0.20.3 — 2026-10-28
+
+(v0.20.2 was tagged but never released: this is it, with visit.js saying its version.)
 
 **Chat you can read, as WoW has it.** In the chat window, whoever said a line is in their own colour: one of seven,
 by their key, so the same on everyone's screen, as WoW colours a name by its class. A line too long for one row goes
@@ -28,7 +30,7 @@ Chrome would draw in software, and keeps each Chrome's own log (`chrome-<port>.l
 
 ### What an integration does
 
-1. Get visit-client 0.20.2 (then `visit-client migrate`, as after every upgrade: nothing new to migrate this time).
+1. Get visit-client 0.20.3 (then `visit-client migrate`, as after every upgrade: nothing new to migrate this time).
 
 ## v0.20.1 — 2026-10-27
 
