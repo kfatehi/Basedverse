@@ -32,6 +32,12 @@ two hooks, and two pieces everyone drops in unchanged.
 </p>
 
 <p align="center">
+  <img alt="The terrorist sweatshop with a friend over: blocky agents at their desks under the kanban board, two people walking among them, the friend's room next door with GOOSHY written on its ground, the Visit panel, and the chat window with lines from both" src=".github/assets/friend-over.png">
+  <br>
+  <em>With a friend over: Gooshy's room is next door in your world, its name on the ground, and you talk as you walk.</em>
+</p>
+
+<p align="center">
   <img alt="The chat window: a picture shared into a friend's room's chat, lines from both rooms, and its box, talking to Gooshy's room, with buttons for what was shared, the room's voice and sound" src=".github/assets/chat.png" width="689">
   <br>
   <strong>Chat, share assets, and do voice calls</strong>
