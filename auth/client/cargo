@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# cargo, in the official Rust image: nothing to install on this machine. It shares visit-client's Docker volumes
+# (visit-cargo: the crate registry; visit-target: the build output, where both binaries land), so what the two
+# have in common is built once. The network is the host's, so a test can reach a database on 127.0.0.1.
+#   ./cargo build --release        ./cargo test        ./cargo run -- --help
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+image="${RUST_IMAGE:-rust:1-bookworm}"
+for v in visit-cargo visit-target; do docker volume create "$v" >/dev/null; done
+docker run --rm -v visit-cargo:/cargo -v visit-target:/target "$image" chown "$(id -u):$(id -g)" /cargo /target
+tty=(); [ -t 0 ] && [ -t 1 ] && tty=(-t)
+exec docker run --rm -i "${tty[@]}" -u "$(id -u):$(id -g)" -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/target \
+  -v visit-cargo:/cargo -v visit-target:/target -v "$here":/src -w /src --network host "$image" cargo "$@"

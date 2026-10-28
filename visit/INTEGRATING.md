@@ -225,7 +225,7 @@ Every setting is a flag too (`VISIT_LOBBY` is `--lobby`, `VISIT_ORIGINS` is `--o
 
 `VISIT_ORIGINS` is your page's origin (scheme, host and port, as the address bar shows them; list
 `http://127.0.0.1:…` too if your page is ever opened that way). visit-client then refuses any other site's
-page, even one that got hold of the token.
+page, even one that got hold of the token. **Always set it**: blank lets any page with the token in.
 
 If your sim runs in a container, run visit-client on the host machine (or in the same network namespace
 as the browser): it must be reachable at `127.0.0.1:<port>` **from the browser**, and must not be
@@ -239,11 +239,14 @@ published on any other address.
 Your page needs `{ port, token }`. Give it by a route **other websites cannot read**. Pick the one that
 fits your sim:
 
-- **Your sim has a server** (the page is served by it): add a route that answers a same-origin request,
-  e.g. `GET /api/visit` → `{"port": 7401, "token": "…"}`, read from the token file. Send no CORS headers
-  on it: that keeps other sites' pages from reading it. And answer it only when the request's `Host` header
-  is `localhost` or `127.0.0.1` (any port): that turns away DNS-rebinding sites, and anyone on your network
-  asking your server by its LAN address.
+- **Your sim has a server** (the page is served by it): give the token only to the signed-in owner. With
+  auth-client ([../auth/INTEGRATING.md](../auth/INTEGRATING.md), from 0.21: a real sign-in for your server), a
+  route behind its session check returns `POST /v1/visit`'s `{"port": 7401, "token": "…"}`. Without it, add a
+  route that answers a same-origin request, e.g. `GET /api/visit` → `{"port": 7401, "token": "…"}`, read from
+  the token file; send no CORS headers on it (that keeps other sites' pages from reading it), and answer it only
+  when the request's `Host` header is `localhost` or `127.0.0.1` (any port). That `Host` check turns away
+  DNS-rebinding sites, and nothing else: a program on your network can send any `Host` it likes. **What keeps
+  the network out is your server listening on `127.0.0.1`**, until it has a sign-in (auth-client).
 - **Your page is static files**: have the launcher write `visit.json` (`{"port", "token"}`) beside the
   page, mode 0600, and fetch it from the page. Do not commit it.
 - **Your launcher opens the browser**: put it in the URL fragment,

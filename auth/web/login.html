@@ -1,0 +1,332 @@
+<!doctype html>
+<!--
+  auth-client's sign-in page (../INTEGRATING.md): one page, nothing from elsewhere. Your workroom's server serves it
+  at GET /login. Restyle it as you like, and keep:
+  - the form: POST /login with `user`, `password` and a hidden `next`, the fields marked autocomplete="username" and
+    autocomplete="current-password" (so password managers fill them);
+  - its messages chosen by a code in the URL (?e=wrong, ?e=wait, ?e=expired), never text taken from the URL;
+  - `next` only as a path on this site (it starts with / but not // or /\), else /. Your server checks it again.
+  There is no way to sign up here, ever: accounts are made in a terminal (auth-client user add <name>).
+  The world behind the form is drawn on a small canvas, scaled up to whole pixels as the logo's are; with reduced
+  motion asked for, it holds still.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="dark">
+<title>Sign in · Basedverse</title>
+<style>
+:root {
+  --ink: #e6edf3; --dim: #9fb3c8; --night: #0b1324; --panel: #101b31; --edge: #e6edf3; --shade: #050912;
+  --blue: #08a8ff; --green: #a3e048; --gold: #ffd93d; --red: #ff6b6b;
+  --px: 4px;   /* one pixel of the frames, as the logo's */
+  --mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--night); color: var(--ink); font: 700 15px/1.4 var(--mono); overflow-x: hidden; }
+#world { position: fixed; inset: 0; width: 100%; height: 100%; image-rendering: pixelated; image-rendering: crisp-edges; }
+main { position: relative; min-height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 28px; padding: 32px 16px 48px; }
+
+.logo { margin: 0; width: min(380px, 78vw); filter: drop-shadow(0 var(--px) 0 var(--shade)) drop-shadow(0 0 18px rgba(8, 168, 255, .35)); animation: bob 2.4s steps(2, jump-none) infinite; }
+.logo svg { display: block; width: 100%; height: auto; }
+@keyframes bob { 50% { transform: translateY(calc(-1 * var(--px))); } }
+
+/* A frame of whole pixels: the notched edge, a dark ring round it, and its shadow on the ground. */
+.panel {
+  width: min(380px, 100%); padding: 22px 22px 18px; background: var(--panel);
+  box-shadow:
+    0 calc(-1 * var(--px)) 0 0 var(--edge), 0 var(--px) 0 0 var(--edge), calc(-1 * var(--px)) 0 0 0 var(--edge), var(--px) 0 0 0 var(--edge),
+    0 calc(-2 * var(--px)) 0 0 var(--shade), 0 calc(2 * var(--px)) 0 0 var(--shade), calc(-2 * var(--px)) 0 0 0 var(--shade), calc(2 * var(--px)) 0 0 0 var(--shade),
+    calc(-1 * var(--px)) calc(-1 * var(--px)) 0 0 var(--shade), var(--px) calc(-1 * var(--px)) 0 0 var(--shade),
+    calc(-1 * var(--px)) var(--px) 0 0 var(--shade), var(--px) var(--px) 0 0 var(--shade),
+    calc(3 * var(--px)) calc(4 * var(--px)) 0 0 rgba(0, 0, 0, .45);
+}
+.panel h1 { margin: 0 0 16px; font-size: 13px; letter-spacing: .3em; text-transform: uppercase; color: var(--gold); text-align: center; text-shadow: 0 2px 0 var(--shade); }
+.panel h1::before, .panel h1::after { content: "◆"; color: var(--blue); margin: 0 .7em; font-size: 10px; vertical-align: 2px; }
+label { display: block; margin: 12px 0 6px; font-size: 12px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); }
+input:not([type=hidden]) {
+  display: block; width: 100%; padding: 10px 12px; border: 0; border-radius: 0; outline: 0;
+  font: 700 16px var(--mono); color: var(--ink); background: var(--shade); caret-color: var(--green);
+  box-shadow: inset 0 var(--px) 0 0 #000, inset var(--px) 0 0 0 #000, 0 0 0 2px #2a3a57;
+}
+input:focus { box-shadow: inset 0 var(--px) 0 0 #000, inset var(--px) 0 0 0 #000, 0 0 0 2px var(--green), 0 0 14px rgba(163, 224, 72, .35); }
+button {
+  display: block; width: 100%; margin-top: 22px; padding: 12px; border: 0; border-radius: 0; cursor: pointer;
+  font: 800 17px var(--mono); letter-spacing: .12em; text-transform: uppercase; color: #06210f;
+  background: linear-gradient(#c4f06a 0 50%, var(--green) 50% 100%);
+  box-shadow: 0 var(--px) 0 0 #4f7d1c, 0 calc(2 * var(--px)) 0 0 var(--shade), 0 0 0 2px var(--shade);
+  transition: filter .1s;
+}
+button:hover { filter: brightness(1.12); }
+button:focus-visible { outline: 2px solid var(--gold); outline-offset: 4px; }
+button:active, button[disabled] { transform: translateY(var(--px)); box-shadow: 0 0 0 0 #4f7d1c, 0 var(--px) 0 0 var(--shade), 0 0 0 2px var(--shade); }
+button[disabled] { cursor: progress; filter: saturate(.6); }
+.press { margin: 14px 0 0; text-align: center; font-size: 11px; letter-spacing: .25em; text-transform: uppercase; color: var(--gold); animation: blink 1.1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.realm { display: flex; align-items: center; justify-content: center; gap: 8px; margin: 16px 0 0; padding-top: 12px; border-top: 2px dashed #22314d; font-size: 11px; letter-spacing: .1em; color: var(--dim); }
+.realm i { width: 8px; height: 8px; background: var(--green); box-shadow: 0 0 8px var(--green); }
+.realm b { color: var(--ink); font-weight: 700; overflow-wrap: anywhere; }
+.realm[hidden] { display: none; }
+
+/* What went wrong, chosen by a code (?e=): never text from the URL. */
+.msg { display: flex; gap: 10px; align-items: flex-start; margin: 0 0 6px; padding: 10px 12px; font-size: 13px; color: #ffd0d0; background: #3a1018; box-shadow: 0 0 0 2px var(--red); }
+.msg::before { content: "!"; flex: none; width: 18px; height: 18px; display: grid; place-items: center; color: #3a1018; background: var(--red); font-size: 13px; }
+.msg.wait { color: #fff0bf; background: #3a2c08; box-shadow: 0 0 0 2px var(--gold); }
+.msg.wait::before { content: "⧗"; color: #3a2c08; background: var(--gold); }
+.msg[hidden] { display: none; }
+
+.hint { max-width: 380px; margin: 0; text-align: center; font-size: 12px; font-weight: 400; color: var(--dim); text-shadow: 0 1px 2px #000, 0 0 6px #000; }
+.hint code { color: var(--ink); background: rgba(5, 9, 18, .8); padding: 1px 6px; white-space: nowrap; }
+
+@media (max-height: 640px) { main { gap: 16px; } .logo { width: min(260px, 70vw); } }
+@media (prefers-reduced-motion: reduce) { .logo, .press { animation: none; } }
+</style>
+</head>
+<body>
+<canvas id="world" aria-hidden="true"></canvas>
+<main>
+  <div class="logo"><svg role="img" aria-label="Basedverse" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 602 366" shape-rendering="crispEdges"><path fill="#0681e3" d="M48 96h64v8h-64z"/><path fill="#08a8ff" d="M48 96h64v2h-64z"/><path fill="#0985db" d="M32 104h96v8h-96z"/><path fill="#0cadff" d="M32 104h16v2h-16zM112 104h16v2h-16z"/><path fill="#0c89d4" d="M24 112h112v8h-112z"/><path fill="#10b2ff" d="M24 112h8v2h-8zM128 112h8v2h-8z"/><path fill="#0f8dcd" d="M16 120h128v8h-128z"/><path fill="#14b7ff" d="M16 120h8v2h-8zM136 120h8v2h-8z"/><path fill="#084e71" d="M56 128h48v4h-48z"/><path fill="#1291c5" d="M16 128h40v8h-40zM104 128h40v8h-40z"/><path fill="#0a506c" d="M40 136h16v4h-16zM104 136h16v4h-16z"/><path fill="#1694be" d="M16 136h24v8h-24zM120 136h24v8h-24z"/><path fill="#0c5169" d="M32 144h8v4h-8zM120 144h8v4h-8z"/><path fill="#1998b7" d="M16 144h16v8h-16zM128 144h16v8h-16z"/><path fill="#1c9caf" d="M16 152h24v8h-24zM120 152h24v8h-24z"/><path fill="#24cbe4" d="M32 152h8v2h-8zM120 152h8v2h-8z"/><path fill="#11585c" d="M16 168h8v4h-8zM136 168h8v4h-8z"/><path fill="#1fa0a8" d="M16 160h24v8h-24zM120 160h24v8h-24z"/><path fill="#25a19c" d="M24 168h24v8h-24zM112 168h24v8h-24z"/><path fill="#30d1cb" d="M40 168h8v2h-8zM112 168h8v2h-8z"/><path fill="#18594f" d="M24 184h8v4h-8zM128 184h8v4h-8z"/><path fill="#2ba290" d="M24 176h32v8h-32zM104 176h32v8h-32z"/><path fill="#38d3bb" d="M48 176h8v2h-8zM104 176h8v2h-8z"/><path fill="#1b5a49" d="M32 192h8v4h-8zM120 192h8v4h-8z"/><path fill="#31a384" d="M32 184h32v8h-32zM96 184h32v8h-32z"/><path fill="#40d4ac" d="M56 184h8v2h-8zM96 184h8v2h-8z"/><path fill="#1e5a42" d="M40 200h8v4h-8zM112 200h8v4h-8z"/><path fill="#37a478" d="M40 192h32v8h-32zM88 192h32v8h-32z"/><path fill="#48d59c" d="M64 192h8v2h-8zM88 192h8v2h-8z"/><path fill="#225b3b" d="M48 208h8v4h-8zM104 208h8v4h-8z"/><path fill="#3da56c" d="M48 200h32v8h-32zM104 200h8v8h-8z"/><path fill="#2c774e" d="M80 200h24v8h-24z"/><path fill="#399b65" d="M80 200h8v2h-8z"/><path fill="#4fd68c" d="M72 200h8v2h-8z"/><path fill="#307845" d="M96 208h8v8h-8z"/><path fill="#42a660" d="M56 208h40v8h-40z"/><path fill="#48a754" d="M64 216h40v8h-40z"/><path fill="#34783c" d="M56 216h8v8h-8z"/><path fill="#4ea848" d="M48 224h8v8h-8zM80 224h32v8h-32z"/><path fill="#65da5e" d="M48 224h8v2h-8zM104 224h8v2h-8z"/><path fill="#2b5c28" d="M80 232h8v4h-8z"/><path fill="#1f431d" d="M72 232h8v4h-8z"/><path fill="#387934" d="M56 224h24v8h-24z"/><path fill="#57ad48" d="M40 232h32v8h-32zM88 232h32v8h-32z"/><path fill="#71e15e" d="M40 232h8v2h-8zM112 232h8v2h-8z"/><path fill="#305f28" d="M56 240h16v4h-16zM88 240h16v4h-16z"/><path fill="#61b24b" d="M32 240h24v8h-24zM104 240h24v8h-24z"/><path fill="#7ee762" d="M32 240h8v2h-8zM120 240h8v2h-8z"/><path fill="#6ab84e" d="M24 248h32v8h-32zM104 248h32v8h-32z"/><path fill="#8aef65" d="M24 248h8v2h-8zM128 248h8v2h-8z"/><path fill="#3a652b" d="M48 256h8v4h-8zM104 256h8v4h-8z"/><path fill="#74bd50" d="M24 256h24v8h-24zM112 256h24v8h-24z"/><path fill="#40682c" d="M40 264h8v4h-8zM112 264h8v4h-8z"/><path fill="#7dc253" d="M16 264h24v8h-24zM120 264h24v8h-24z"/><path fill="#a2fc6c" d="M16 264h8v2h-8zM136 264h8v2h-8z"/><path fill="#456b2e" d="M32 272h8v4h-8zM120 272h8v4h-8z"/><path fill="#86c856" d="M8 272h24v8h-24zM128 272h24v8h-24z"/><path fill="#aeff70" d="M8 272h8v2h-8zM144 272h8v2h-8z"/><path fill="#90cd59" d="M8 280h24v8h-24zM128 280h24v8h-24z"/><path fill="#99d35b" d="M8 288h24v8h-24zM128 288h24v8h-24z"/><path fill="#547432" d="M24 296h8v4h-8zM128 296h8v4h-8z"/><path fill="#9cd45c" d="M8 296h16v8h-16zM136 296h16v8h-16zM8 304h24v8h-24zM128 304h24v8h-24zM8 312h24v8h-24zM128 312h24v8h-24zM8 320h144v8h-144zM16 328h128v8h-128zM16 336h128v8h-128zM32 344h96v8h-96z"/><path fill="#cbff78" d="M24 304h8v2h-8zM128 304h8v2h-8zM32 320h96v2h-96z"/><path fill="#567533" d="M8 328h8v4h-8zM144 328h8v4h-8zM16 344h16v4h-16zM128 344h16v4h-16zM32 352h96v4h-96z"/><path fill="#2b3036" d="M70 26h20v5h-20zM65 31h15v5h-15zM85 31h10v5h-10zM60 36h40v5h-40zM70 46h5v5h-5zM85 46h5v5h-5z"/><path fill="#8f959c" d="M80 31h5v5h-5zM65 91h10v5h-10zM85 91h10v5h-10z"/><path fill="#c9b48e" d="M65 41h30v5h-30zM65 46h5v5h-5zM75 46h10v5h-10zM90 46h5v5h-5zM65 51h30v5h-30zM60 71h5v5h-5zM95 71h5v5h-5z"/><path fill="#2f5a9a" d="M60 56h5v5h-5zM95 56h5v5h-5zM60 61h5v5h-5zM95 61h5v5h-5zM60 66h5v5h-5zM95 66h5v5h-5z"/><path fill="#3f6fb5" d="M65 56h30v5h-30zM65 61h30v5h-30zM65 66h30v5h-30zM65 71h30v5h-30z"/><path fill="#4a3326" d="M65 76h30v5h-30zM65 81h10v5h-10zM85 81h10v5h-10zM65 86h10v5h-10zM85 86h10v5h-10z"/><path fill="#e6edf3" d="M174 303h28v7h-28zM370 303h7v7h-7zM174 310h7v7h-7zM202 310h7v7h-7zM370 310h7v7h-7zM174 317h7v7h-7zM202 317h7v7h-7zM223 317h21v7h-21zM265 317h28v7h-28zM307 317h21v7h-21zM349 317h28v7h-28zM174 324h28v7h-28zM244 324h7v7h-7zM258 324h7v7h-7zM300 324h7v7h-7zM328 324h7v7h-7zM342 324h7v7h-7zM370 324h7v7h-7zM174 331h7v7h-7zM202 331h7v7h-7zM223 331h28v7h-28zM265 331h21v7h-21zM300 331h35v7h-35zM342 331h7v7h-7zM370 331h7v7h-7zM174 338h7v7h-7zM202 338h7v7h-7zM216 338h7v7h-7zM244 338h7v7h-7zM286 338h7v7h-7zM300 338h7v7h-7zM342 338h7v7h-7zM370 338h7v7h-7zM174 345h28v7h-28zM223 345h28v7h-28zM258 345h28v7h-28zM307 345h21v7h-21zM349 345h28v7h-28z"/><path fill="#9da7b3" d="M384 317h7v7h-7zM412 317h7v7h-7zM433 317h21v7h-21zM468 317h7v7h-7zM482 317h14v7h-14zM517 317h28v7h-28zM559 317h21v7h-21zM384 324h7v7h-7zM412 324h7v7h-7zM426 324h7v7h-7zM454 324h7v7h-7zM468 324h14v7h-14zM496 324h7v7h-7zM510 324h7v7h-7zM552 324h7v7h-7zM580 324h7v7h-7zM384 331h7v7h-7zM412 331h7v7h-7zM426 331h35v7h-35zM468 331h7v7h-7zM517 331h21v7h-21zM552 331h35v7h-35zM391 338h7v7h-7zM405 338h7v7h-7zM426 338h7v7h-7zM468 338h7v7h-7zM538 338h7v7h-7zM552 338h7v7h-7zM398 345h7v7h-7zM433 345h21v7h-21zM468 345h7v7h-7zM510 345h28v7h-28zM559 345h21v7h-21z"/></svg></div>
+  <form class="panel" method="post" action="/login">
+    <h1>Sign in</h1>
+    <p class="msg" id="msg" role="alert" hidden></p>
+    <label for="user">Name</label>
+    <input id="user" name="user" autocomplete="username" autocapitalize="none" autocorrect="off" spellcheck="false" maxlength="64" required autofocus>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password" maxlength="1024" required>
+    <input type="hidden" name="next" id="next" value="/">
+    <button type="submit">▶ Enter world</button>
+    <p class="press" aria-hidden="true">Press Enter</p>
+    <p class="realm"><i></i>Workroom <b id="realm"></b></p>
+  </form>
+  <p class="hint">No account? They are made on this machine, in a terminal: <code>auth-client user add &lt;name&gt;</code></p>
+</main>
+<script>
+"use strict";
+// ---------- the form ----------
+(() => {
+  const q = new URLSearchParams(location.search);
+  // What went wrong, by its code: these words, never the URL's.
+  const MESSAGES = {
+    wrong: ["That name and password do not match.", ""],
+    wait: ["Too many tries. Wait a little, then try again.", "wait"],
+    expired: ["Your session ended. Sign in again.", ""],
+  };
+  const code = q.get("e") || "", m = Object.hasOwn(MESSAGES, code) ? MESSAGES[code] : null, box = document.getElementById("msg");
+  if (m) { box.textContent = m[0]; box.className = "msg " + m[1]; box.hidden = false; }
+  // Where to go once signed in: a path on this site only (it starts with / but not // or /\), else /.
+  const next = q.get("next") || "/";
+  document.getElementById("next").value = /^\/(?![/\\])/.test(next) && !/[\\\u0000-\u001f\u007f]/.test(next) ? next : "/";
+  if (location.host) document.getElementById("realm").textContent = location.host;   // which workroom this is: yours?
+  else document.querySelector(".realm").hidden = true;
+  const form = document.querySelector("form");
+  form.addEventListener("submit", () => { const b = form.querySelector("button"); b.disabled = true; b.textContent = "Entering…"; });
+  addEventListener("pageshow", e => { if (e.persisted) { const b = form.querySelector("button"); b.disabled = false; b.textContent = "▶ Enter world"; } });   // back, from the next page
+})();
+
+// ---------- the world behind it ----------
+// Drawn at a few hundred pixels across and scaled up by a whole number, as the logo's pixels are. Layers further off
+// move slower as the view drifts east: the sky, its moon and the figure-eight portal hold still; an aurora in the
+// logo's blue and green; far mountains, floating islands with a workroom on each, hills, the ground; fireflies; and
+// someone walking. The same every visit (a seeded random).
+(() => {
+  const canvas = document.getElementById("world"), g = canvas.getContext("2d");
+  const still = matchMedia("(prefers-reduced-motion: reduce)");
+  const LOOP = 1024;   // the world's width before it repeats, in its pixels
+  const TAU = Math.PI * 2;
+  let W = 320, H = 180, scale = 4, layers = null, stars = [], flies = [], pointer = 0;
+
+  const seeded = seed => () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 4294967296; };
+  // A height that repeats every LOOP: a few waves whose periods divide it.
+  const ridge = (rand, waves) => { const w = waves.map(([k, a]) => [k, a, rand() * TAU]); return x => w.reduce((s, [k, a, p]) => s + a * Math.sin(TAU * k * x / LOOP + p), 0); };
+  const px = (c, x, y, w = 1, h = 1) => { c.fillRect(Math.round(x), Math.round(y), w, h); };
+  const shade = (c, color) => { c.fillStyle = color; };
+
+  function size() {
+    const sw = innerWidth, sh = innerHeight;
+    scale = Math.max(2, Math.floor(Math.min(sw / 320, sh / 180)));
+    W = Math.ceil(sw / scale); H = Math.ceil(sh / scale);
+    canvas.width = W; canvas.height = H;
+    canvas.style.width = W * scale + "px"; canvas.style.height = H * scale + "px";
+    build();
+  }
+
+  // ----- what is drawn once a size: the sky, and each moving layer as a strip LOOP wide -----
+  function build() {
+    const rand = seeded(20261028), horizon = Math.round(H * 0.66);
+    const wide = () => { const c = document.createElement("canvas"); c.width = LOOP; c.height = H; return c; };
+
+    // The sky: bands from night to the horizon's teal, each edge dithered.
+    const sky = document.createElement("canvas"); sky.width = W; sky.height = H;
+    const s = sky.getContext("2d"), BANDS = ["#060a18", "#081024", "#0b1730", "#0e1e3c", "#112848", "#143253", "#183e5c", "#1d4b63", "#235a69"];
+    const band = horizon / BANDS.length;
+    BANDS.forEach((c, i) => {
+      shade(s, c); s.fillRect(0, Math.floor(i * band), W, H);
+      if (i) for (let x = 0; x < W; x += 2) px(s, x + (i & 1), Math.floor(i * band) - 1);   // the checkerboard step
+    });
+    // The moon, with its craters and a dithered glow.
+    const mx = Math.round(W * 0.84), my = Math.round(H * 0.16), r = 9;
+    for (let y = -r * 2; y <= r * 2; y++) for (let x = -r * 2; x <= r * 2; x++) {
+      const d = Math.hypot(x, y);
+      if (d > r && d < r * 1.9 && (x + y) % 2 === 0 && rand() < 0.5 * (1 - (d - r) / (r * 0.9))) { shade(s, "rgba(200,220,255,.18)"); px(s, mx + x, my + y); }
+    }
+    for (let y = -r; y <= r; y++) for (let x = -r; x <= r; x++) if (x * x + y * y <= r * r) {
+      shade(s, x * x + y * y > (r - 1.5) ** 2 ? "#c9d6e8" : x + y > 4 ? "#d9e3f0" : "#f1f5fb"); px(s, mx + x, my + y);
+    }
+    shade(s, "#bfcbe0"); [[-3, -2, 2], [3, 2, 2], [-1, 4, 1], [4, -4, 1]].forEach(([x, y, w]) => px(s, mx + x, my + y, w, w));
+
+    // Stars: most still, some twinkling (drawn each frame).
+    stars = [];
+    for (let i = 0; i < Math.round(W * H / 380); i++) {
+      const x = Math.floor(rand() * W), y = Math.floor(rand() * horizon * 0.92), b = rand();
+      if (Math.hypot(x - mx, y - my) < r * 2.2) continue;
+      if (b < 0.25) stars.push({ x, y, p: rand() * TAU, v: 0.6 + rand() * 1.6 });
+      else { shade(s, b < 0.7 ? "#3d4f78" : b < 0.92 ? "#8fa3cc" : "#e6edf3"); px(s, x, y); }
+    }
+
+    // Far mountains: jagged, a lighter ridge where the moon catches them.
+    const far = wide(), f = far.getContext("2d"), fh = ridge(rand, [[3, 9], [7, 5], [13, 3], [29, 2], [61, 1.2]]);
+    for (let x = 0; x < LOOP; x++) {
+      const top = Math.round(horizon - H * 0.12 + fh(x));
+      shade(f, "#0c1a30"); f.fillRect(x, top, 1, H - top);
+      shade(f, "#1b3150"); px(f, x, top); if (fh(x + 1) < fh(x)) px(f, x, top + 1);
+    }
+
+    // Floating islands, each with a workroom on it (lit windows, a door, a light on the roof): drawn each frame
+    // from these, as they bob.
+    const isles = [];
+    for (let i = 0; i < 5; i++) {
+      const w = 22 + Math.floor(rand() * 18), depth = 9 + Math.floor(rand() * 7), c = document.createElement("canvas");
+      c.width = w + 4; c.height = depth + 16;
+      const k = c.getContext("2d"), base = 14, room = { w: 8 + Math.floor(rand() * 6), h: 6 + Math.floor(rand() * 3) };
+      for (let row = 0; row < depth; row++) {   // the rock, narrowing as it goes down
+        const half = Math.max(1, Math.round((w / 2) * Math.pow(1 - row / depth, 0.75) + (rand() - 0.5) * 2));
+        shade(k, row < 2 ? "#2e8a47" : row < depth * 0.5 ? "#3a2c4e" : "#271d38"); k.fillRect(2 + w / 2 - half, base + row, half * 2, 1);
+      }
+      shade(k, "#48b864"); for (let x = 2; x < w + 2; x += 1 + Math.floor(rand() * 3)) px(k, x, base - 1);   // grass
+      shade(k, "#1f6a36"); for (let j = 0; j < 4; j++) px(k, 4 + rand() * (w - 6), base + 2, 1, 1 + Math.floor(rand() * 3));   // roots
+      const rx = 2 + Math.floor((w - room.w) / 2), ry = base - room.h;
+      shade(k, "#26304a"); k.fillRect(rx, ry, room.w, room.h);
+      shade(k, "#7a3344"); for (let j = 0; j < 3; j++) k.fillRect(rx - 1 + j, ry - 1 - j, room.w + 2 - j * 2, 1);   // its roof
+      shade(k, "#120f1a"); k.fillRect(rx + 1, base - 3, 2, 3);   // its door
+      isles.push({ img: c, x: (i + rand() * 0.6) * LOOP / 5, y: 0.26 + rand() * 0.16, wins: [[rx + 4, ry + 1], [rx + room.w - 3, ry + 1], [rx + 4, ry + 3]].filter(([x]) => x < rx + room.w - 1), roof: [rx + Math.floor(room.w / 2), ry - 4], p: rand() * TAU });
+    }
+
+    // Hills: rounder, with pines.
+    const hills = wide(), h = hills.getContext("2d"), hh = ridge(rand, [[2, 6], [5, 4], [11, 2], [23, 1]]);
+    for (let x = 0; x < LOOP; x++) {
+      const top = Math.round(horizon + H * 0.04 + hh(x));
+      shade(h, "#0d2626"); h.fillRect(x, top, 1, H - top);
+      shade(h, "#1c4a42"); px(h, x, top);
+    }
+    for (let i = 0; i < 70; i++) {
+      const x = Math.floor(rand() * LOOP), top = Math.round(horizon + H * 0.04 + hh(x)), t = 5 + Math.floor(rand() * 6);
+      shade(h, "#0a1e1e"); for (let j = 0; j < t; j++) h.fillRect(x - Math.floor(j / 2), top - t + j, 1 + Math.floor(j / 2) * 2, 1);
+    }
+
+    // The ground: grass, a path, flowers.
+    const ground = wide(), d = ground.getContext("2d"), top = Math.round(H * 0.86), gh = ridge(rand, [[4, 1.2], [9, 0.8]]);
+    for (let x = 0; x < LOOP; x++) {
+      const y = Math.round(top + gh(x));
+      shade(d, "#0a1f14"); d.fillRect(x, y, 1, H - y);
+      shade(d, "#1f5d3a"); px(d, x, y); if (rand() < 0.35) px(d, x, y - 1);
+      shade(d, "#2b2219"); d.fillRect(x, y + 4, 1, 2);   // the path
+      shade(d, "#3a2e22"); if (rand() < 0.3) px(d, x, y + 4);
+    }
+    for (let i = 0; i < 60; i++) { const x = Math.floor(rand() * LOOP); shade(d, ["#ff6b6b", "#ffd93d", "#8fd3ff", "#e6a0ff"][i % 4]); px(d, x, Math.round(top + gh(x)) + 1 + Math.floor(rand() * 2)); }
+
+    flies = Array.from({ length: Math.round(W / 12) }, () => ({ x: rand() * LOOP, y: horizon + rand() * (H - horizon) * 0.8, p: rand() * TAU, v: 0.5 + rand() }));
+    layers = { sky, far, isles, hills, ground, horizon, top: Math.round(H * 0.86), gh };
+  }
+
+  // ----- each frame -----
+  // Someone walking (the logo's own), in two steps: a hat, a face, a blue shirt, brown trousers.
+  const WALKER = [
+    "..KKK..", ".KKkKK.", "KKKKKKK", ".SSSSS.", ".SeSeS.", ".SSSSS.", ".BBBBB.", "SBBBBBS", ".BBBBB.",
+  ], LEGS = [[".PP.PP.", ".PP.PP.", ".FF.FF."], ["..PPP..", ".PP.PP.", "FF...FF"]];
+  const COLORS = { K: "#1b1f2a", k: "#9aa4b8", S: "#f2c9a0", e: "#1b1f2a", B: "#2f6fd0", P: "#6b4226", F: "#14161c" };
+
+  function aurora(t) {
+    g.globalCompositeOperation = "lighter";
+    for (const [base, amp, speed, k] of [[0.2, 0.06, 0.25, 0], [0.3, 0.05, 0.18, 1]]) {
+      for (let x = 0; x < W; x++) {
+        const y = H * base + H * amp * Math.sin(x * 0.021 + t * speed + k * 2) + H * 0.025 * Math.sin(x * 0.057 - t * speed * 1.7);
+        const glow = Math.max(0, Math.sin(x * 0.013 + t * 0.35 + k * 3) * 0.5 + 0.5 * Math.sin(x * 0.031 - t * 0.2));
+        if (glow < 0.08) continue;
+        const len = Math.round(6 + 10 * glow), a = Math.round(glow * 4) / 4;   // stepped, as pixels are
+        const mix = x / W, col = k ? `rgba(${Math.round(8 + 155 * mix)},${Math.round(168 + 56 * mix)},${Math.round(255 - 183 * mix)},` : `rgba(${Math.round(163 - 120 * mix)},${Math.round(224 - 40 * mix)},${Math.round(72 + 160 * mix)},`;
+        g.fillStyle = col + (0.10 * a) + ")"; g.fillRect(x, Math.round(y) - len, 1, len);
+        g.fillStyle = col + (0.22 * a) + ")"; g.fillRect(x, Math.round(y) - Math.round(len / 3), 1, Math.round(len / 3));
+      }
+    }
+    g.globalCompositeOperation = "source-over";
+  }
+  // The portal: the logo's figure eight, blue above and green below, its light breathing.
+  function portal(t) {
+    const cx = Math.round(W * 0.14), cy = Math.round(H * 0.3), r = 6, pulse = 0.5 + 0.5 * Math.sin(t * 1.4);
+    g.globalCompositeOperation = "lighter";
+    for (let y = -r * 4; y <= r * 4; y++) for (let x = -r * 2; x <= r * 2; x++) if ((x + y) % 2 === 0) {
+      const d = Math.min(Math.abs(Math.hypot(x, y + r) - r), Math.abs(Math.hypot(x, y - r) - r));
+      if (d > 1 && d < 4 + pulse * 2) { g.fillStyle = `rgba(${y < 0 ? "8,168,255" : "163,224,72"},${0.16 * (1 - d / 6)})`; px(g, cx + x, cy + y); }
+    }
+    g.globalCompositeOperation = "source-over";
+    for (let y = -r * 2 - 1; y <= r * 2 + 1; y++) for (let x = -r - 1; x <= r + 1; x++) {
+      const d = Math.min(Math.abs(Math.hypot(x, y + r) - r), Math.abs(Math.hypot(x, y - r) - r));
+      if (d < 0.9) { const m = (y + r * 2) / (r * 4); g.fillStyle = `rgb(${Math.round(8 + 155 * m)},${Math.round(168 + 56 * m)},${Math.round(255 - 183 * m)})`; px(g, cx + x, cy + y); }
+    }
+  }
+  const strip = (img, off) => { const o = ((Math.round(off) % LOOP) + LOOP) % LOOP; g.drawImage(img, -o, 0); if (LOOP - o < W) g.drawImage(img, LOOP - o, 0); };
+
+  function draw(t) {
+    if (!layers) return;
+    const cam = t * 9, lean = pointer * 6;   // the view drifts east; the pointer leans it a little
+    g.drawImage(layers.sky, 0, 0);
+    for (const s of stars) if (Math.sin(t * s.v + s.p) > -0.2) { g.fillStyle = Math.sin(t * s.v + s.p) > 0.7 ? "#ffffff" : "#8fa3cc"; px(g, s.x, s.y); }
+    const shoot = (t % 11) / 11;   // now and then, a shooting star
+    if (shoot < 0.08) { const k = shoot / 0.08, sx = W * (0.35 + 0.4 * k), sy = H * (0.06 + 0.12 * k); for (let j = 0; j < 7; j++) { g.fillStyle = `rgba(255,255,255,${1 - j / 7})`; px(g, sx - j * 2, sy - j); } }
+    aurora(t);
+    portal(t);
+    strip(layers.far, cam * 0.12 + lean * 0.2);
+    for (const i of layers.isles) {   // floating, bobbing
+      const x = ((((i.x - cam * 0.22 - lean * 0.4) % LOOP) + LOOP) % LOOP), y = Math.round(H * i.y + 2 * Math.sin(t * 0.7 + i.p));
+      for (const xx of [x, x - LOOP]) {
+        if (xx < -i.img.width || xx > W) continue;
+        g.drawImage(i.img, Math.round(xx), y);
+        i.wins.forEach(([wx, wy], n) => { g.fillStyle = Math.sin(t * 0.9 + i.p + n * 2.1) > -0.6 ? "#ffd93d" : "#5a4a1a"; px(g, xx + wx, y + wy, 2, 1); });
+        g.fillStyle = Math.sin(t * 3 + i.p) > 0 ? "#ff6b6b" : "#5a1f28"; px(g, xx + i.roof[0], y + i.roof[1]);
+      }
+    }
+    g.fillStyle = "rgba(35,90,105,.22)"; g.fillRect(0, layers.horizon - 2, W, 6);   // mist where the land meets the sky
+    strip(layers.hills, cam * 0.45 + lean * 0.6);
+    g.globalCompositeOperation = "lighter";
+    for (const f of flies) {
+      const x = ((((f.x + 6 * Math.sin(t * 0.5 * f.v + f.p) - cam * 0.7) % LOOP) + LOOP) % LOOP), y = f.y + 3 * Math.sin(t * 0.8 * f.v + f.p * 2);
+      const on = Math.sin(t * 2 * f.v + f.p) > 0.2;
+      if (x > W || !on) continue;
+      g.fillStyle = "rgba(200,255,90,.18)"; g.fillRect(Math.round(x) - 1, Math.round(y) - 1, 3, 3);
+      g.fillStyle = "#e8ff9a"; px(g, x, y);
+    }
+    g.globalCompositeOperation = "source-over";
+    strip(layers.ground, cam + lean);
+    // Whoever walks: where they stand on the ground, a step every quarter second.
+    const wx = Math.round(W * 0.12), step = Math.floor(t * 4) % 2, gy = Math.round(layers.top + layers.gh(((wx + cam + lean) % LOOP + LOOP) % LOOP));
+    const rows = WALKER.concat(LEGS[step]), y0 = gy + 4 - rows.length - step;   // on the path, up a pixel mid-stride
+    rows.forEach((row, ry) => { for (let rx = 0; rx < row.length; rx++) { const c = COLORS[row[rx]]; if (c) { g.fillStyle = c; px(g, wx + rx, y0 + ry); } } });
+  }
+
+  let last = 0, t0 = performance.now();
+  function frame(now) {
+    if (now - last >= 33) { last = now; draw((now - t0) / 1000); }   // 30 frames a second is plenty for pixels
+    if (!still.matches) requestAnimationFrame(frame);
+  }
+  addEventListener("resize", () => { size(); if (still.matches) draw(14); });
+  addEventListener("pointermove", e => { pointer = e.clientX / innerWidth - 0.5; });
+  still.addEventListener("change", () => { if (!still.matches) requestAnimationFrame(frame); else draw(14); });
+  size();
+  if (still.matches) draw(14); else requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

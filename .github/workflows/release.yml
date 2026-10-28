@@ -1,6 +1,6 @@
-# visit-client for each platform, built and tested on that platform. A tag v<version> (the version in
-# visit/client/Cargo.toml) publishes a release with the files; run by hand (Actions → release → Run
-# workflow), it only builds them, as the run's artifacts.
+# visit-client and auth-client for each platform, built and tested on that platform. A tag v<version> (the
+# version in visit/client/Cargo.toml and auth/client/Cargo.toml) publishes a release with the files; run by hand
+# (Actions → release → Run workflow), it only builds them, as the run's artifacts.
 name: release
 
 on:
@@ -39,29 +39,36 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends musl-tools
       - name: Test
         if: matrix.native
-        run: cargo test --locked --target ${{ matrix.target }}
+        run: |
+          cargo test --locked --target ${{ matrix.target }}
+          (cd ../../auth/client && cargo test --locked --target ${{ matrix.target }})
       - name: Build
-        run: cargo build --release --locked --target ${{ matrix.target }}
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }}
+          (cd ../../auth/client && cargo build --release --locked --target ${{ matrix.target }})
       - name: Runs
         if: matrix.native
         run: |
-          out=target/${{ matrix.target }}/release
-          "$out/visit-client" --version
-          "$out/visit-client" --help >/dev/null
+          for bin in target/${{ matrix.target }}/release/visit-client ../../auth/client/target/${{ matrix.target }}/release/auth-client; do
+            "$bin" --version
+            "$bin" --help >/dev/null
+          done
       - name: Package
         run: |
-          out=target/${{ matrix.target }}/release name=visit-client-${{ matrix.target }}
           mkdir -p ../../dist
-          if [[ ${{ matrix.target }} == *windows* ]]; then
-            cp "$out/visit-client.exe" ../../LICENSE ../../dist/
-            (cd ../../dist && 7z a -tzip -bso0 "$name.zip" visit-client.exe LICENSE && rm visit-client.exe LICENSE)
-          else
-            tar -czf "../../dist/$name.tar.gz" -C "$out" visit-client -C "$PWD/../.." LICENSE
-          fi
+          for crate in visit auth; do
+            out=../../$crate/client/target/${{ matrix.target }}/release bin=$crate-client name=$crate-client-${{ matrix.target }}
+            if [[ ${{ matrix.target }} == *windows* ]]; then
+              cp "$out/$bin.exe" ../../LICENSE ../../dist/
+              (cd ../../dist && 7z a -tzip -bso0 "$name.zip" "$bin.exe" LICENSE && rm "$bin.exe" LICENSE)
+            else
+              tar -czf "../../dist/$name.tar.gz" -C "$out" "$bin" -C "$PWD/../.." LICENSE
+            fi
+          done
           ls -l ../../dist
       - uses: actions/upload-artifact@v4
         with:
-          name: visit-client-${{ matrix.target }}
+          name: clients-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
 
@@ -77,6 +84,8 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' visit/client/Cargo.toml | head -n 1)
           [ "$GITHUB_REF_NAME" = "v$version" ] || { echo "tag $GITHUB_REF_NAME, but visit/client/Cargo.toml says $version"; exit 1; }
+          auth=$(sed -n 's/^version = "\(.*\)"/\1/p' auth/client/Cargo.toml | head -n 1)
+          [ "$auth" = "$version" ] || { echo "auth/client/Cargo.toml says $auth, visit/client/Cargo.toml $version: they are released together"; exit 1; }
           grep -q "VERSION = \"$version\"" visit/client/web/visit.js || { echo "visit/client/web/visit.js's VERSION is not $version"; exit 1; }
           grep -qE "^## $GITHUB_REF_NAME( |$)" CHANGELOG.md || { echo "CHANGELOG.md has no '## $GITHUB_REF_NAME' entry: what changed, and what an integration does"; exit 1; }
       - uses: actions/download-artifact@v4
@@ -91,28 +100,30 @@ jobs:
           sha256sum * > SHA256SUMS
           repo="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
           cat > ../notes.md <<EOF
-          visit-client $GITHUB_REF_NAME, Visit's local client: one file for your machine, with visit.js built in.
-          [visit/INTEGRATING.md]($repo/blob/$GITHUB_REF_NAME/visit/INTEGRATING.md) says how to use it, and
-          [CHANGELOG.md]($repo/blob/$GITHUB_REF_NAME/CHANGELOG.md) how to upgrade to it. This release:
+          visit-client $GITHUB_REF_NAME, Visit's local client (one file for your machine, with visit.js built in), and
+          auth-client, a workroom's sign-in. [visit/INTEGRATING.md]($repo/blob/$GITHUB_REF_NAME/visit/INTEGRATING.md) and
+          [auth/INTEGRATING.md]($repo/blob/$GITHUB_REF_NAME/auth/INTEGRATING.md) say how to use them, and
+          [CHANGELOG.md]($repo/blob/$GITHUB_REF_NAME/CHANGELOG.md) how to upgrade. This release:
 
           EOF
           # This release's entry in the changelog, without its heading.
           awk -v v="## $GITHUB_REF_NAME" 'index($0, v) == 1 && (length($0) == length(v) || substr($0, length(v) + 1, 1) == " ") { on = 1; next }
                                            on && /^## / { exit } on' ../CHANGELOG.md \
-            | sed -E "s#\]\((visit/|lobby/|bin/)#](${repo}/blob/${GITHUB_REF_NAME}/\1#g" >> ../notes.md   # its links, from the release page
+            | sed -E "s#\]\((visit/|auth/|lobby/|bin/)#](${repo}/blob/${GITHUB_REF_NAME}/\1#g" >> ../notes.md   # its links, from the release page
           cat >> ../notes.md <<EOF
 
           ### The files
 
           | file | for |
           |---|---|
-          | \`visit-client-x86_64-unknown-linux-musl.tar.gz\` | Linux, x86_64 (static: any distribution) |
-          | \`visit-client-aarch64-unknown-linux-musl.tar.gz\` | Linux, ARM64 (static) |
-          | \`visit-client-aarch64-apple-darwin.tar.gz\` | macOS, Apple silicon |
-          | \`visit-client-x86_64-apple-darwin.tar.gz\` | macOS, Intel |
-          | \`visit-client-x86_64-pc-windows-msvc.zip\` | Windows, x86_64 |
+          | \`visit-client-x86_64-unknown-linux-musl.tar.gz\`, \`auth-client-…\` | Linux, x86_64 (static: any distribution) |
+          | \`visit-client-aarch64-unknown-linux-musl.tar.gz\`, \`auth-client-…\` | Linux, ARM64 (static) |
+          | \`visit-client-aarch64-apple-darwin.tar.gz\`, \`auth-client-…\` | macOS, Apple silicon |
+          | \`visit-client-x86_64-apple-darwin.tar.gz\`, \`auth-client-…\` | macOS, Intel |
+          | \`visit-client-x86_64-pc-windows-msvc.zip\`, \`auth-client-…\` | Windows, x86_64 |
 
           \`SHA256SUMS\` has their checksums. The macOS builds are not notarized: one downloaded with a browser
-          needs \`xattr -d com.apple.quarantine visit-client\` before it runs (one fetched with curl does not).
+          needs \`xattr -d com.apple.quarantine visit-client\` (and auth-client) before it runs (one fetched with
+          curl does not).
           EOF
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "visit-client $GITHUB_REF_NAME" --notes-file ../notes.md *
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "visit-client and auth-client $GITHUB_REF_NAME" --notes-file ../notes.md *

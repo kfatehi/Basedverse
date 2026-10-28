@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """Set up Visit for a workroom. It asks for the lobby (an address you have, or one deployed on your own
-server), the office's name, the sim, and the workroom page's address; gets visit-client for this machine;
-gives it its database (Postgres: one it starts in Docker, or one you have) and makes it ready (visit-client
-migrate); and writes it all into the workroom's .env, as the VISIT_* settings of .env.example (with a state
-file of the user's own, where visit-client remembers whether they went offline). Run again (after an upgrade,
-say), it offers what the .env already says, and brings the database up to date. Given flags, it asks only for
-what they leave out; with --yes, nothing.
+server), the office's name, the sim, and the workroom page's address; gets visit-client and auth-client (the
+workroom's sign-in) for this machine; gives them their database (Postgres: one it starts in Docker, or one you
+have), each its own plain role, made with the database's superuser (a database made by 0.20's setup, where
+visit-client was the superuser, is moved over), and makes it ready (migrate); offers to make the owner's account;
+and writes it all into the workroom's .env, as the VISIT_* and AUTH_* settings of .env.example (with a state file
+of the user's own, where visit-client remembers whether they went offline). Run again (after an upgrade, say), it
+offers what the .env already says, and brings the database up to date. Given flags, it asks only for what they
+leave out; with --yes, nothing.
 
   python3 bin/setup --env ../my-workroom/.env        (Windows: py bin\\setup --env ..\\my-workroom\\.env)
 
 Python 3.8 or later, nothing to install. Deploying a lobby needs bash and ssh (bin/deploy-lobby).
 """
 import argparse
+import getpass
 import hashlib
 import io
 import os
@@ -27,7 +30,7 @@ import tarfile
 import urllib.request
 import zipfile
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
 RELEASES = "https://github.com/sarmiena/Basedverse/releases"
@@ -41,7 +44,11 @@ TARGETS = {   # (system, machine) -> the release's build for it
     ("windows", "arm64"): "x86_64-pc-windows-msvc",   # Windows on ARM runs it emulated
 }
 WINDOWS = os.name == "nt"
-EXE = "visit-client.exe" if WINDOWS else "visit-client"
+PROGRAMS = {"visit-client": "visit", "auth-client": "auth"}   # each program -> its directory in this checkout (<it>/client)
+
+
+def exe(program):
+    return program + ".exe" if WINDOWS else program
 
 # Piped or redirected on Windows, Python writes in the ANSI code page (cp1252), which has no ⚠ or ✓:
 # a character it cannot write comes out as "?" instead of stopping setup with a UnicodeEncodeError.
@@ -247,8 +254,8 @@ def fetch(url):
             " (on macOS, Python's \"Install Certificates\" may be needed)" if "CERTIFICATE" in str(e) else ""))
 
 
-def download(target, dest):
-    name = "visit-client-%s%s" % (target, ".zip" if "windows" in target else ".tar.gz")
+def download(program, target, dest):
+    name = "%s-%s%s" % (program, target, ".zip" if "windows" in target else ".tar.gz")
     say("Downloading %s from the newest release..." % name)
     data = fetch("%s/latest/download/%s" % (RELEASES, name))
     sums = dict((l.split()[1].lstrip("*"), l.split()[0]) for l in fetch("%s/latest/download/SHA256SUMS" % RELEASES)
@@ -256,9 +263,9 @@ def download(target, dest):
     if sums.get(name) != hashlib.sha256(data).hexdigest():
         die("%s does not match the release's SHA256SUMS: not installed" % name)
     if name.endswith(".zip"):
-        body = zipfile.ZipFile(io.BytesIO(data)).read(EXE)
+        body = zipfile.ZipFile(io.BytesIO(data)).read(exe(program))
     else:
-        body = tarfile.open(fileobj=io.BytesIO(data), mode="r:gz").extractfile("visit-client").read()
+        body = tarfile.open(fileobj=io.BytesIO(data), mode="r:gz").extractfile(program).read()
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(".new")
     tmp.write_bytes(body)
@@ -266,20 +273,20 @@ def download(target, dest):
     os.replace(tmp, dest)
 
 
-def build(dest):
-    client = ROOT / "visit" / "client"
+def build(program, dest):
+    client = ROOT / PROGRAMS[program] / "client"
     if platform.system() == "Linux":
-        say("Building it in Docker (visit/client/build; the first time takes a few minutes)...")
+        say("Building %s in Docker (%s/client/build; the first time takes a few minutes)..." % (program, PROGRAMS[program]))
         if subprocess.run([str(client / "build")]).returncode != 0:
             die("the build failed (above)")
         return
     if not shutil.which("cargo"):
         die("building needs Rust: https://rustup.rs (or --client download)")
-    say("Building it with cargo (the first time takes a few minutes)...")
+    say("Building %s with cargo (the first time takes a few minutes)..." % program)
     if subprocess.run(["cargo", "build", "--release", "--locked"], cwd=client).returncode != 0:
         die("the build failed (above)")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(client / "target" / "release" / EXE, dest)
+    shutil.copy2(client / "target" / "release" / exe(program), dest)
 
 
 def version_of(binary):
@@ -290,36 +297,38 @@ def version_of(binary):
         return None
 
 
-def get_client(args, ask, env):
-    """visit-client for this machine -> its path ('' if skipped and there is none)."""
+def get_clients(args, ask, env):
+    """visit-client and auth-client for this machine -> their paths ('' for one skipped with none there yet)."""
     target = TARGETS.get((platform.system().lower(), platform.machine().lower()))
-    dest = ROOT / "visit" / "client" / "bin" / EXE
-    have = env.get("VISIT_CLIENT_PATH", "")
-    if have and not version_of(have):
-        have = ""
+    have = {p: env.get(k, "") for p, k in (("visit-client", "VISIT_CLIENT_PATH"), ("auth-client", "AUTH_CLIENT_PATH"))}
+    have = {p: h if h and version_of(h) else "" for p, h in have.items()}
     how = args.client
     if how is None:
-        options = {"download": "download it from the newest release" if target else "(no release for this machine)",
-                   "build": "build it from this checkout",
-                   "skip": "keep %s" % have if have else "skip: I will get it myself"}
-        default = "skip" if have else ("download" if target else "build")
-        how = ask.choose("\nvisit-client for this machine (%s %s):" % (platform.system(), platform.machine()), options, default)
-    if how == "download":
-        if not target:
-            die("no release build for %s %s: --client build" % (platform.system(), platform.machine()))
-        download(target, dest)
-    elif how == "build":
-        build(dest)
-    else:
-        return have
-    v = version_of(dest)
-    if not v:
-        die("%s does not run" % dest)
-    mine = re.search(r'^version = "(.*)"', (ROOT / "visit" / "client" / "Cargo.toml").read_text(), re.M).group(1)
-    say("visit-client %s: %s" % (v, dest))
-    if v != mine:
-        say("  ⚠ this checkout is visit-client %s: its visit.js and protocols may differ from %s's" % (mine, v))
-    return dest.as_posix()
+        options = {"download": "download them from the newest release" if target else "(no release for this machine)",
+                   "build": "build them from this checkout",
+                   "skip": "keep %s" % " and ".join(h for h in have.values() if h) if any(have.values()) else "skip: I will get them myself"}
+        default = "skip" if all(have.values()) else ("download" if target else "build")
+        how = ask.choose("\nvisit-client and auth-client for this machine (%s %s):" % (platform.system(), platform.machine()), options, default)
+    if how == "skip":
+        return have["visit-client"], have["auth-client"]
+    out = {}
+    for program, d in PROGRAMS.items():
+        dest = ROOT / d / "client" / "bin" / exe(program)
+        if how == "download":
+            if not target:
+                die("no release build for %s %s: --client build" % (platform.system(), platform.machine()))
+            download(program, target, dest)
+        else:
+            build(program, dest)
+        v = version_of(dest)
+        if not v:
+            die("%s does not run" % dest)
+        mine = re.search(r'^version = "(.*)"', (ROOT / d / "client" / "Cargo.toml").read_text(), re.M).group(1)
+        say("%s %s: %s" % (program, v, dest))
+        if v != mine:
+            say("  ⚠ this checkout is %s %s: what it says may differ from %s's" % (program, mine, v))
+        out[program] = dest.as_posix()
+    return out["visit-client"], out["auth-client"]
 
 
 def default_state(name):
@@ -344,7 +353,8 @@ def free_port(start):
 
 def docker_db(name):
     """Postgres in Docker for this office (postgres:17-alpine, its data in a volume, on 127.0.0.1 only), started
-    if it is not, made if there is none -> its URL (None: it is there, made before, and the .env has its URL)."""
+    if it is not, made if there is none -> its superuser's URL (None: it is there, made before, and the .env has
+    its URLs). The superuser is for setup only: visit-client and auth-client each get a plain role (roles())."""
     if not shutil.which("docker"):
         die("Docker is not here: install it (https://docs.docker.com/get-docker/), or --database <a postgres:// URL you have>")
     slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "office"
@@ -357,18 +367,19 @@ def docker_db(name):
         return None
     password, port = secrets.token_hex(16), free_port(7432)
     say("  starting Postgres in Docker: %s, on 127.0.0.1:%d, its data in the volume %s" % (box, port, box))
-    subprocess.run(["docker", "run", "-d", "--name", box, "--restart", "unless-stopped", "-e", "POSTGRES_USER=visit",
+    subprocess.run(["docker", "run", "-d", "--name", box, "--restart", "unless-stopped", "-e", "POSTGRES_USER=basedverse",
                     "-e", "POSTGRES_PASSWORD=" + password, "-e", "POSTGRES_DB=visit", "-v", box + ":/var/lib/postgresql/data",
                     "-p", "127.0.0.1:%d:5432" % port, "postgres:17-alpine"], check=True, capture_output=True)
     for _ in range(120):
-        if subprocess.run(["docker", "exec", box, "pg_isready", "-q", "-h", "127.0.0.1", "-U", "visit"]).returncode == 0:
+        if subprocess.run(["docker", "exec", box, "pg_isready", "-q", "-h", "127.0.0.1"]).returncode == 0:
             break
         time.sleep(0.5)
-    return "postgres://visit:%s@127.0.0.1:%d/visit" % (password, port)
+    return "postgres://basedverse:%s@127.0.0.1:%d/visit" % (password, port)
 
 
 def get_database(args, ask, env, name):
-    """visit-client's database -> its URL ('' if skipped and there is none)."""
+    """visit-client's database -> (a URL for it, whether it is the superuser's: True, False, or None for not known)
+    ('' if skipped and there is none)."""
     have = env.get("VISIT_DATABASE_URL", "")
     how = "url" if args.database else args.db
     if how is None:
@@ -377,12 +388,79 @@ def get_database(args, ask, env, name):
                    "skip": "keep the .env's" if have else "skip: I will give it one myself (VISIT_DATABASE_URL)"}
         how = ask.choose("\nvisit-client's database (Postgres: its chat, the pictures and links shared, whom it keeps out):", options, "skip" if have else "docker")
     if how == "docker":
-        return docker_db(name) or have
+        made = docker_db(name)
+        return (made, True) if made else (have, False)
     if how == "url":
         url = args.database or ask.ask("Its URL (postgres://user:password@host:port/database)", have,
                                        lambda a: None if a.startswith(("postgres://", "postgresql://")) else "a postgres:// URL", "--database")
-        return url
-    return have
+        return url, None
+    return have, False
+
+
+def user_of(url):
+    return urlsplit(url).username or ""
+
+
+def url_as(url, user, password):
+    """The same database's URL, as another user with their password."""
+    p = urlsplit(url)
+    return p._replace(netloc="%s:%s@%s" % (quote(user, safe=""), quote(password, safe=""), p.netloc.rsplit("@", 1)[-1])).geturl()
+
+
+def hide(url):
+    return re.sub(r"(://[^:/@]+:)[^@]+@", r"\1•••@", url)
+
+
+def roles(auth, database, superuser, args, ask, env):
+    """visit-client's and auth-client's roles (auth/SPEC.md 5): each a plain one, owning its own schema, made with
+    the database's superuser (auth-client migrate --admin), which no run is given -> (VISIT_DATABASE_URL,
+    AUTH_DATABASE_URL, VISIT_DATABASE_ADMIN_URL). A database made by 0.20's setup (visit-client on the superuser,
+    its role named visit) is moved over: the superuser renamed basedverse, with a new password; visit-client's
+    tables, with all they hold, into its own schema. Run again, the plain roles keep the passwords the .env has."""
+    admin = env.get("VISIT_DATABASE_ADMIN_URL", "") if superuser is False else (database if superuser else "")
+    admin = args.admin_database or admin
+    new_admin = None
+    if not admin and user_of(database) == "visit" and superuser is False:
+        say("\nIts database was made by 0.20's setup: visit-client uses its superuser. From 0.21, visit-client and\n"
+            "auth-client each get a plain role, so neither can read the other's tables, and the superuser is kept for\n"
+            "setup. Moving it over renames the superuser (basedverse, a new password) and moves visit-client's tables,\n"
+            "with all they hold, into its own schema. Stop visit-client first; back the database up if it holds\n"
+            "anything you would miss.")
+        if ask.on and not ask.ask("Move it over now? (y/n)", "y", lambda a: None if a.lower() in ("y", "n", "yes", "no") else "y or n").lower().startswith("y"):
+            say("  left as it is: run setup again to move it over (auth-client needs it)")
+            return None
+        admin, new_admin = database, url_as(database, "basedverse", secrets.token_hex(16))
+    if not admin:
+        admin = ask.ask("\nThe database's superuser, for setup only (postgres://user:password@host:port/database)", "",
+                        lambda a: None if a.startswith(("postgres://", "postgresql://")) else "a superuser's postgres:// URL", "--admin-database")
+    keep = lambda url, user: url if url and user_of(url) == user and not new_admin else ""
+    visit_url = keep(database, "visit") or keep(env.get("VISIT_DATABASE_URL", ""), "visit") or url_as(admin, "visit", secrets.token_hex(16))
+    auth_url = keep(env.get("AUTH_DATABASE_URL", ""), "auth") or url_as(admin, "auth", secrets.token_hex(16))
+    say("\nThe database's roles (auth-client migrate --admin, as %s):" % hide(new_admin or admin))
+    r = subprocess.run([str(auth), "migrate"], capture_output=True, text=True,
+                       env=dict(os.environ, VISIT_DATABASE_ADMIN_URL=admin, VISIT_DATABASE_URL=visit_url, AUTH_DATABASE_URL=auth_url,
+                                **({"VISIT_DATABASE_NEW_ADMIN_URL": new_admin} if new_admin else {})))
+    for line in (r.stdout + r.stderr).strip().splitlines():
+        say("  " + line)
+    if r.returncode != 0:
+        die("auth-client migrate --admin failed (above): nothing in the .env changed")
+    return visit_url, auth_url, new_admin or admin
+
+
+def owner(auth, auth_url, ask):
+    """The owner's account, offered when there is none (auth-client user add: the password typed in this terminal)."""
+    r = subprocess.run([str(auth), "user", "list"], capture_output=True, text=True, env=dict(os.environ, AUTH_DATABASE_URL=auth_url))
+    if r.returncode != 0 or "no users yet" not in r.stdout:
+        say("  accounts: " + (", ".join(l.split()[0] for l in r.stdout.splitlines()[1:]) or "(see auth-client user list)"))
+        return
+    if not ask.on or not ask.ask("\nMake the owner's account now, to sign in to your workroom with? (y/n)", "y",
+                                 lambda a: None if a.lower() in ("y", "n", "yes", "no") else "y or n").lower().startswith("y"):
+        say("  later, in a terminal: auth-client user add <name>")
+        return
+    me = re.sub(r"[^A-Za-z0-9._@-]", "", getpass.getuser()) or "owner"
+    name = ask.ask("Its name", me, lambda a: None if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._@-]{0,63}", a) else "letters, digits, . _ @ -")
+    if subprocess.run([str(auth), "user", "add", name], env=dict(os.environ, AUTH_DATABASE_URL=auth_url)).returncode != 0:
+        say("  ⚠ not made (above): later, in a terminal: auth-client user add <name>")
 
 
 def migrate(client, database):
@@ -427,9 +505,10 @@ def main():
     p.add_argument("--page", help="the workroom page's address, as the browser shows it (e.g. http://localhost:3000)")
     p.add_argument("--port", type=int, help="visit-client's port on 127.0.0.1 (default 7401)")
     p.add_argument("--max-visitors", type=int, help="visitors at once, 0-8 (default 3)")
-    p.add_argument("--client", choices=["download", "build", "skip"], help="visit-client for this machine")
+    p.add_argument("--client", choices=["download", "build", "skip"], help="visit-client and auth-client for this machine")
     p.add_argument("--db", choices=["docker", "url", "skip"], help="visit-client's database: start Postgres in Docker, one you have, or keep the .env's")
     p.add_argument("--database", help="the database you have: postgres://user:password@host:port/database")
+    p.add_argument("--admin-database", help="its superuser's URL, for setup only: it makes visit-client's and auth-client's roles")
     p.add_argument("--yes", action="store_true", help="ask nothing: the flags, else what the .env has, else the defaults")
     args = p.parse_args()
 
@@ -463,29 +542,43 @@ def main():
     state = env.get("VISIT_STATE_FILE") or default_state(name)
     Path(state).expanduser().parent.mkdir(parents=True, exist_ok=True)
 
-    client = get_client(args, ask, env)
-    database = get_database(args, ask, env, name)
-    if database and (client or env.get("VISIT_CLIENT_PATH")):
-        say("\nIts database, made ready (or brought up to date):")
-        migrate(client or env["VISIT_CLIENT_PATH"], database)
+    client, auth = get_clients(args, ask, env)
+    database, superuser = get_database(args, ask, env, name)
+    urls = {}
+    if database and auth:
+        made = roles(auth, database, superuser, args, ask, env)
+        if made:
+            urls = {"VISIT_DATABASE_URL": made[0], "AUTH_DATABASE_URL": made[1], "VISIT_DATABASE_ADMIN_URL": made[2]}
+            database = made[0]
+    elif database:
+        say("  ⚠ no auth-client yet: once there is, run setup again (it makes the database's roles)")
+    if database and client:
+        say("\nIts database, made ready for visit-client (or brought up to date):")
+        migrate(client, database)
     elif database:
         say("  ⚠ no visit-client yet: once there is, make its database ready: visit-client migrate")
+    if urls and auth:
+        owner(auth, urls["AUTH_DATABASE_URL"], ask)
 
     values = {"VISIT_LOBBY": lobby, "VISIT_NAME": name, "VISIT_SIM": sim, "VISIT_ORIGINS": allowed,
               "VISIT_PORT": port, "VISIT_MAX_VISITORS": mv, "VISIT_STATE_FILE": state}
     if client:
         values["VISIT_CLIENT_PATH"] = client
+    if auth:
+        values["AUTH_CLIENT_PATH"] = auth
     if database:
         values["VISIT_DATABASE_URL"] = database
+    values.update(urls)
     write_env(env_path, values)
     say("\nWrote %s:" % env_path.resolve())
     for k, v in values.items():
-        say("  %s=%s" % (k, quoted(re.sub(r"(://[^:/@]+:)[^@]+@", r"\1•••@", v) if k == "VISIT_DATABASE_URL" else v)))
+        say("  %s=%s" % (k, quoted(hide(v) if k.endswith("DATABASE_URL") or k.endswith("ADMIN_URL") else v)))
     gitignored(env_path.resolve(), ask)
     if deployed:
         say("\nYour lobby is %s: give that address to the workrooms you want to meet there." % lobby)
-    say("\nNext: the workroom's launcher starts visit-client (VISIT_CLIENT_PATH) with these settings and a new token "
-        "each run: basedverse's visit/INTEGRATING.md, step 2.")
+    say("\nNext: the workroom's launcher starts visit-client (VISIT_CLIENT_PATH) and auth-client (AUTH_CLIENT_PATH) with "
+        "these settings and new tokens each run, giving neither VISIT_DATABASE_ADMIN_URL: basedverse's "
+        "visit/INTEGRATING.md, step 2, and auth/INTEGRATING.md.")
 
 
 if __name__ == "__main__":

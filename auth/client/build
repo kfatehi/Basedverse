@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Builds a static auth-client into ./bin/auth-client, in Docker (nothing to install). It runs on any Linux of
+# this machine's architecture. On macOS or Windows, download it from a release, or build it there, with Rust
+# installed (https://rustup.rs): `cargo build --release` in this directory gives target/release/auth-client.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ "$(uname -s)" = Linux ] || { echo "build: this makes a Linux binary; on $(uname -s), download it from a release (../INTEGRATING.md, step 1), or run: cargo build --release" >&2; exit 2; }
+target="$(uname -m)-unknown-linux-musl"
+DOCKER_BUILDKIT=1 docker build -q -f "$here/Dockerfile.dist" --build-arg TARGET="$target" --target out \
+  --output "type=local,dest=$here/bin" "$here" >/dev/null
+echo "built $here/bin/auth-client ($target, static)"

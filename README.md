@@ -46,8 +46,9 @@ two hooks, and two pieces everyone drops in unchanged.
 | | |
 |---|---|
 | [visit/](visit/) | Visit: **visit-client** (the local client, Rust: all the networking) and **visit.js** (the library for the workroom's page), [the spec](visit/SPEC.md), [the integration guide](visit/INTEGRATING.md) and [bodies, things and positions](visit/MODELS.md), written for the coding agent doing it |
+| [auth/](auth/) | **auth-client**: a workroom's sign-in (Rust: the owner's account, made in a terminal; sessions; API keys for scripts and agents), [its spec](auth/SPEC.md), [its integration guide](auth/INTEGRATING.md), and [the sign-in page](auth/web/login.html) to start from |
 | [lobby/](lobby/) | the lobby server everyone connects to (Python): presence, knocks, introductions. [Its protocol](lobby/PROTOCOL.md), its tests, and its deployment (Caddy for TLS, coturn) |
-| [bin/setup](bin/setup) | sets up Visit for a workroom: the lobby (or deploys your own), your office, visit-client, your `.env` |
+| [bin/setup](bin/setup) | sets up Visit for a workroom: the lobby (or deploys your own), your office, visit-client and auth-client, their database's roles, the owner's account, your `.env` |
 | [bin/deploy-lobby](bin/deploy-lobby) | puts the lobby on a server over ssh, and updates it |
 | [CHANGELOG.md](CHANGELOG.md) | every release: what changed, and what an integration does about it (read it to upgrade) |
 | [.env.example](.env.example) | every setting, with nothing real in it: the template for a workroom's visit-client settings, and for running the lobby |
@@ -89,20 +90,36 @@ By hand, that is:
    build it (step 1 of the guide says how).
 3. **Follow [visit/INTEGRATING.md](visit/INTEGRATING.md)**, or hand it to your coding agent.
 
+## Signing in to your workroom
+
+A workroom's server takes whoever can reach it for its owner. **auth-client** (from 0.21) gives every workroom a
+real sign-in, built from standard pieces, so that none of them invents one: the owner's account is made in a
+terminal (there is no sign-up page, ever), sessions are checked by the workroom's server before every page and
+route, scripts and agents get API keys, and visit-client's token goes only to a signed-in session. It runs beside
+visit-client on `127.0.0.1`, and only the workroom's server talks to it. `bin/setup` gets it and makes the account;
+[auth/INTEGRATING.md](auth/INTEGRATING.md) is the rest, for your coding agent (the plugin's skill offers it).
+
+<p align="center">
+  <img alt="The sign-in page: a pixel-art night behind it, an aurora, floating islands each with a little lit workroom, a figure-eight portal, the Basedverse logo, and a framed form with a name, a password and an Enter world button" src=".github/assets/login.png">
+  <br>
+  <em>The sign-in page every workroom starts from (<a href="auth/web/login.html">auth/web/login.html</a>): one file, its world drawn by itself.</em>
+</p>
+
 ## Running the lobby
 
 One small server for everyone: [lobby/README.md](lobby/README.md) says what to rent and which ports to
 open, then `bin/deploy-lobby user@server` sets it up, and later updates it.
 
-## Releasing visit-client
+## Releasing visit-client and auth-client
 
-Set the new `version` in `visit/client/Cargo.toml` (and `VERSION` in `visit/client/web/visit.js`), and add
+They are released together, at one version. Set it in `visit/client/Cargo.toml` and `auth/client/Cargo.toml`
+(and `VERSION` in `visit/client/web/visit.js`), and add
 its entry at the top of [CHANGELOG.md](CHANGELOG.md): what changed, and **what an integration does**, step
 by step, for the agent upgrading a workroom. A new feature also gets a row in the plugin skill's "Where to look"
 table (`plugins/basedverse/skills/visit/SKILL.md`), and, if it is a default, a line in INTEGRATING.md's "The
 vanilla experience". Commit, then tag that commit `v<version>` and push the tag
 (`git tag v0.3.0 && git push origin v0.3.0`). [The release workflow](.github/workflows/release.yml)
-builds and tests visit-client on Linux (x86_64, ARM64), macOS (Apple silicon, Intel) and Windows (x86_64),
+builds and tests both on Linux (x86_64, ARM64), macOS (Apple silicon, Intel) and Windows (x86_64),
 and publishes the files, with their checksums, as that tag's release, its notes the changelog's entry (a
 tag the changelog has no entry for is not released).
 
@@ -114,6 +131,8 @@ tag the changelog has no entry for is not released).
 | `visit/client/cargo test` | visit-client's unit tests, in Docker |
 | `visit/client/tests/run-e2e.sh` | the lobby, two visit-clients and two stand-in pages, in Docker |
 | `visit/client/tests/run-browser.sh` | visit.js in two headless Chromes on this machine (it needs `google-chrome`): a three.js room's scene, drawn by its visitor; two rooms' worlds (on different three.js releases) |
+| `auth/client/cargo test` | auth-client's unit tests, in Docker |
+| `auth/client/tests/run-e2e.sh` | auth-client against Postgres 17 in Docker: the database's roles made, and a 0.20 database moved over; its terminal commands; its API (signing in, guesses slowed, expiry, revoking, keys) |
 | `visit/client/tests/perf/run-perf.sh` | visits through simulated networks (delay, jitter, loss, rate caps; several visitors), each in its own container: the host's answer, updates, stalls, bandwidth (and with `BROWSERS=1`, real browsers drawing), against targets |
 
 ## License

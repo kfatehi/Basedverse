@@ -1,7 +1,7 @@
 ---
 name: visit
-description: Integrate basedverse's Visit into a three.js workroom, or upgrade one. Lists Visit's features and which ones this workroom uses, answers questions about any of them, plans the work with the user (vanilla unless they say otherwise), does it, and keeps the workroom's VISIT.md log of their choices so that later upgrades keep them.
-when_to_use: The user mentions basedverse, Visit, visit-client or the lobby. Or they want their room to have friends visiting, links, a world of plots, voice, chat, phones, avatars, interactions or landscapes. Or they ask what is new in Visit, or to upgrade their integration.
+description: Integrate basedverse's Visit into a three.js workroom, or upgrade one, and offer auth-client, the workroom's sign-in. Lists Visit's features and which ones this workroom uses, answers questions about any of them, plans the work with the user (vanilla unless they say otherwise), does it, and keeps the workroom's VISIT.md log of their choices so that later upgrades keep them.
+when_to_use: The user mentions basedverse, Visit, visit-client, auth-client or the lobby. Or they want their room to have friends visiting, links, a world of plots, voice, chat, phones, avatars, interactions or landscapes, or a sign-in for their workroom's server. Or they ask what is new in Visit, or to upgrade their integration.
 argument-hint: "[list | ask <question> | plan | go]"
 ---
 
@@ -23,6 +23,8 @@ Do not work from memory: Visit changes with every release. Read these from the b
   other rooms show them right. Follow it as written for `spawn`, `move`, `visit.avatar` and possessions, and run
   `Visit.checkModel` on every model.
 - **`visit/SPEC.md`**: the contract (messages, limits, the library's API), for detailed questions.
+- **`auth/INTEGRATING.md`** and **`auth/SPEC.md`** (0.21): auth-client, the workroom's sign-in (accounts made in a
+  terminal, sessions, API keys, visit-client's token for a signed-in session), released with visit-client.
 
 The feature list is whatever those docs say Visit has. The table under "Where to look" is only a hint for finding a
 feature in a workroom's code. If the changelog has something newer than the table, it counts all the same.
@@ -54,6 +56,16 @@ feature in a workroom's code. If the changelog has something newer than the tabl
   it is without changing anything: run it first, and tell the user what is pending. Only ever against the
   workroom's own database (its `.env`'s); if it holds anything they care about, offer a backup first
   (`pg_dump`). If migrate fails, stop and show the user why; never edit its tables by hand.
+- **Sign-in (auth-client, 0.21): offer it** to every workroom whose server serves its page, and keep the user's answer
+  in `VISIT.md` (yes or no, in their words, with the date). With it, **every page and route checks the session with
+  auth-client, unless the user says otherwise**: ask what, if anything, must work signed out (usually nothing), and
+  keep that list in `VISIT.md` too. Never add a sign-up page; accounts are made in a terminal (`auth-client user
+  add`), by the user, who types the password: never type, choose or log one for them.
+- **The database's roles (0.21)**: visit-client and auth-client each get a plain role, made with the database's
+  superuser (`bin/setup`, or `auth-client migrate --admin`). The superuser's URL (`VISIT_DATABASE_ADMIN_URL`) is for
+  that only: the launcher passes it to nothing. A database made by 0.20's setup (visit-client on the superuser) is
+  moved over once: say what it does (auth/SPEC.md 5), offer a backup first, and do it only on the user's yes, with
+  visit-client stopped.
 - A variant the user wants (a cell phone instead of a desk phone, voice without panning) either fits today's API or
   needs Visit to change. Say which, from SPEC.md. If it needs a Visit change, record it in `VISIT.md` as an open request
   for basedverse. Do not work around the contract.
@@ -72,7 +84,10 @@ feature in a workroom's code. If the changelog has something newer than the tabl
    - The visit-client it runs: `"$VISIT_CLIENT_PATH" --version`, or `curl -s http://127.0.0.1:${VISIT_PORT:-7401}/health`,
      which answers `{"version": …}`. If they differ, say so.
    - Its database: `VISIT_DATABASE_URL` in the `.env`, and `"$VISIT_CLIENT_PATH" migrate --status` (where it is, what is
-     pending). None (before 0.20): the plan gives it one (bin/setup can start Postgres in Docker).
+     pending). None (before 0.20): the plan gives it one (bin/setup can start Postgres in Docker). Its role: the
+     superuser (before 0.21), or `visit` with `VISIT_DATABASE_ADMIN_URL` beside it.
+   - Its sign-in: `AUTH_*` lines in the `.env`, `"$AUTH_CLIENT_PATH" --version`, `"$AUTH_CLIENT_PATH" migrate --status`,
+     and whether its server checks a session before every route (and where it listens: `127.0.0.1`, or beyond).
 4. **What it uses**: `VISIT.md` says. Without one, search the page's code for each feature (the table below), tell
    the user what you found, and let them correct it.
 
@@ -102,6 +117,7 @@ feature in a workroom's code. If the changelog has something newer than the tabl
 | its database (chat history, pictures, links, bans), `visit-client migrate` | 0.20 | step 1 | `VISIT_DATABASE_URL` in the `.env`; the launcher passes it on |
 | pictures and links in chat (paste, previews, 🖼 shared), history up the log | 0.20 | vanilla | the panel's chat window; `visit.share(`, `visit.preview(`, `visit.history(`, `visit.shared(` |
 | telemetry (⏱) | 0.14 | troubleshooting | the panel's ⏱, `visit.perf(`: nothing to integrate, a tool for when a room feels slow |
+| sign-in: auth-client (accounts, sessions, API keys, visit-client's token for a session), the database's plain roles | 0.21 | auth/INTEGRATING.md | `AUTH_TOKEN_FILE`, `/v1/check` in the server's middleware, `GET /login`, `/v1/visit` |
 
 ## List
 
@@ -137,6 +153,9 @@ Write the plan in the conversation:
 - **Its database**: as step 1 says (setup starts Postgres in Docker, or uses theirs), within their rules (a
   containerised workroom runs Postgres as one of its own services); then `visit-client migrate`, every install and
   every upgrade.
+- **Sign-in (auth-client)**, offered (the rules above): its steps from auth/INTEGRATING.md, each with its check; the
+  public routes the user named (or none); the owner's account made by the user in a terminal; the route test (its
+  step 12) added to the workroom's tests.
 
 Wait for "go" (or the user's own word for it).
 

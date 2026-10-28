@@ -9,7 +9,45 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
-## v0.20.3 — 2026-10-28
+## v0.21.0 — 2026-10-28
+
+**auth-client: a sign-in for your workroom** ([auth/INTEGRATING.md](auth/INTEGRATING.md)). A workroom's server took
+whoever could reach it for its owner, and the `Host` check Visit's guide asked for (step 3) stops DNS rebinding,
+not a program on the network, which can write any `Host` it likes. auth-client is a small program beside
+visit-client, on `127.0.0.1`, that only the workroom's server talks to: the owner's account is made in a terminal
+(there is no sign-up page, ever); passwords are Argon2id; sessions (kept by their hash only) last 7 days unused or
+30 in all; guesses slow down; scripts and agents get API keys; and visit-client's token goes only to a signed-in
+session (`/v1/visit`). The rule that comes with it: **every page and route checks the session, unless the user
+says otherwise.** It is in this release beside visit-client, for every platform, with a sign-in page to start from
+([auth/web/login.html](auth/web/login.html)).
+
+**Each program its own database role.** visit-client used the database's superuser, so it could read anything in
+it. Now it has a plain role, `visit`, and auth-client one of its own, `auth`, each owning its own schema, neither
+able to read the other's tables (a fault in visit-client, which talks to the internet, cannot reach a password
+hash). The superuser is for setup only: `auth-client migrate --admin` makes the roles, and moves a database made
+by 0.20's setup over (its superuser renamed `basedverse` with a new password, visit-client's tables, with all they
+hold, into its schema).
+
+**Visit's guide, step 3, corrected**: listening on `127.0.0.1` is what keeps the network out (the `Host` check
+stops DNS rebinding only), and `VISIT_ORIGINS` is to be set always.
+
+### What an integration does
+
+1. Get visit-client and auth-client 0.21.0. `bin/setup` gets both (`VISIT_CLIENT_PATH`, `AUTH_CLIENT_PATH`).
+2. **The database's roles, once.** Stop visit-client, and back the database up if it holds anything you would
+   miss. Then run `bin/setup` again: it moves a 0.20 database over (it asks first) and writes `VISIT_DATABASE_URL`
+   (now role `visit`), `AUTH_DATABASE_URL` and `VISIT_DATABASE_ADMIN_URL` into your `.env`. A database it did not
+   start (one in your own compose file, say): `auth-client migrate --admin <its superuser's URL>`, with
+   `VISIT_DATABASE_URL` and `AUTH_DATABASE_URL` set to the URLs as they will be (roles `visit` and `auth`, new
+   passwords), and, when visit-client's role is that superuser, `--new-admin <the superuser's URL under a new name
+   and password>` (auth/SPEC.md 5). Your launcher passes `VISIT_DATABASE_ADMIN_URL` to nothing.
+3. `visit-client migrate` (nothing new to migrate), then start visit-client with its new `VISIT_DATABASE_URL`.
+4. **Sign-in, offered** (the `/basedverse:visit` skill asks, and keeps the answer in `VISIT.md`): with a yes,
+   follow [auth/INTEGRATING.md](auth/INTEGRATING.md): the owner's account (`auth-client user add`, typed by the
+   user), auth-client started by the launcher with a new service token each run, one check before every route,
+   `/login` from the template, `/v1/visit` in place of your own `/api/visit`, and the route test. Without it (for
+   now): keep your server on `127.0.0.1`, and set `VISIT_ORIGINS`.
+
 
 (v0.20.2 was tagged but never released: this is it, with visit.js saying its version.)
 

@@ -1,0 +1,15 @@
+# A static auth-client to hand out (one file, no libraries: it runs on any Linux of its architecture).
+# Used by ./build, which writes it to ./bin/:
+#   docker build -f Dockerfile.dist --build-arg TARGET=x86_64-unknown-linux-musl --target out --output type=local,dest=bin .
+FROM rust:1-bookworm AS build
+ARG TARGET=x86_64-unknown-linux-musl
+RUN apt-get update && apt-get install -y --no-install-recommends musl-tools && rm -rf /var/lib/apt/lists/* && rustup target add "$TARGET"
+WORKDIR /src
+COPY Cargo.toml Cargo.lock ./
+COPY src src
+COPY migrations migrations
+RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/src/target \
+    cargo build --release --target "$TARGET" && cp "target/$TARGET/release/auth-client" /auth-client
+
+FROM scratch AS out
+COPY --from=build /auth-client /auth-client

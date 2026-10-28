@@ -84,10 +84,11 @@ program listening on their machine.
 3. **The token reaches only the sim's own page.** The launcher hands it to the sim's page by a route other
    sites cannot read: the sim's own server answering a same-origin request, a file served beside the page,
    or the page's URL fragment (INTEGRATING.md step 3). It is never written into a URL query, a log, or
-   anything served to another origin. A server that hands it over SHOULD answer only requests naming this
-   machine (`Host: localhost` or `127.0.0.1`): that turns away DNS-rebinding sites, and requests to this
-   machine's LAN address.
-4. **The page's origin, too (SHOULD).** Given `--origins` (the sim's own page origins), the visit-client
+   anything served to another origin. A server that hands it over gives it only to its signed-in owner
+   (auth-client's `/v1/visit`, ../auth/SPEC.md 3) or, without a sign-in, SHOULD answer only requests naming this
+   machine (`Host: localhost` or `127.0.0.1`): that turns away DNS-rebinding sites, and nothing more (a program on
+   the network can send any `Host`). What keeps the network out is that server listening on `127.0.0.1`.
+4. **The page's origin, too (SHOULD, always).** Given `--origins` (the sim's own page origins), the visit-client
    refuses (HTTP 403) a page connection from any other. Browsers always send a WebSocket's origin and a page
    cannot change it, so a token that leaked anyway is no use to another site's page.
 5. **Public, harmless endpoints only.** Without the token, the visit-client serves only `/visit.js` (the

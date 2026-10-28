@@ -33,6 +33,12 @@ State is one of:
   Deviations.
 - **off**: not used.
 
+## Sign-in (auth-client)
+
+- Offered <date>; the user: "<their words>" (yes / no / later).
+- Public routes (work signed out): none (or each, as the user named it, with the date and their words).
+- Where the server listens: 127.0.0.1 (or HTTPS / WireGuard / Tailscale, and how).
+
 ## Deviations from vanilla
 
 Only what replaces or turns off a Visit default, each as the user asked for it. An upgrade re-applies it; if a
