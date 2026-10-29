@@ -1,6 +1,7 @@
-# visit-client and auth-client for each platform, built and tested on that platform. A tag v<version> (the
-# version in visit/client/Cargo.toml and auth/client/Cargo.toml) publishes a release with the files; run by hand
-# (Actions → release → Run workflow), it only builds them, as the run's artifacts.
+# visit for each platform, built, tested and started fresh on that platform (V2.md 6.2): one file with Postgres and
+# Chrome inside it (the archives deps/pinned.json pins, from their deps-<n> release). A tag v<version> (the version
+# in visit/client/Cargo.toml, auth/client/Cargo.toml and engine/Cargo.toml) publishes a release with the files; run
+# by hand (Actions → release → Run workflow), it only builds them, as the run's artifacts.
 name: release
 
 on:
@@ -26,7 +27,6 @@ jobs:
     defaults:
       run:
         shell: bash
-        working-directory: visit/client
     steps:
       - uses: actions/checkout@v4
       - name: Rust
@@ -39,36 +39,29 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends musl-tools
       - name: Test
         if: matrix.native
-        run: |
-          cargo test --locked --target ${{ matrix.target }}
-          (cd ../../auth/client && cargo test --locked --target ${{ matrix.target }})
+        run: cargo test --locked --workspace --target ${{ matrix.target }}
       - name: Build
-        run: |
-          cargo build --release --locked --target ${{ matrix.target }}
-          (cd ../../auth/client && cargo build --release --locked --target ${{ matrix.target }})
-      - name: Runs
+        run: cargo build --release --locked -p visit --target ${{ matrix.target }}
+      - name: A fresh start
         if: matrix.native
         run: |
-          for bin in target/${{ matrix.target }}/release/visit-client ../../auth/client/target/${{ matrix.target }}/release/auth-client; do
-            "$bin" --version
-            "$bin" --help >/dev/null
-          done
+          bin=target/${{ matrix.target }}/release/visit py=python3
+          [[ ${{ matrix.target }} == *windows* ]] && bin=$bin.exe py=python
+          "$py" visit/client/tests/fresh_start.py "$bin"
       - name: Package
         run: |
-          mkdir -p ../../dist
-          for crate in visit auth; do
-            out=../../$crate/client/target/${{ matrix.target }}/release bin=$crate-client name=$crate-client-${{ matrix.target }}
-            if [[ ${{ matrix.target }} == *windows* ]]; then
-              cp "$out/$bin.exe" ../../LICENSE ../../dist/
-              (cd ../../dist && 7z a -tzip -bso0 "$name.zip" "$bin.exe" LICENSE && rm "$bin.exe" LICENSE)
-            else
-              tar -czf "../../dist/$name.tar.gz" -C "$out" "$bin" -C "$PWD/../.." LICENSE
-            fi
-          done
-          ls -l ../../dist
+          mkdir -p dist
+          out=target/${{ matrix.target }}/release name=visit-${{ matrix.target }}
+          if [[ ${{ matrix.target }} == *windows* ]]; then
+            cp "$out/visit.exe" LICENSE dist/
+            (cd dist && 7z a -tzip -bso0 "$name.zip" visit.exe LICENSE && rm visit.exe LICENSE)
+          else
+            tar -czf "dist/$name.tar.gz" -C "$out" visit -C "$PWD" LICENSE
+          fi
+          ls -l dist
       - uses: actions/upload-artifact@v4
         with:
-          name: clients-${{ matrix.target }}
+          name: visit-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
 
@@ -84,8 +77,10 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' visit/client/Cargo.toml | head -n 1)
           [ "$GITHUB_REF_NAME" = "v$version" ] || { echo "tag $GITHUB_REF_NAME, but visit/client/Cargo.toml says $version"; exit 1; }
-          auth=$(sed -n 's/^version = "\(.*\)"/\1/p' auth/client/Cargo.toml | head -n 1)
-          [ "$auth" = "$version" ] || { echo "auth/client/Cargo.toml says $auth, visit/client/Cargo.toml $version: they are released together"; exit 1; }
+          for crate in auth/client engine; do
+            v=$(sed -n 's/^version = "\(.*\)"/\1/p' $crate/Cargo.toml | head -n 1)
+            [ "$v" = "$version" ] || { echo "$crate/Cargo.toml says $v, visit/client/Cargo.toml $version: they are built together"; exit 1; }
+          done
           grep -q "VERSION = \"$version\"" visit/client/web/visit.js || { echo "visit/client/web/visit.js's VERSION is not $version"; exit 1; }
           grep -qE "^## $GITHUB_REF_NAME( |$)" CHANGELOG.md || { echo "CHANGELOG.md has no '## $GITHUB_REF_NAME' entry: what changed, and what an integration does"; exit 1; }
       - uses: actions/download-artifact@v4
@@ -100,13 +95,10 @@ jobs:
           sha256sum * > SHA256SUMS
           repo="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
           cat > ../notes.md <<EOF
-          visit-client $GITHUB_REF_NAME, Visit's local client (one file for your machine, with visit.js built in),
-          auth-client, a workroom's sign-in, and visit-engine, the room's page in a headless Chromium beside them
-          (an image built from [engine/]($repo/blob/$GITHUB_REF_NAME/engine/) with Docker, not a file here).
-          [visit/INTEGRATING.md]($repo/blob/$GITHUB_REF_NAME/visit/INTEGRATING.md),
-          [auth/INTEGRATING.md]($repo/blob/$GITHUB_REF_NAME/auth/INTEGRATING.md) and
-          [engine/INTEGRATING.md]($repo/blob/$GITHUB_REF_NAME/engine/INTEGRATING.md) say how to use them, and
-          [CHANGELOG.md]($repo/blob/$GITHUB_REF_NAME/CHANGELOG.md) how to upgrade. This release:
+          visit $GITHUB_REF_NAME: the one program a workroom needs, one file for your machine. Its database
+          (Postgres), the workroom's sign-in and the engine (with its headless Chrome) are inside it: nothing to
+          install, no Docker. [visit/INTEGRATING.md]($repo/blob/$GITHUB_REF_NAME/visit/INTEGRATING.md) says how to
+          use it, and [CHANGELOG.md]($repo/blob/$GITHUB_REF_NAME/CHANGELOG.md) how to upgrade. This release:
 
           EOF
           # This release's entry in the changelog, without its heading.
@@ -119,14 +111,14 @@ jobs:
 
           | file | for |
           |---|---|
-          | \`visit-client-x86_64-unknown-linux-musl.tar.gz\`, \`auth-client-…\` | Linux, x86_64 (static: any distribution) |
-          | \`visit-client-aarch64-unknown-linux-musl.tar.gz\`, \`auth-client-…\` | Linux, ARM64 (static) |
-          | \`visit-client-aarch64-apple-darwin.tar.gz\`, \`auth-client-…\` | macOS, Apple silicon |
-          | \`visit-client-x86_64-apple-darwin.tar.gz\`, \`auth-client-…\` | macOS, Intel |
-          | \`visit-client-x86_64-pc-windows-msvc.zip\`, \`auth-client-…\` | Windows, x86_64 |
+          | \`visit-x86_64-unknown-linux-musl.tar.gz\` | Linux, x86_64 (any distribution with glibc 2.28 or newer) |
+          | \`visit-aarch64-unknown-linux-musl.tar.gz\` | Linux, ARM64 (the same) |
+          | \`visit-aarch64-apple-darwin.tar.gz\` | macOS, Apple silicon |
+          | \`visit-x86_64-apple-darwin.tar.gz\` | macOS, Intel |
+          | \`visit-x86_64-pc-windows-msvc.zip\` | Windows, x86_64 |
 
-          \`SHA256SUMS\` has their checksums. The macOS builds are not notarized: one downloaded with a browser
-          needs \`xattr -d com.apple.quarantine visit-client\` (and auth-client) before it runs (one fetched with
-          curl does not).
+          \`SHA256SUMS\` has their checksums. About 150 MB each: Postgres and Chrome are inside, unpacked once into
+          your data folder on first start. The macOS builds are not notarized: one downloaded with a browser needs
+          \`xattr -d com.apple.quarantine visit\` before it runs (one fetched with curl does not).
           EOF
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "visit-client and auth-client $GITHUB_REF_NAME" --notes-file ../notes.md *
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "visit $GITHUB_REF_NAME" --notes-file ../notes.md *
