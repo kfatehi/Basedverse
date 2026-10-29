@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# postgres/build's Linux half, run inside the manylinux_2_28 container (as root: it adds flex, which Postgres 18's
-# source needs; what it makes is handed to OWNER, the uid:gid that ran postgres/build): compiles Postgres into <out> so it runs
-# from wherever it is unpacked (Postgres finds its lib and share beside its bin; the programs find libpq through
+# deps/postgres/build's Linux half, run inside the manylinux_2_28 container (as root: it adds flex, which Postgres
+# 18's source needs; what it makes is handed to OWNER, the uid:gid that ran the build): compiles Postgres into <out>
+# so it runs from wherever it is unpacked (Postgres finds its lib and share beside its bin; the programs find libpq through
 # $ORIGIN), with nothing but the C library under it: no ICU, OpenSSL, readline or compression libraries.
 #   linux-inside.sh <postgresql-x.y.tar.bz2> <out>
 set -euo pipefail
 src="$1" out="$2"
+# what it makes is the caller's, even when it fails part way
+trap 'chown -R "$OWNER" "$(dirname "$out")"' EXIT
 dnf -y -q install flex >/dev/null
 cd /tmp && tar -xjf "$src" && cd postgresql-*/
 # Local connections only, so no TLS; SCRAM passwords work without OpenSSL (Postgres' own SHA-256).
@@ -23,5 +25,4 @@ for f in "$out"/bin/* "$out"/lib/*.so* "$out"/lib/postgresql/*.so; do
     strip --strip-unneeded "$f"
   fi
 done
-chown -R "$OWNER" "$(dirname "$out")"
 echo "linux-inside: $("$out/bin/postgres" --version), glibc $(ldd --version | head -1 | awk '{print $NF}')"

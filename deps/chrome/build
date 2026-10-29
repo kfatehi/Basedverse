@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# The headless Chrome built into visit, for one platform (deps/README.md):
+#   deps/chrome/build <linux-x86_64 | linux-aarch64 | macos-aarch64 | macos-x86_64 | windows-x86_64> [--no-test]
+# Chrome for Testing's chrome-headless-shell at CHROME_VERSION, its zip checked against versions.env. Linux: with
+# the libraries and fonts it needs packed beside it, in a manylinux_2_28 container (linux-inside.sh; Docker, on the
+# machine that builds). macOS and Windows: the zip's files as they are (macOS': signed by Google, left untouched).
+# Then tested (deps/chrome/test) unless --no-test (a platform this machine can't run).
+# Out: deps/dist/chrome-<version>-<build>-<platform>.tar.gz, one top directory of that name, the program in it.
+set -euo pipefail
+what=chrome/build
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib.sh"
+here="$deps/chrome"
+platform="${1:?usage: deps/chrome/build <platform> [--no-test]}"
+platform_ok "$platform" || die "no platform $platform (one of: $PLATFORMS)"
+test=1; [ "${2:-}" = "--no-test" ] && test=0
+name="chrome-$CHROME_VERSION-$CHROME_BUILD-$platform"
+work="$deps/.work/chrome-$platform"
+rm -rf "$work" && mkdir -p "$work" "$deps/dist"
+# Chrome for Testing's name for each platform
+cft=linux64
+[ "$platform" = linux-aarch64 ] && cft=linux-arm64
+[ "$platform" = macos-aarch64 ] && cft=mac-arm64
+[ "$platform" = macos-x86_64 ] && cft=mac-x64
+[ "$platform" = windows-x86_64 ] && cft=win64
+zip="$deps/.work/chrome-headless-shell-$CHROME_VERSION-$cft.zip"
+want=$(eval echo "\$CHROME_SHA256_$(upper "$platform")")
+fetch "https://storage.googleapis.com/chrome-for-testing-public/$CHROME_VERSION/$cft/chrome-headless-shell-$cft.zip" "$zip" "$want"
+
+case "$platform" in
+  linux-*)
+    image="$LINUX_IMAGE_X86_64"; [ "$platform" = linux-aarch64 ] && image="$LINUX_IMAGE_AARCH64"
+    say "packing its libraries and fonts in $image"
+    docker run --rm -e OWNER="$(id -u):$(id -g)" -v "$here":/chrome:ro -v "$zip":/chrome.zip:ro -v "$work":/out "$image" \
+      bash /chrome/linux-inside.sh /chrome.zip "/out/$name"
+    made="with the libraries and fonts it needs from AlmaLinux 8 ($image): licenses/PACKAGES.txt"
+    ;;
+  *)
+    unzip_to "$zip" "$work"
+    mv "$work/chrome-headless-shell-$cft" "$work/$name"
+    made="as Chrome for Testing ships it"
+    ;;
+esac
+printf '%s\n' "Chrome for Testing's chrome-headless-shell $CHROME_VERSION for visit (basedverse), build $CHROME_BUILD, $platform," \
+  "from chrome-headless-shell-$cft.zip (sha256 $want), ${made}." \
+  "Made by deps/chrome/build in https://github.com/sarmiena/Basedverse. How visit starts it: deps/README.md." >"$work/$name/BUILD.txt"
+
+archive="$deps/dist/$name.tar.gz"
+pack "$work" "$name" "$archive"
+if [ "$test" = 1 ]; then "$here/test" "$archive"; else say "not tested here (--no-test)"; fi

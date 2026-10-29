@@ -1,0 +1,43 @@
+<!doctype html>
+<!-- deps/chrome/test's page: what the engine needs of the headless Chrome, written into the page as one line. -->
+<meta charset="utf-8">
+<title>deps/chrome/test</title>
+<pre id="out">pending</pre>
+<script>
+const r = {};
+try {
+  // WebGL 2 (SwiftShader: there is no GPU), a shader compiled, a draw call made (the engine makes them no-ops; the
+  // context must still take them).
+  const c = document.createElement("canvas");
+  c.width = c.height = 64;
+  const gl = c.getContext("webgl2");
+  r.webgl2 = !!gl;
+  if (gl) {
+    const info = gl.getExtension("WEBGL_debug_renderer_info");
+    r.renderer = info ? gl.getParameter(info.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+    const s = gl.createShader(gl.FRAGMENT_SHADER);
+    gl.shaderSource(s, "#version 300 es\nprecision mediump float;\nout vec4 o;\nvoid main() { o = vec4(1.0, 0.5, 0.0, 1.0); }");
+    gl.compileShader(s);
+    r.shader = gl.getShaderParameter(s, gl.COMPILE_STATUS) === true;
+    gl.clearColor(0, 1, 0, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    r.glError = gl.getError();
+  }
+} catch (e) { r.webglError = String(e); }
+try {
+  // Text on a 2D canvas (a sign in a room): it has a width, and pixels drawn.
+  const c = document.createElement("canvas");
+  c.width = 240; c.height = 40;
+  const x = c.getContext("2d");
+  x.font = "24px sans-serif";
+  x.fillStyle = "#000";
+  r.textWidth = Math.round(x.measureText("Basedverse").width);
+  x.fillText("Basedverse", 4, 30);
+  const px = x.getImageData(0, 0, c.width, c.height).data;
+  let n = 0;
+  for (let i = 3; i < px.length; i += 4) if (px[i] > 0) n++;
+  r.textPixels = n;
+} catch (e) { r.canvasError = String(e); }
+r.ok = r.webgl2 === true && r.shader === true && r.glError === 0 && r.textWidth > 0 && r.textPixels > 0;
+document.getElementById("out").textContent = "RESULT " + JSON.stringify(r);
+</script>
