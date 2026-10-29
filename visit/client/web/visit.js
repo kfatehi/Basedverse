@@ -3545,6 +3545,9 @@
     }
 
     get inside() { return this.in != null; }
+    // A user page's own room, as its host sends it (engine/SPEC.md 7): its scene's root, to read (a camera following
+    // something in it), never to change (its host owns it; the next delta puts it back). Null until it has arrived.
+    get room() { const s = this.v._homeScene(); return s ? s.root : null; }
 
     // Every plot you watch (with its scene), placed.
     _layout() {
@@ -5165,8 +5168,87 @@
   // offers "Go there" (the full window, in their room: "Back to my room" puts it in the corner again), "Put in my
   // world" (with v.world) and "Unlink". Gone when the visit or link ends. { element, big, shrink(), grow(),
   // release() }
+  // The person's own room, first person (engine/SPEC.md 7): a user page that draws no world of its own gets one here,
+  // read with the newest three.js this visit.js knows, its camera at the person's eyes, WASD, Shift and the mouse as in
+  // a visit, a click pointing (8.3). Behind the stage: a visit fills the window over it, and this comes back after.
+  function homeView(v, parent) {
+    const root = document.createElement("div");
+    root.className = "visit-home"; root.hidden = true;
+    root.style.cssText = "position:fixed;inset:0;z-index:4;background:#000";
+    const canvas = document.createElement("canvas");
+    canvas.style.cssText = "display:block;width:100%;height:100%;cursor:pointer;outline:none"; canvas.tabIndex = 0;
+    const cross = document.createElement("div");
+    cross.style.cssText = "position:absolute;left:50%;top:50%;width:8px;height:8px;margin:-6px 0 0 -6px;border:2px solid rgba(255,255,255,.9);border-radius:50%;box-shadow:0 0 0 1px rgba(0,0,0,.55);pointer-events:none;display:none";
+    const cap = document.createElement("div");
+    cap.style.cssText = "position:absolute;left:0;right:0;bottom:0;padding:6px 10px;font:13px/1.4 system-ui,sans-serif;color:#c9d1d9;background:rgba(13,17,23,.6);pointer-events:none";
+    root.append(canvas, cross, cap);
+    parent.appendChild(root);
+    const h = { world: null, T: null, renderer: null, camera: null, keys: new Set(), yaw: 0, pitch: 0, raf: 0, last: 0, me: { x: 0, y: 0, z: 0, air: 0 }, gone: false };
+    const KEYS = ["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "ShiftLeft", "ShiftRight", ...UP_KEYS, ...DOWN_KEYS];
+    const ignore = e => e.ctrlKey || e.metaKey || e.altKey || (e.target && (e.target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)));
+    const active = () => !root.hidden && h.world && v._world === h.world, locked = () => document.pointerLockElement === canvas;
+    const down = e => { if (!active() || ignore(e) || !KEYS.includes(e.code)) return; e.preventDefault(); h.keys.add(e.code); };
+    const up = e => h.keys.delete(e.code), blur = () => h.keys.clear();
+    const click = () => { if (active() && canvas.requestPointerLock) canvas.requestPointerLock(); };
+    const press = e => { if (e.button === 0 && locked() && active()) { h.world.point(); cross.style.transform = "scale(1.6)"; setTimeout(() => { cross.style.transform = ""; }, 120); } };
+    const lock = () => { cross.style.display = locked() ? "block" : "none"; };
+    const look = e => { if (!locked()) return; h.yaw -= e.movementX * LOOK; h.pitch = Math.max(-1.4, Math.min(1.4, h.pitch - e.movementY * LOOK)); };
+    addEventListener("keydown", down); addEventListener("keyup", up); addEventListener("blur", blur);
+    canvas.addEventListener("click", click); canvas.addEventListener("mousedown", press);
+    document.addEventListener("mousemove", look); document.addEventListener("pointerlockchange", lock);
+    const revs = Object.keys(THREE_FILES);
+    loadThree(revs[revs.length - 1], v._threeBase).then(T => {
+      if (h.gone) return;
+      h.T = T;
+      h.renderer = new T.WebGLRenderer({ canvas, antialias: true });
+      h.renderer.shadowMap.enabled = true;
+      h.camera = new T.PerspectiveCamera(70, 1, 0.05, 500);
+      h.camera.rotation.order = "YXZ";
+      h.world = v.world({ three: T, renderer: h.renderer });
+      const loop = t => { h.raf = requestAnimationFrame(loop); if (!root.hidden) frame(t); };
+      h.raf = requestAnimationFrame(loop);
+    }).catch(e => { console.warn("visit: the home view could not load three.js", e); cap.textContent = `your room cannot be drawn here: ${e.message || e}`; });
+    const frame = t => {
+      const dt = h.last ? Math.min(0.1, (t - h.last) / 1000) : 0;
+      h.last = t;
+      if (v._world !== h.world) { root.hidden = true; return; }   // the page made a world of its own: it draws home
+      const w = canvas.clientWidth, hh = canvas.clientHeight;
+      if (canvas.width !== w || canvas.height !== hh) { h.renderer.setSize(w, hh, false); h.camera.aspect = w / Math.max(1, hh); h.camera.updateProjectionMatrix(); }
+      const k = c => h.keys.has(c), input = { forward: (k("KeyW") || k("ArrowUp") ? 1 : 0) - (k("KeyS") || k("ArrowDown") ? 1 : 0), strafe: (k("KeyD") || k("ArrowRight") ? 1 : 0) - (k("KeyA") || k("ArrowLeft") ? 1 : 0),
+        up: (UP_KEYS.some(k) ? 1 : 0) - (DOWN_KEYS.some(k) ? 1 : 0), run: k("ShiftLeft") || k("ShiftRight") };
+      const at = h.world.frame(dt, Object.assign({}, h.me, { yaw: h.yaw, pitch: h.pitch }), input);
+      h.me = { x: at.x, y: at.y, z: at.z, air: 0 };
+      const hs = v._homeScene(), unit = hs ? hs.unit || 1 : 1, b = v.home && v._bodies.get(v.home.channel), eye = b && b.eyes ? b.eyes : hs && hs.eye != null ? hs.eye : EYES / unit;
+      h.camera.position.set(at.x, at.y + eye, at.z); h.camera.rotation.set(h.pitch, h.yaw, 0);
+      h.world.render(h.camera);
+    };
+    const draw = () => {
+      const show = v.role === "user" && !v.visiting && (!v._world || v._world === h.world);
+      root.hidden = !show;
+      if (!show && locked()) document.exitPointerLock();
+      cap.textContent = !v.home ? "your room is not up" : v.home.paused ? "your room (reloading)…" : "your room · click to look around, WASD to walk, Shift to run, Esc frees the mouse";
+    };
+    v.on("change", draw);
+    draw();
+    return {
+      element: root,
+      release() {
+        h.gone = true; cancelAnimationFrame(h.raf);
+        removeEventListener("keydown", down); removeEventListener("keyup", up); removeEventListener("blur", blur);
+        canvas.removeEventListener("click", click); canvas.removeEventListener("mousedown", press);
+        document.removeEventListener("mousemove", look); document.removeEventListener("pointerlockchange", lock);
+        v.off("change", draw);
+        if (locked()) document.exitPointerLock();
+        if (h.world && v._world === h.world) h.world.release();
+        if (h.renderer) { try { h.renderer.dispose(); } catch (e) { /* gone */ } }
+        root.remove();
+      },
+    };
+  }
+
   function stage(v, { parent = document.body } = {}) {
     v._as("user", "stage");
+    const home = v.role === "user" && !v._world ? homeView(v, parent) : null;   // the person's own room, first person, behind the stage
     if (!document.getElementById("visit-stage-css")) {
       const st = document.createElement("style"); st.id = "visit-stage-css"; st.textContent = STAGE_CSS; document.head.appendChild(st);
     }
@@ -5217,8 +5299,8 @@
     v.on("change", draw); v.on("stats", stats);
     draw();
     return {
-      element: root, get big() { return big; }, shrink: () => set(false), grow: () => set(true),
-      release() { v.off("change", draw); v.off("stats", stats); if (view) view.release(); root.remove(); },
+      element: root, home: home && home.element, get big() { return big; }, shrink: () => set(false), grow: () => set(true),
+      release() { v.off("change", draw); v.off("stats", stats); if (view) view.release(); if (home) home.release(); root.remove(); },
     };
   }
 

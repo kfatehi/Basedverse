@@ -1,0 +1,71 @@
+<!doctype html><meta charset="utf-8"><title>engine test: the room's server page</title>
+<!-- What the engine does to a page, measured from inside it and put on window.results for test.py (through the
+     driver's --debug eval route). Opened in a plain browser, the same page shows what a browser does instead. -->
+<canvas id="gl" width="64" height="64"></canvas><canvas id="c2" width="8" height="8"></canvas>
+<script>
+// In place of visit.js: what the driver reads (SPEC 5.1, point 5). One visitor at first; test.py empties it.
+window.visit = { visitors: [{}], watchers: [], owner: null, office: {} };
+const results = window.results = { loaded: Date.now(), window: { w: innerWidth, h: innerHeight } };
+const E = window.VISIT_ENGINE;
+results.engine = E ? { url: E.url, token: E.token, role: E.role, tickIdle: E.tickIdle, idle: E.idle } : null;
+console.log("test page: up, VISIT_ENGINE " + (E ? "present" : "absent"));
+
+// WebGL: a program compiled and linked, a triangle drawn over a cleared canvas, the pixels read back. In the
+// engine nothing is drawn (clear and drawArrays are no-ops); everything else answers as a real context does.
+(() => {
+  const c = document.getElementById("gl"), gl = c.getContext("webgl2") || c.getContext("webgl");
+  results.webgl = { context: gl ? (window.WebGL2RenderingContext && gl instanceof WebGL2RenderingContext ? "webgl2" : "webgl") : null };
+  if (!gl) return;
+  const x = gl.getExtension("WEBGL_debug_renderer_info");
+  results.webgl.renderer = x ? gl.getParameter(x.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+  const shader = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s); return s; };
+  const prog = gl.createProgram();
+  gl.attachShader(prog, shader(gl.VERTEX_SHADER, "attribute vec2 p; void main() { gl_Position = vec4(p, 0.0, 1.0); }"));
+  gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, "precision mediump float; void main() { gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0); }"));
+  gl.linkProgram(prog);
+  results.webgl.linked = !!gl.getProgramParameter(prog, gl.LINK_STATUS);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer());
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  const p = gl.getAttribLocation(prog, "p");
+  gl.enableVertexAttribArray(p);
+  gl.vertexAttribPointer(p, 2, gl.FLOAT, false, 0, 0);
+  gl.useProgram(prog);
+  gl.viewport(0, 0, 64, 64);
+  gl.clearColor(0, 0, 1, 1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  const px = new Uint8Array(64 * 64 * 4);
+  gl.readPixels(0, 0, 64, 64, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  results.webgl.drawn = px.some(v => v !== 0);
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 2, 2, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array(16));
+  results.webgl.error = gl.getError();   // 0: the texture went up, the no-ops left no error behind
+})();
+
+// A 2D canvas is untouched: a red square is red when read back.
+(() => { const c = document.getElementById("c2").getContext("2d"); c.fillStyle = "#f00"; c.fillRect(0, 0, 8, 8); results.canvas2d = c.getImageData(0, 0, 1, 1).data[0] === 255; })();
+
+// Looked at, without a microphone.
+results.visibility = { state: document.visibilityState, hidden: document.hidden, focus: document.hasFocus() };
+try {
+  navigator.mediaDevices.getUserMedia({ audio: true }).then(() => { results.mic = "granted"; }, e => { results.mic = e.name; });
+} catch (e) { results.mic = "threw " + e.name; }
+
+// The key goes with the page's own requests (the server answers 401 without it), and not to another origin.
+fetch("/asset.txt").then(r => { results.subresource = r.status; }, e => { results.subresource = "error: " + e.message; });
+fetch(location.protocol + "//" + location.hostname + ":3002/x").then(r => { results.other = r.status; }, e => { results.other = "error: " + e.message; });
+
+// Frames a second, by a real timer: 60 with someone there, ENGINE_TICK_IDLE with nobody.
+let frames = 0, last = 0;
+results.raf = { total: 0, perSecond: 0, history: [] };
+(function loop() { requestAnimationFrame(loop); frames++; })();
+setInterval(() => {
+  results.raf.perSecond = frames - last;
+  results.raf.history.push(frames - last);
+  if (results.raf.history.length > 10) results.raf.history.shift();
+  results.raf.total = frames;
+  results.raf.idle = !!(E && E.idle);
+  last = frames;
+}, 1000);
+</script>

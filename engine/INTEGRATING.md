@@ -108,8 +108,9 @@ const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById("c") 
 const blocked = (x, z) => myRoom.isBlocked(x, z);
 buildRoom(scene);   // walls, desks, lights; what never changes marked userData.visitStatic = true
 
-// The engine put visit-client's url, the host token and role: "host" into the page (SPEC 5.1, point 2).
-const v = await Visit.connect({ ...window.VISIT_ENGINE, sim: { name: "my-workroom", version: "2.0" } });
+// The engine put visit-client's url, the host token and role: "host" into the page (SPEC 5.1, point 2), and reads
+// window.visit to see the room is up and who is in it: keep the connection there.
+const v = window.visit = await Visit.connect({ ...window.VISIT_ENGINE, sim: { name: "my-workroom", version: "2.0" } });
 
 v.host({
   scene: { root: scene, three: THREE, renderer, near: 0.05, far: 500 },
@@ -152,7 +153,10 @@ Rules the server page keeps (SPEC 8.1):
 - no pixels read back; raycasts for picking (`v.on("point")` gives `from` and `dir`);
 - nothing of the person's: no chat window, panel, name or avatar;
 - its own state, if it must outlive a reload, in your server;
-- served to the engine's key only (step 5).
+- served to the engine's key only (step 5); the key comes with every request to your server's origin, with
+  none to a CDN or to visit-client;
+- it keeps its connection as `window.visit` (the engine reads it); and, a nicety, your server answers
+  `/favicon.ico` with 204, or the engine logs a 404 at each load.
 
 ### The client page
 
@@ -194,7 +198,7 @@ let me = { x: 5, y: 0, z: 3, yaw: 0, pitch: 0 };
 })(0);
 ```
 
-`world.home` is the home scene's root, for a camera to follow something in it; never change it (the host owns it,
+`world.room` is the home scene's root, for a camera to follow something in it; never change it (the host owns it,
 and the next delta would put it back).
 
 ### One page, two roles

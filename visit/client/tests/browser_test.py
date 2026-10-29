@@ -30,7 +30,7 @@ import websockets  # noqa: E402
 from websockets.asyncio.server import serve  # noqa: E402
 
 BIN, CDP_A, CDP_B, OUT = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
-LOBBY_PORT, WEB_PORT, PORT_A, PORT_B = 18770, 18771, 7421, 7422
+LOBBY_PORT, WEB_PORT, PORT_A, PORT_B, PORT_C = 18770, 18771, 7421, 7422, 7423
 TMP = tempfile.mkdtemp()
 fails = 0
 
@@ -48,13 +48,42 @@ class Tab:
     def __init__(self, port, name):
         self.port, self.name, self.n, self.pending, self.errors = port, name, 0, {}, []
 
-    async def start(self):
+    async def start(self, ws_url=None):
         tabs = json.load(urllib.request.urlopen("http://127.0.0.1:%d/json" % self.port))
-        self.ws = await websockets.connect(next(t for t in tabs if t["type"] == "page")["webSocketDebuggerUrl"], max_size=50_000_000)
+        self.ws = await websockets.connect(ws_url or next(t for t in tabs if t["type"] == "page")["webSocketDebuggerUrl"], max_size=50_000_000)
         self.reader = asyncio.create_task(self._read())
         await self.call("Runtime.enable")
         await self.call("Page.enable")
         await self.call("Emulation.setDeviceMetricsOverride", width=1280, height=720, deviceScaleFactor=1, mobile=False)
+
+    @classmethod
+    async def spawn(cls, port, name, url):
+        """Another page of that Chrome, in a window of its own (a window apart draws: a tab behind another would not)."""
+        ver = json.load(urllib.request.urlopen("http://127.0.0.1:%d/json/version" % port))
+        async with websockets.connect(ver["webSocketDebuggerUrl"], max_size=50_000_000) as bws:
+            await bws.send(json.dumps({"id": 1, "method": "Target.createTarget", "params": {"url": "about:blank", "newWindow": True}}))
+            while True:
+                m = json.loads(await bws.recv())
+                if m.get("id") == 1:
+                    tid = m["result"]["targetId"]
+                    break
+        t = cls(port, name)
+        t.target_id = tid
+        hit = None
+        for _ in range(50):
+            hit = next((x for x in json.load(urllib.request.urlopen("http://127.0.0.1:%d/json" % port)) if x.get("id") == tid), None)
+            if hit:
+                break
+            await asyncio.sleep(0.1)
+        await t.start(hit["webSocketDebuggerUrl"])
+        await t.goto(url)
+        return t
+
+    async def close_window(self):
+        try:
+            urllib.request.urlopen("http://127.0.0.1:%d/json/close/%s" % (self.port, self.target_id)).read()
+        except Exception:
+            pass
 
     async def _read(self):
         async for raw in self.ws:
@@ -97,19 +126,66 @@ class Tab:
         open(os.path.join(OUT, name), "wb").write(base64.b64decode(r["data"]))
 
 
-async def start_client(name, port, url):
-    token = secrets.token_hex(32)
+class Engine:
+    """The engine (engine/SPEC.md 5) hosting a room, asked through its test aid (--debug: POST /debug/eval), as a Tab
+    is asked: the page's values. run-browser.sh started it on this machine's network, with the tokens it gave us."""
+
+    def __init__(self, port):
+        self.port, self.name, self.errors = port, "C-engine", []
+
+    def _post(self, path, body):
+        req = urllib.request.Request("http://127.0.0.1:%d%s" % (self.port, path), data=body.encode(), method="POST")
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read() or b"null")
+
+    async def js(self, expr):
+        try:
+            r = await asyncio.get_running_loop().run_in_executor(None, self._post, "/debug/eval", expr)
+            return r.get("value") if isinstance(r, dict) and "value" in r else r
+        except Exception:
+            return None   # not hosting yet, or the expression threw: as a page without it
+
+    async def until(self, expr, timeout=15):
+        for _ in range(int(timeout * 5)):
+            v = await self.js(expr)
+            if v:
+                return v
+            await asyncio.sleep(0.2)
+        return await self.js(expr)
+
+    def health(self):
+        try:
+            with urllib.request.urlopen("http://127.0.0.1:%d/health" % self.port, timeout=5) as r:
+                return json.loads(r.read())
+        except Exception as e:
+            return {"ok": False, "room": str(e)}
+
+    async def close_window(self):
+        pass
+
+
+async def start_client(name, port, url, user_token=False, tokens=None):
+    """`user_token`: with a user token too (engine/SPEC.md 6.2): then (process, token, user token); `tokens`: (token,
+    user token) given (run-browser.sh made them for the engine), instead of new ones."""
+    token = tokens[0] if tokens else secrets.token_hex(32)
     path = os.path.join(TMP, name + ".token")
     with open(path, "w") as f:
         f.write(token)
+    extra, utoken = [], None
+    if user_token:
+        utoken = tokens[1] if tokens else secrets.token_hex(32)
+        upath = os.path.join(TMP, name + ".user-token")
+        with open(upath, "w") as f:
+            f.write(utoken)
+        extra = ["--user-token-file", upath]
     database = "%s/%s" % (os.environ["VISIT_TEST_DB"], name.lower())   # run-browser.sh's Postgres: made ready first
     m = await asyncio.create_subprocess_exec(BIN, "migrate", "--database", database, stdout=asyncio.subprocess.DEVNULL)
     assert await m.wait() == 0, "visit-client migrate failed"
     p = await asyncio.create_subprocess_exec(BIN, "--lobby", url, "--name", name, "--sim", "test-room/1", "--port", str(port),
-                                             "--token-file", path, "--relays", "none", "--database", database, stdout=asyncio.subprocess.PIPE,
+                                             "--token-file", path, "--relays", "none", "--database", database, *extra, stdout=asyncio.subprocess.PIPE,
                                              stderr=open(os.path.join(OUT, name + ".log"), "w"))
     await asyncio.wait_for(p.stdout.readline(), 10)
-    return p, token
+    return (p, token, utoken) if user_token else (p, token)
 
 
 # The WebGL renderer a page gets, by name: a software one draws on the processor, whose frames are not a GPU's.
@@ -140,7 +216,14 @@ async def main():
     await b.start()
     if not await renderers((a, b)):
         return 2
-    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=HERE)
+    class Handler(http.server.SimpleHTTPRequestHandler):
+        """The test room's files; the room's server page (?role=host) only once the test says so (a `host-go` file in
+        OUT): the engine, started before the test, is kept trying, with its backoff, until C's visit-client is up."""
+        def do_GET(self):
+            if "role=host" in self.path and not os.path.exists(os.path.join(OUT, "host-go")):
+                return self.send_error(503, "not yet")
+            return super().do_GET()
+    handler = functools.partial(Handler, directory=HERE)
     web = http.server.ThreadingHTTPServer(("127.0.0.1", WEB_PORT), handler)
     threading.Thread(target=web.serve_forever, daemon=True).start()
     async with serve(lobby.handler, "127.0.0.1", LOBBY_PORT, max_size=lobby.LIMITS["frame"]):
@@ -1016,6 +1099,104 @@ async def main():
         check("A hangs up: over for both, microphones off again", (await a.until("v.calls.length === 0 && !v._mic"), await b.until("v.calls.length === 0 && !v._mic")), (True, True))
         await a.js("v.unlink()")
         await b.until("v.watchers.length === 0")
+
+        engine_port = int(os.environ.get("ENGINE_PORT") or 0)
+        print("\nthe room and the person apart (engine/SPEC.md 3, 4, 7): C's room %s, C's person on a page of its own" % ("in the engine" if engine_port else "on a page of its own"))
+        pc, tc, tuc = await start_client("C", PORT_C, url, user_token=True, tokens=(os.environ["VISIT_C_TOKEN"], os.environ["VISIT_C_USER_TOKEN"]) if engine_port else None)
+        open(os.path.join(OUT, "host-go"), "w").close()   # the engine may have the room's page now (its next try: within its backoff, 30 s at most)
+        room_c = "http://127.0.0.1:%d/room.html?role=%%s&three=160&world=1#port=%d&token=%%s" % (WEB_PORT, PORT_C)
+        hc = Engine(engine_port) if engine_port else await Tab.spawn(CDP_B, "C-host", room_c % ("host", tc))
+        await b.goto(room_c % ("user", tuc))
+        await a.goto(world)
+        check("the room's page hosts as the host, nobody in it yet; the person's page connects as the user",
+              (await hc.until("window.v && v.role === 'host' && v.state === 'online' && v.role", 90), await b.until("window.v && v.role", 30)), ("host", "user"))
+        reloads0 = None
+        if engine_port:
+            for _ in range(50):   # (its own look at the page comes once a second)
+                h = hc.health()
+                if h.get("room") == "hosting":
+                    break
+                await asyncio.sleep(0.2)
+            reloads0 = h.get("reloads")   # (its loads before the room's visit-client was up: tried again, with backoff)
+            check("the engine says so: /health hosting, ok", (h.get("room"), h.get("ok")), ("hosting", True))
+        check("C is in the lobby, ready: its room's page hosts it", await a.until("v.offices.some(o => o.name === 'C' && o.ready)", 30), True)
+        check("the owner's visit: the room has its person as a visitor of its own (who.owner), spawned by the desk", await hc.until(
+            "v.owner && v.visitors.length === 1 && v.visitors[0].owner && v.visitors[0].visitor.owner && window.spawns && spawns.some(s => s.owner) && v.visitors[0].pose && Math.round(v.visitors[0].pose.z * 10) / 10", 20), 6.5)
+        check("and the person has home: their room, drawn by their world as its own plot, where its scene has it", await b.until(
+            "v.home && !v.home.paused && (p => p && p.home && p.rect.map(Math.round))(room.world.plots.find(p => p.home))", 30), [0, 0, 10, 8])
+        check("the room's scene reached the person's page, with the desk and the spinner; its watchers do not count its owner",
+              (await b.until("(s => !!s && !!s.root.getObjectByName('spinner') && !!s.root.getObjectByName('desk' in s.root ? 'desk' : 'spinner'))(v._homeScene())", 20), await hc.js("v.watchers.length")), (True, 0))
+        check("the person stands where their room spawned them, walked by it (its move, who.owner)", await b.until(
+            "room.world.inside && Math.abs(room.me.z - 6.5) < 0.1 && Math.abs(room.me.x - 5) < 0.1", 20), True)
+        await b.shot("c_user_home.png")
+        z0 = await b.js("room.me.z")
+        await b.key("KeyW", "w", 87, True)
+        await asyncio.sleep(1.0)
+        await b.key("KeyW", "w", 87, False)
+        await asyncio.sleep(0.5)
+        z1, hz = await b.js("room.me.z"), await hc.js("v.visitors[0].pose.z")
+        check("W: the room walks its owner forward, and the person's page follows", (z0 - z1 > 1.0, abs(z1 - hz) < 0.2, await hc.js("window.movedWith && movedWith.owner")), (True, True, True))
+        await b.key("KeyW", "w", 87, True)
+        await asyncio.sleep(2.0)
+        await b.key("KeyW", "w", 87, False)
+        await asyncio.sleep(0.5)
+        check("into the desk ahead: the room stops them at it (0.3 short), and the page agrees", (round(await hc.js("v.visitors[0].pose.z"), 1), abs(await b.js("room.me.z") - await hc.js("v.visitors[0].pose.z")) < 0.2), (4.5, True))
+        await a.js("v.addGuest(v.offices.find(o => o.name === 'C').key, 'C')")
+        await b.js("v.addGuest(v.offices.find(o => o.name === 'A').key, 'A')")
+        check("guests both ways: A's plot in the person's world, beside home", (await b.until("(p => p && p.name)(room.world.plots.find(p => !p.home))", 20)), "A")
+        key_a = await b.js("v.offices.find(o => o.name === 'A').key")
+        await b.js("v.place(%s, { x: -5.5, z: 4, turn: 0 })" % json.dumps(key_a))   # A's room flush against C's west wall, doorway to doorway
+        check("placed flush west of home", await b.until("(p => !!p && JSON.stringify(p.rect.map(x => Math.round(x) || 0)) === '[-10,0,0,8]')(room.world.plots.find(p => !p.home))", 10), True)
+
+        async def walk_until(yaw, expr, secs, on=0.3):
+            """Facing `yaw`, W held until `expr` holds (at most `secs`), then `on` seconds more."""
+            await b.js("room.me.yaw = %f" % yaw)
+            await asyncio.sleep(0.1)
+            await b.key("KeyW", "w", 87, True)
+            for _ in range(int(secs * 20)):
+                if await b.js(expr):
+                    break
+                await asyncio.sleep(0.05)
+            await asyncio.sleep(on)
+            await b.key("KeyW", "w", 87, False)
+            await asyncio.sleep(0.4)
+        await walk_until(math.pi / 2, "room.me.x < 2", 4)   # west, clear of the desk
+        await walk_until(0, "Math.abs(room.me.z - 4) < 0.15", 3, on=0)   # north, to the doorway's row (and not past it)
+        await b.js("room.me.yaw = Math.PI / 2")   # west: out through C's doorway, in through A's
+        await b.key("KeyW", "w", 87, True)
+        for _ in range(100):
+            if await b.js("!!room.where"):
+                break
+            await asyncio.sleep(0.1)
+        await asyncio.sleep(0.4)
+        await b.key("KeyW", "w", 87, False)
+        check("the person walks out of their room onto A's plot: in A's room, A has them, and their own room's page no longer does",
+              (await b.until("room.where && room.where.name", 10), await a.until("v.visitors.length === 1 && v.visitors[0].visitor.name", 10), await hc.until("v.visitors.length === 0", 10)), ("A", "C", True))
+        await b.js("room.me.yaw = -Math.PI / 2")   # back east, home
+        await b.key("KeyW", "w", 87, True)
+        for _ in range(100):
+            if await b.js("room.where === null"):
+                break
+            await asyncio.sleep(0.1)
+        await asyncio.sleep(0.5)
+        await b.key("KeyW", "w", 87, False)
+        check("and back home: their room spawns them where they stepped in (at), and A's visitor is gone",
+              (await b.until("room.where === null && room.world.inside", 10), await hc.until("v.visitors.length === 1 && v.visitors[0].owner && spawns[spawns.length - 1].owner && !!spawns[spawns.length - 1].at && v.visitors[0].pose.x < 1.5", 10), await a.until("v.visitors.length === 0", 10)), (True, True, True))
+        await b.shot("c_user_back.png")
+        await b.goto("about:blank")
+        check("the person's page gone: the room's page has no owner, and no visitor", await hc.until("v.owner === null && v.visitors.length === 0", 10), True)
+        await b.goto(room_c % ("user", tuc))
+        check("back: home again, and the room has its owner again", (await b.until("window.v && v.home && room.world.inside", 30), await hc.until("v.owner && v.visitors.length === 1 && v.visitors[0].owner", 10)), (True, True))
+        if engine_port:
+            h = hc.health()
+            check("the engine, all along: hosting, no reload needed meanwhile", (h.get("room"), h.get("reloads") == reloads0), ("hosting", True))
+        check("no errors in the room's page nor the person's", (hc.errors, b.errors), ([], []))
+        await hc.close_window()
+        pc.terminate()
+        await pc.wait()
+        await a.goto(room % (WEB_PORT, "", PORT_A, ta))
+        await b.goto(room % (WEB_PORT, "?three=160", PORT_B, tb))
+        check("A and B as before, for what follows", (bool(await a.until("window.v && v.state === 'online'", 30)), bool(await b.until("window.v && v.state === 'online'", 30))), (True, True))
 
         print("\nwhat a host sends is only data")
         r = await b.js("""(() => { const c = Visit._test.cleanScene, budget = { vertices: 0, objects: 0 };

@@ -106,7 +106,9 @@ As 5.1, plus `role` (what this connection is) and, by role:
 ### 3.3 Who sends what
 
 Each message of 5.2 belongs to a role. Sent by the other, it is refused: `error` `wrong_role`, with the
-message's type as `ref`, and nothing done. A page without a role may send them all.
+message's type as `ref`, and nothing done; a binary frame of the wrong kind (5.4: the scene, its edits and the
+landscape are the host's; the avatar, possessions, voice and pictures the user's) is dropped, and `wrong_role`
+with `ref: "frame"` said at most once a second. A page without a role may send them all.
 
 | the host sends (5.2) | the user sends (5.2) | either |
 |---|---|---|
@@ -180,37 +182,49 @@ browser test drives Chrome (visit/client/tests/browser_test.py).
 ### 5.1 What it does
 
 1. **Loads the room's server page** (`ENGINE_ROOM_URL`), with `Authorization: Bearer <key>` on every request
-   the page makes (`ENGINE_KEY_FILE`: an API key of auth-client's, ../auth/SPEC.md 3; the workroom's server
-   takes a key as the owner, as it does for agents), so the room's code is served to the engine and to nothing
-   else without a session. The page's own origin is the server's (`http://<server>:<port>`): list it in
-   `--origins` (6.4).
+   the page makes **to that URL's origin** (`ENGINE_KEY_FILE`: an API key of auth-client's, ../auth/SPEC.md 3;
+   the workroom's server takes a key as the owner, as it does for agents), so the room's code is served to the
+   engine and to nothing else without a session; a request elsewhere (a CDN's three.js, visit-client's
+   library) carries nothing. The page's own origin is the server's (`http://<server>:<port>`): list it in
+   `--origins` (6.4). The key and the token are read from their files at each load: one not there yet is a
+   failed load, tried again (a launcher's order of starting).
 2. **Gives the page its visit-client**, before any of the page's own scripts run: `window.VISIT_ENGINE = {
-   url: "ws://<VISIT_HOST>:<VISIT_PORT>/ws", token: "<the host token>", role: "host" }`. The page passes it to
-   `Visit.connect` (7). The token is in the engine's page and nowhere else.
+   url: "ws://<VISIT_HOST>:<VISIT_PORT>/ws", token: "<the host token>", role: "host", idle, frames, tickIdle }`.
+   The page passes it to `Visit.connect` (7), and **keeps what that resolves to as `window.visit`**: it is how
+   the engine sees the room is up (point 6) and who is in it (point 5). The token is in the engine's page and
+   nowhere else.
 3. **Makes drawing free.** The same script, run before the page's own: the WebGL context the page gets
-   (`getContext("webgl")`, `"webgl2"`) is the real one with its draw calls made no-ops: `drawArrays`,
-   `drawElements`, `drawArraysInstanced`, `drawElementsInstanced`, `drawRangeElements`, `clear`,
-   `blitFramebuffer`. Everything else is real: three.js sees a context that works, compiles its programs,
+   (`getContext("webgl")`, `"webgl2"`, `"experimental-webgl"`) is the real one with its draw calls made no-ops:
+   `drawArrays`, `drawElements`, `drawArraysInstanced`, `drawElementsInstanced`, `drawRangeElements`, `clear`,
+   `blitFramebuffer`, and the same under WebGL 1's `ANGLE_instanced_arrays` and `WEBGL_multi_draw` names.
+   Everything else is real: three.js sees a context that works, compiles its programs,
    uploads geometry and textures once, and spends nothing on frames nobody sees. 2D canvases are untouched
    (a sign drawn on one, then a `CanvasTexture`, works). No release of three.js is special-cased.
    `readPixels` returns what the real context has, which is nothing drawn: a room must not read pixels back
    (8.1).
 4. **Tells the page it is looked at**: `document.visibilityState` is `"visible"`, `document.hidden` false,
-   `document.hasFocus()` true; `navigator.mediaDevices.getUserMedia` rejects (`NotFoundError`); there is no
-   pointer and no keyboard.
-5. **Keeps the room ticking.** `requestAnimationFrame` runs at 60 a second while anyone is in the room,
-   watching it, or connected as the user; `ENGINE_TICK_IDLE` (10) a second otherwise. The driver asks visit.js
-   once a second (`Runtime.evaluate`: `v.visitors.length + v.watchers.length`, and `ready.owner`) and sets
-   `window.VISIT_ENGINE.idle`, which the script's `requestAnimationFrame` reads. A room's own `setInterval`
-   logic is not slowed.
+   `document.hasFocus()` true; `navigator.mediaDevices.getUserMedia` rejects (`NotFoundError`; defined even on
+   an `http://` origin, which has no `mediaDevices` of its own); there is no pointer and no keyboard; the window
+   is `ENGINE_WINDOW` exactly, as the page measures it.
+5. **Keeps the room ticking.** The script runs the page's `requestAnimationFrame` callbacks from a loop of its
+   own: at the browser's 60 a second while anyone is in the room, watching it, or connected as the user; at
+   `ENGINE_TICK_IDLE` (10) a second otherwise, from a timer. The driver asks the page once a second
+   (`window.visit`: `visitors.length + watchers.length`, and `owner`) and sets `window.VISIT_ENGINE.idle`;
+   every frame delivered counts in `VISIT_ENGINE.frames`. A room's own `setInterval` logic is not slowed.
 6. **Keeps it alive.** The page's console and uncaught errors go to the engine's log (`ENGINE_LOG`). A page that
-   has crashed (`Inspector.targetCrashed`), that has not completed a frame in 10 s, or whose `Visit.connect`
-   has not reached `ready` within 60 s of loading, is loaded again: after 1 s, then 2, 4, … 30 s between tries,
-   for ever. A browser past `ENGINE_MEMORY_MAX` (its processes' resident memory, read from `/proc`) is stopped
-   and started again. visit-client meanwhile does what it does on a reload (3.5).
+   has crashed (`Inspector.targetCrashed`, its target gone), that has stalled (no frame counted, or no answer
+   from its main thread, for 10 s), whose load failed (an HTTP error, no server yet), or whose `Visit.connect`
+   has not reached `ready` (`window.visit`) within 60 s of loading, is loaded again: after 1 s, then 2, 4, … 30 s
+   between tries, for ever; the wait starts over at 1 s once the room is hosting. A browser past
+   `ENGINE_MEMORY_MAX` (its processes' anonymous and shared memory, each page once: `Pss_Anon` + `Pss_Shmem`
+   from `/proc`, what the container's cgroup counts; a sum of resident sizes would count Chromium's binary once
+   a process) is stopped and started again. visit-client meanwhile does what it does on a reload (3.5).
 7. **Answers `/health`** on `ENGINE_PORT`, on its container's network only, never published:
    `{"ok": true, "version": "…", "room": "hosting" | "loading" | "failed", "since": <ms epoch>, "reloads":
-   <count>}`. `ok` is false while `failed`.
+   <count>}`. `loading` from the start until `ready`, and during a memory restart; `hosting` from `ready`;
+   `failed` from a failed load, a crash, a stall or the browser's exit until it hosts again (a retry does not
+   put it back to `loading`); `ok` false while `failed`; `since`, when `room` last changed; `reloads`, every
+   load after the first, failed tries and memory restarts among them.
 
 ### 5.2 Settings
 
@@ -226,15 +240,26 @@ browser test drives Chrome (visit/client/tests/browser_test.py).
 | `ENGINE_WINDOW` | `1280x720` | the page's window size: what the room's camera and canvas are told, nothing drawn |
 | `ENGINE_LOG` | `info` | `error`, `warn`, `info`, `debug` |
 
-A flag for each (`--room-url`, …); a flag wins over its variable.
+A flag for each, without the prefix (`--room-url`, `--key-file`, `--visit-host`, `--visit-port`, `--token-file`,
+`--port`, `--tick-idle`, `--memory-max`, `--window`, `--log`; `--version`); a flag wins over its variable. A missing
+or impossible setting is exit 2. `ENGINE_DEBUG=1` (`--debug`) turns on a test aid, `POST /debug/eval` (the body
+run in the page, its value as JSON) and `POST /debug/crash`, on `ENGINE_PORT`: for the tests, never part of the
+contract, 404 without it.
 
 ### 5.3 What it is made of, and holds
 
-Chromium headless (`--headless=new --disable-gpu --no-first-run --window-size=<ENGINE_WINDOW>`, its own
-sandbox where the container allows it, the container the boundary where not), a throwaway profile, and the
-driver. It runs as an unprivileged user. It holds two files, the host token and the API key, and nothing of the
-person's: no session, no password, no microphone. It needs no GPU and asks for none. It expects 150 to 300 MB
-of memory and, while the room ticks, what the room's own logic costs; idle, under a percent of a core.
+Debian's Chromium, headless (`--headless=new --disable-gpu --enable-unsafe-swiftshader --disable-dev-shm-usage
+--no-first-run --no-default-browser-check --window-size=<ENGINE_WINDOW>`, the page's metrics set to
+`ENGINE_WINDOW` through the devtools protocol, as the window's own size counts the browser's frame), a
+throwaway profile, and the driver (Python's standard library; the devtools protocol over
+`--remote-debugging-pipe`, no port). Chromium's own sandbox where the container allows it; where it does not
+(Docker's default seccomp and a host that keeps unprivileged user namespaces from it: the usual case), the
+driver sees Chromium die saying so and starts it again with `--no-sandbox`, logging a warning once: the
+container is the boundary then. It runs as an unprivileged user (the launcher's `user:`). It holds two files,
+the host token and the API key, and nothing of the person's: no session, no password, no microphone. It needs
+no GPU and asks for none: WebGL is SwiftShader's, which only uploads (point 3). Measured: an image of some
+600 MB; 185 MiB of memory and a third of a percent of a core idle; a few percent busy, plus what the room's own
+logic costs.
 
 ### 5.4 A reload, as the room sees it
 
@@ -337,8 +362,8 @@ const v = await Visit.connect({ port, token, sim: { name, version } });
     with the page's `three` (or fetches the host's revision, as a stage does), makes it the office's own plot,
     and draws friends' plots round it as today. `world.frame(dt, pose, input)` sends `input` up the home
     channel (or the plot's, when inside one) and returns where its host has the person; the page draws its own
-    body there, and `world.render(camera)` draws it all. `world.home` is the home scene's root, read-only: for a
-    camera to follow something, never to change (the host owns it).
+    body there, and `world.render(camera)` draws it all. `world.room` is the home scene's root, read-only: for a
+    camera to follow something, never to change (the host owns it); `world.plots` lists home too (`home: true`).
 - `v.visitors` is informational for a user (the panel's Kick, Unlink): `pose` and `look` as the host reports
   them; no inputs.
 - **A page without a role** has every method, as today.
@@ -459,6 +484,10 @@ why.
   does it today.
 - **The engine as a visit-client subcommand** (`visit-client engine`, driving a Chromium beside it) instead of
   an image of its own. No: visit-client stays one thin binary that knows nothing of browsers.
+- **A host token changed under a running engine** (a launcher run again without restarting the engine): the page
+  keeps the old one, and the room stays down until something reloads it. The engine could read the file each
+  second and reload on a change; or the launcher restarts the engine with visit-client, which is what
+  INTEGRATING.md says to do.
 
 ## Not in v1
 
