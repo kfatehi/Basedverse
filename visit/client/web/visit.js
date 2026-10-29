@@ -3819,10 +3819,21 @@
     }
 
     // While in a plot: point where you look (SPEC 8.3). Home: out of the plot you are in.
-    point() {
+    // A click, as a visitor's point (SPEC 8.3): where this page looks, or, given `target` (a point in this page's world,
+    // what its own ray from its camera met in the plot), the way to it from where the host has this page's eyes: a
+    // camera behind you looks along another line than your eyes do (a user page's, engine/SPEC.md 7).
+    point(target) {
       const x = this.in != null && this.list.find(y => y.w && y.w.channel === this.in);
       if (!x) return false;
-      this.v._send({ type: "point", yaw: this.look.yaw - x.at.turn * Math.PI / 2, pitch: this.look.pitch });
+      let yaw = this.look.yaw - x.at.turn * Math.PI / 2, pitch = this.look.pitch;
+      if (target && this.me) {
+        const T = this.T, h = this._holder(x), eyes = ((this.v._bodies.get(x.w.channel) || {}).eyes) || EYES;
+        const from = new T.Vector3(this.me.x, 0, this.me.z).applyMatrix4(h.inverse), to = new T.Vector3(Number(target.x) || 0, 0, Number(target.z) || 0).applyMatrix4(h.inverse);
+        from.y = this.me.y / x.k + eyes; to.y = (Number(target.y) || 0) / x.k;
+        to.sub(from);
+        if (to.lengthSq() > 1e-6) { yaw = Math.atan2(-to.x, -to.z); pitch = Math.max(-1.4, Math.min(1.4, Math.asin(to.y / to.length()))); }
+      }
+      this.v._send({ type: "point", yaw, pitch });
       return true;
     }
     leave() { const w = this.in != null && this.v._watches.get(this.in); if (w) this._exit(w); }
