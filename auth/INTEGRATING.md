@@ -1,37 +1,38 @@
-# Integrating auth-client into your workroom
+# Integrating the sign-in into your workroom
 
 **Written for the coding agent doing the integration.** Read it all before you change anything, then work
 through the steps in order; each ends with how to check it. The contract behind it is [SPEC.md](SPEC.md).
 
-This guide lives in basedverse's `auth/` directory, beside `client/` (auth-client's source) and `web/login.html`
-(the sign-in page to start from). Paths below are relative to `auth/`.
+This guide lives in basedverse's `auth/` directory, beside `client/` (the sign-in's source, a library built into
+`visit`) and `web/login.html` (the sign-in page to start from). Paths below are relative to `auth/`.
 
 ## What you are building
 
 Your workroom's server takes whoever can reach it for its owner: anyone on the network who can write a `Host`
 header. After this integration:
 
-- **every page and route checks the session with auth-client**, in the one place every request passes, except an
+- **every page and route checks the session with the sign-in**, in the one place every request passes, except an
   explicit list of public ones: a request without a valid session is turned away (a page: to `/login`; an API
   route: 401);
 - the owner signs in on your `/login` page (from [web/login.html](web/login.html)) with an account made in a
   terminal, and stays signed in for up to 30 days;
 - the owner's scripts and agents use API keys, checked the same way;
-- visit-client's token comes from auth-client, for a signed-in session, in place of your own `/api/visit`;
+- `visit`'s page token comes from the sign-in, for a signed-in session, in place of your own `/api/visit`;
 - anything powerful your page reached directly on `127.0.0.1` is relayed by your server, which adds that
   service's token itself: the browser never holds it.
 
-You get one program you do not modify: **auth-client**. It runs beside your server and visit-client, listens on
-`127.0.0.1` only (in a container, on its container's own network, unpublished: step 4), and talks only to your server, which sends its service token with every call. **The browser
-never talks to it.**
+You get it inside the program you already run and do not modify, **`visit`**: given a service token by your launcher
+(step 4), it serves the sign-in's API on `127.0.0.1` only (in a container, on its container's own network,
+unpublished: step 4), and talks only to your server, which sends that token with every call. **The browser never
+talks to it.** Its accounts and sessions are kept in `visit`'s own database.
 
-You write: the launcher steps (start it with a token file), one check before every route, `/login` and `/logout`,
+You write: a launcher step (a token file for `visit`), one check before every route, `/login` and `/logout`,
 an `Origin` check on writes, the `/v1/visit` route, relays for local services, and a test that keeps all of it
 true.
 
 ## The rule
 
-**Every page and route checks the session with auth-client, unless the user says otherwise.** Public routes are
+**Every page and route checks the session with the sign-in, unless the user says otherwise.** Public routes are
 an explicit list in code: `GET /login`, `POST /login`, the login page's own files (it has none: it is one page),
 and only what the user names besides. Nothing is public by default. A route added later is covered without
 anyone remembering to cover it. Keep the user's choices (what they made public, and why) in your workroom's
@@ -39,8 +40,8 @@ integration log.
 
 ## Before you start
 
-- **Visit first.** auth-client uses Visit's Postgres database and comes in the same release as visit-client:
-  integrate Visit ([../visit/INTEGRATING.md](../visit/INTEGRATING.md)) before this, or alongside.
+- **Visit first.** The sign-in is part of `visit` and keeps its data in `visit`'s database: integrate Visit
+  ([../visit/INTEGRATING.md](../visit/INTEGRATING.md)) before this, or alongside.
 - **Find the one place every request passes**: your framework's middleware, or the top of your request handler.
   If your server answers some requests elsewhere (a WebSocket upgrade, a static file handler, a second port),
   each of those needs the same check: list them now.
@@ -49,84 +50,73 @@ integration log.
 - **Ask the user** what, if anything, must work without signing in (a status badge, a webhook). The answer is
   usually nothing.
 
-## Step 1 — Get auth-client
+## Step 1 — It is inside `visit`
 
-It is in every basedverse release from 0.21, beside visit-client: `auth-client-<target>.tar.gz` (`.zip` on
-Windows), for the same targets. `bin/setup` gets both (into `visit/client/bin/` and `auth/client/bin/`), and
-writes their paths into your `.env` (`VISIT_CLIENT_PATH`, `AUTH_CLIENT_PATH`). To build it instead: `auth/client/cargo build
---release` (Rust in Docker; nothing to install).
+Nothing to get: from 2.0 the sign-in is built into `visit` ([../visit/INTEGRATING.md](../visit/INTEGRATING.md),
+step 1). Before 2.0 it was a program of its own, auth-client; [../CHANGELOG.md](../CHANGELOG.md)'s v2.0.0 says how
+a workroom moves over.
 
-**Check:** `auth-client --version` says the release's version.
+**Check:** `visit auth --help` lists its commands.
 
-## Step 2 — The database's roles, then its schema
+## Step 2 — Its database: `visit`'s own
 
-Up to now visit-client used the database's superuser. From 0.21, each program has a plain role of its own,
-owning a schema of its own, and the superuser is used for this step only:
+Its accounts, sessions and keys are kept in the workroom's database, the Postgres inside `visit`, in a schema of
+their own (`auth`) and as a role of their own: `visit` makes the roles and brings the schema up to date at every
+start (SPEC.md 5). There is nothing to run, and no database address and no superuser to keep: none goes in your
+`.env`, and your launcher passes none on.
 
-```
-auth-client migrate --admin <the superuser's URL>      # with VISIT_DATABASE_URL and AUTH_DATABASE_URL as they will be
-```
-
-`bin/setup` does it for you: it makes the two passwords, runs this, and writes `VISIT_DATABASE_URL` (role `visit`),
-`AUTH_DATABASE_URL` (role `auth`) and `VISIT_DATABASE_ADMIN_URL` (the superuser) into your `.env`. A database made
-by 0.20's setup has visit-client on the superuser itself: `bin/setup` moves it over (SPEC.md 5), renaming the
-superuser and moving visit-client's tables, with all they hold, into its schema. Back the database up first if it
-holds anything you would miss.
-
-After every upgrade, as with visit-client: `auth-client migrate` (it reads `AUTH_DATABASE_URL`).
-
-**Your launcher passes `VISIT_DATABASE_ADMIN_URL` to nothing.** visit-client gets `VISIT_DATABASE_URL`;
-auth-client gets `AUTH_DATABASE_URL`; each only its own.
-
-**Check:** `auth-client migrate --status` says up to date; `visit-client migrate --status` too, with the new
-`VISIT_DATABASE_URL`.
+**Check:** with your workroom's `.env` loaded, `visit psql -c '\dn'` lists the schemas `auth` and `visit`.
 
 ## Step 3 — The owner's account
 
-In a terminal, on the machine: `auth-client user add <name>`. It asks for the password twice, without echo (at
-least 12 characters). `bin/setup` offers to do it. There is no sign-up page, and you never add one.
+In a terminal, on the machine, with your workroom's `.env` loaded (`set -a; . ./.env; set +a` in a shell: its
+`VISIT_DATA_DIR` says which workroom), or with `--data-dir` right after `auth`: `visit auth user add <name>`. It
+asks for the password twice, without echo (at least 12 characters). It works whether `visit` runs or not.
+`bin/setup` offers to do it. There is no sign-up page, and you never add one.
 
-**Check:** `auth-client user list` shows the account.
+**Check:** `visit auth user list` shows the account.
 
 ## Step 4 — Start it from your launcher
 
-Beside visit-client, on every start:
+On every start of `visit` ([../visit/INTEGRATING.md](../visit/INTEGRATING.md), step 2):
 
 1. Make a new service token (32 random bytes, hex) and write it to a file only the user can read (mode 0600),
-   e.g. beside visit-client's token file. Never in the `.env`, never in a log.
-2. Start auth-client with `AUTH_DATABASE_URL`, `AUTH_TOKEN_FILE` (that file), and the same `VISIT_PORT` and
-   `VISIT_TOKEN_FILE` visit-client gets (for step 7). `AUTH_PORT` if 7403 is taken.
+   e.g. beside `visit`'s page token file. Never in the `.env`, never in a log.
+2. Give `visit` that file as `AUTH_TOKEN_FILE`: it then serves the sign-in's API too, on `AUTH_PORT` (7403) unless
+   you say otherwise. For step 8 it uses its own page port and token file: nothing more to give it.
 3. Give your server the same `AUTH_TOKEN_FILE` and `AUTH_PORT`. It reads the token from the file once at its
    start.
-4. Stop it with the rest.
+4. It stops with `visit`.
 
-In Docker, with your server in a container, give auth-client a service of its own on your server's network:
-`AUTH_LISTEN=0.0.0.0` (its container's own network: your server reaches it by the service's name, `AUTH_HOST`
-below) and **no published port**, so nothing outside that network reaches it. Either can then restart or be
-recreated alone. (Not `network_mode: "service:<your server>"`: auth-client would be left in a network that is gone
-each time your server restarts, and every route would refuse until it restarted too.) Your server on the host's
-network: run auth-client there too, on `127.0.0.1` as it is by default. In a container, with visit-client on the
-host's network, it cannot reach visit-client's port: set `AUTH_VISIT_PROBE=false`, and have your launcher remove
-visit-client's token file when visit-client stops (a file there then means it runs).
+```sh
+# in step 2's shell launcher, before visit starts (umask 077 already)
+export AUTH_TOKEN_FILE="${XDG_RUNTIME_DIR:-/tmp}/my-workroom-auth.token"
+head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$AUTH_TOKEN_FILE"
+```
+
+A sign-in that cannot start (its token file missing or short, its port taken) stops `visit` before its ready line,
+exit 5, saying why.
+
+**Your server in a container** cannot reach this machine's `127.0.0.1` (`host.docker.internal` does not lead there
+on Linux or in WSL). Either run it on the host's network, where it reaches `visit` on `127.0.0.1` as it is, or run
+`visit` in a container of its own on your server's network: `AUTH_LISTEN=0.0.0.0` and `VISIT_LISTEN=0.0.0.0` (its
+container's own network), **no published port**, so nothing outside that network reaches it, and your server
+asking it by the service's name (`AUTH_HOST` below). What `visit` needs in a container (a user it knows, not root;
+a home it can write; `VISIT_DATA_DIR` on a volume) is in [../visit/SPEC.md](../visit/SPEC.md) 4.4. Either can then
+restart alone. (Not `network_mode: "service:<your server>"`: `visit` would be left in a network that is gone each
+time your server restarts, and every route would refuse until it restarted too.)
 
 ```yaml
 services:
-  auth:
-    image: …                      # or build: <basedverse>/auth/client
-    environment:
-      AUTH_LISTEN: 0.0.0.0        # its own network only: no `ports:`
-      AUTH_DATABASE_URL: postgres://auth:…@visit-db:5432/visit
-      AUTH_TOKEN_FILE: /auth/token
-      AUTH_VISIT_PROBE: "false"
   your-server:
     environment:
-      AUTH_HOST: auth             # where your server asks auth-client
+      AUTH_HOST: visit            # where your server asks the sign-in: visit's service name
       AUTH_TOKEN_FILE: /auth/token
 ```
 
 **Check:** `curl -s http://127.0.0.1:7403/health` answers `{"ok":true,"version":"…"}`; a call without the token,
 `curl -s -X POST http://127.0.0.1:7403/v1/check -d '{}'`, answers 401. In containers, the same from your server's
-(`http://auth:7403`), and nothing from this machine's own `curl` (no port published). Restart your server alone:
+(`http://visit:7403`), and nothing from this machine's own `curl` (no port published). Restart your server alone:
 it still signs you in.
 
 ## Step 5 — One check before every route
@@ -136,12 +126,13 @@ In the one place every request passes (never route by route):
 1. If the route is in your public list, let it through.
 2. Read the session cookie (`session`, or `__Host-session` over HTTPS) or, from a script, an
    `Authorization: Bearer <API key>` header.
-3. Ask auth-client: `POST /v1/check` with `{"session": …}` or `{"key": …}` and your service token. You may keep a
+3. Ask the sign-in: `POST /v1/check` with `{"session": …}` or `{"key": …}` and your service token. You may keep a
    valid answer for at most 5 seconds (keyed by the session or key); never keep a refusal.
 4. 200: the request is the owner's (`user`, or a key's `key`): let it through. Anything else: refuse it. A page:
    `303` to `/login?next=<its path>` (with `&e=expired` if a session cookie came and failed). An API route, or any
    request with a Bearer key: `401` `{"error": "sign in"}`.
-5. auth-client unreachable: refuse (503). Never let a request through because the check could not be made.
+5. The sign-in unreachable (`visit` not running): refuse (503). Never let a request through because the check could
+   not be made.
 
 A sketch, in Python (adapt it to your framework's middleware):
 
@@ -154,7 +145,7 @@ PUBLIC = {("GET", "/login"), ("POST", "/login")}   # and only what the user name
 _seen = {}   # session or key -> (answer, until): 5 s at most
 
 def auth(path, body):
-    """(status, JSON) from auth-client."""
+    """(status, JSON) from the sign-in (visit)."""
     req = urllib.request.Request(AUTH + path, json.dumps(body).encode(),
                                  {"Authorization": "Bearer " + SERVICE, "Content-Type": "application/json"})
     try:
@@ -228,17 +219,18 @@ it under more than one name). Requests with an API key (scripts send no `Origin`
 
 **Check:** `curl -X POST -H "Origin: https://example.com" --cookie "session=<yours>" <a write route>` answers 403.
 
-## Step 8 — visit-client's token, from auth-client
+## Step 8 — `visit`'s token, from the sign-in
 
-Replace your own `/api/visit` (the one that read visit-client's token file, and checked the `Host` header) with a
+Replace your own `/api/visit` (the one that read `visit`'s token file, and checked the `Host` header) with a
 route behind the check that calls `POST /v1/visit` with the request's session and returns its `{port, token}`.
-404 from it: visit-client is not running (pass the 404 on). The `Host` check is not what keeps the network out:
-listening on `127.0.0.1` is, and from now on the session check is. Your page fetches it exactly as before.
+404 from it: `visit` has no token file to read it from (pass the 404 on); no answer: `visit` is not running (503).
+The `Host` check is not what keeps the network out: listening on `127.0.0.1` is, and from now on the session check
+is. Your page fetches it exactly as before.
 
 Keep `VISIT_ORIGINS` set to your page's origins (visit/INTEGRATING.md, step 2): a token taken somehow is then of
 no use to another site.
 
-**Check:** signed in, your page connects to visit-client as before; signed out, the route answers 401.
+**Check:** signed in, your page connects to `visit` as before; signed out, the route answers 401.
 
 ## Step 9 — Relay what is powerful
 
@@ -256,7 +248,7 @@ How your server reaches the service depends on where each runs:
   machine's `127.0.0.1`, and `host.docker.internal` reaches it only on Docker Desktop for macOS and Windows, not
   on Linux or in WSL): turn the connection around. **The service connects out to your server**, at the port your
   server publishes on this machine (which any program on it can reach, on any OS), signed in with an API key of
-  its own (`auth-client key add <its name>`), and asks for work:
+  its own (`visit auth key add <its name>`), and asks for work:
 
   ```
   service ──GET /api/<it>/next (Bearer <its key>)──▶ server    held until there is work (or ~25 s: nothing, ask again)
@@ -270,19 +262,22 @@ How your server reaches the service depends on where each runs:
   only, never a session or another key, and your page's routes from a session only. The service still checks each
   job it takes (names, lengths, which keys it may press), so a fault in your server cannot make it do anything.
 
-**visit-client is the exception**: its page connects to it directly (its scene, input and voice are a stream, at
-up to 60 messages a second), with its token from `/v1/visit` (step 8). So Visit works on this machine's own
-browser only; from another device, your server refuses `/api/visit` (step 10), and your page goes on without it.
+**Visit is the exception**, for a room not on the engine: its page connects to `visit` directly (its scene, input
+and voice are a stream, at up to 60 messages a second), with its token from `/v1/visit` (step 8). So Visit works on
+this machine's own browser only; from another device, your server refuses `/api/visit` (step 10), and your page goes
+on without it. A room on the engine has no exception: your server relays the person to `visit` like the rest
+([../engine/INTEGRATING.md](../engine/INTEGRATING.md), step 4).
 
 **Check:** search your page's code and responses for those tokens: none. Each service's own port: none (`ss -ltnp`).
 Its key refused on your page's routes, a session refused on its `/next`.
 
 ## Step 10 — Where it listens, and reaching it from another device
 
-Your server listens on `127.0.0.1` until this integration is done and checked, and auth-client and visit-client
-stay on `127.0.0.1` always (auth-client in a container: its own network, never published). To reach your workroom from another device (a laptop or a phone on your network, or
-your tailnet), put an **HTTPS proxy** in front of it, never plain HTTP: your password and session cookie would
-cross the network readable by anyone on it. Any proxy will do; the user picks one:
+Your server listens on `127.0.0.1` until this integration is done and checked, and `visit`'s ports stay on
+`127.0.0.1` always (`visit` in a container: its own network, never published). To reach your workroom from another
+device (a laptop or a phone on your network, or your tailnet), put an **HTTPS proxy** in front of it, never plain
+HTTP: your password and session cookie would cross the network readable by anyone on it. Any proxy will do; the
+user picks one:
 
 - **Tailscale**, if they have it: `tailscale serve --bg http://127.0.0.1:<your proxy port>` gives
   `https://<machine>.<tailnet>.ts.net`, with a certificate every device trusts, on their tailnet only.
@@ -305,16 +300,17 @@ from a container), where every request is another device's. There, and only ther
 Your own listener (`127.0.0.1`, plain HTTP) stays as it is: the `session` cookie, your own origins, the connection's
 address. Nothing else changes.
 
-**Check:** `ss -ltnp` (or `netstat -an`): auth-client and visit-client on `127.0.0.1` only (auth-client in a
-container: not listed, no port published); your server's two
-listeners too (or published only there). From another device, through the proxy: you sign in, your pages and their
-relayed services work, `/api/visit` is refused, and plain `http://` to this machine's address answers nothing.
+**Check:** `ss -ltnp` (or `netstat -an`): `visit`'s ports (7401, 7403; 7405 with the engine) on `127.0.0.1` only
+(`visit` in a container: not listed, no port published); your server's two listeners too (or published only
+there). From another device, through the proxy: you sign in, your pages and their relayed services work,
+`/api/visit` is refused, and plain `http://` to this machine's address answers nothing.
 
 ## Step 11 — Scripts and agents
 
-`auth-client key add <label>` makes a key, printed once: give it to the script, which sends it as
-`Authorization: Bearer <key>`; your check (step 5) asks `/v1/check {key}`. `auth-client key revoke <label>` ends
-it. One key a script, so each can be revoked alone.
+`visit auth key add <label>` makes a key, printed once: give it to the script, which sends it as
+`Authorization: Bearer <key>`; your check (step 5) asks `/v1/check {key}`. `visit auth key revoke <label>` ends
+it. One key a script, so each can be revoked alone. Not the label `engine`: that is `visit`'s own key, for its
+engine, made new at each start (SPEC.md 4).
 
 **Check:** a request with the key gets through; after `key revoke`, within 5 s, it is refused.
 
@@ -355,40 +351,42 @@ for method, path in ROUTES:
 
 ## Checklist
 
-- [ ] auth-client and visit-client from the same release; `auth-client migrate --status` and `visit-client
-      migrate --status` up to date.
-- [ ] The database's roles made (`migrate --admin`): `VISIT_DATABASE_URL` is role `visit`, `AUTH_DATABASE_URL`
-      role `auth`; the superuser's URL is passed to no run.
+- [ ] The sign-in is `visit`'s (2.0 on): no auth-client, and no database address or superuser in the `.env` or
+      passed to anything; `visit psql -c '\dn'` lists `auth`.
 - [ ] The owner's account made in a terminal; no sign-up page anywhere.
-- [ ] The launcher makes a new service token each start (mode 0600) and gives it to auth-client and the server.
+- [ ] The launcher makes a new service token each start (mode 0600) and gives it to `visit` (`AUTH_TOKEN_FILE`) and
+      the server.
 - [ ] One check, in the one place every request passes (and in each other place that answers requests: WebSocket
-      upgrades, static files, other ports); refused without a session; 503 when auth-client cannot be reached.
+      upgrades, static files, other ports); refused without a session; 503 when the sign-in cannot be reached.
 - [ ] Public routes: an explicit list in code, and only what the user named; kept in the integration log.
 - [ ] `/login` from web/login.html: its form, its message codes, `next` checked again on the server; `/logout`.
 - [ ] The cookie: `HttpOnly; SameSite=Strict; Path=/`, `Max-Age` from `expires`; `Secure` and `__Host-` over HTTPS.
 - [ ] Writes with the cookie refused from another `Origin`.
-- [ ] visit-client's token from `/v1/visit`, behind the check; the old `/api/visit` gone; `VISIT_ORIGINS` set.
+- [ ] `visit`'s token from `/v1/visit`, behind the check; the old `/api/visit` gone; `VISIT_ORIGINS` set.
 - [ ] Local services relayed by the server (in a container: they connect out to it, with keys of their own); their
       tokens in no page or response, their own ports gone.
 - [ ] The server on `127.0.0.1`; from another device only through an HTTPS proxy, on a listener of its own (the
-      `__Host-` cookie, the origin from `Host`, the proxy's word for the address, no `/api/visit`); auth-client and
-      visit-client on `127.0.0.1` (auth-client in a container: its own network, by name, no published port).
+      `__Host-` cookie, the origin from `Host`, the proxy's word for the address, no `/api/visit`); `visit`'s ports on
+      `127.0.0.1` (`visit` in a container: its own network, by name, no published port).
 - [ ] The route test (step 12) in your tests, passing.
 - [ ] Nothing logs a password, a session, a key or a token.
 
 ## Upgrading
 
-Read [../CHANGELOG.md](../CHANGELOG.md) from your version up; then, as for visit-client, get the new release (both
-programs) and run `auth-client migrate` (and `visit-client migrate`).
+Read [../CHANGELOG.md](../CHANGELOG.md) from your version up; then get the new `visit`
+([../visit/INTEGRATING.md](../visit/INTEGRATING.md), "Upgrading"): the sign-in comes with it, its schema brought up
+to date by its first start, with nothing to run. From auth-client (1.x): the changelog's v2.0.0, "Upgrading" (its
+accounts, sessions and keys move in with `visit import`).
 
 ## Don't
 
 - Don't add a sign-up page, a "forgot password" link, or any way to make an account in a browser.
 - Don't check sessions route by route, or make anything public by default.
-- Don't let a request through when auth-client cannot be reached.
-- Don't give the browser auth-client's service token, visit-client's token outside `/v1/visit`, or any local
+- Don't let a request through when the sign-in cannot be reached.
+- Don't give the browser the sign-in's service token, `visit`'s page token outside `/v1/visit`, or any local
   service's token.
 - Don't take a message for the login page from the URL, or redirect to a `next` that is not a path on your site.
-- Don't pass the superuser's URL (`VISIT_DATABASE_ADMIN_URL`) to visit-client, auth-client, or your server.
+- Don't give anything the database superuser's password (`postgres/secrets` in the workroom's data directory): it is
+  `visit`'s alone.
 - Don't listen beyond `127.0.0.1` without HTTPS or an encrypted network, and don't open a local service's port to
   your server's container (`route_localnet`, binding it to `0.0.0.0` or Docker's bridge): have it connect out.
