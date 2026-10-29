@@ -484,8 +484,11 @@ In order, each before the next; the branch merges to `main` after step 4, and no
 5. **The office on a server** with no GPU (Postgres, visit-client, auth-client, the board, the engine), the home
    machine a plain client. The stretch, and the real test of section 1's third bullet.
 
-If 3 is felt at the desk, or the engine cannot be made cheap, the branch stays experimental, and this file says
-why.
+**Where it stands (2026-10-29, released as 1.0.0).** 1 and 2 hold (e2e, cargo, the browser test with the engine
+hosting an office). 3 took a day at the desk: everything felt is fixed and written down (INTEGRATING.md,
+"Upgrading: a room that hosts today"), and the owner called it good; the ⏱ reports show 60 frames, no stalls, Visit
+under 3 ms a second, the engine at a third of a core busy. 4 and 5 are the next things to do, not done by this
+release: a laptop through the proxy is the first.
 
 ## 12. Open questions
 

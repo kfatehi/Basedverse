@@ -25,6 +25,11 @@ Do not work from memory: Visit changes with every release. Read these from the b
 - **`visit/SPEC.md`**: the contract (messages, limits, the library's API), for detailed questions.
 - **`auth/INTEGRATING.md`** and **`auth/SPEC.md`** (0.21): auth-client, the workroom's sign-in (accounts made in a
   terminal, sessions, API keys, visit-client's token for a signed-in session), released with visit-client.
+- **`engine/INTEGRATING.md`** and **`engine/SPEC.md`** (1.0): visit-engine. The room's page runs in a headless
+  Chromium beside visit-client, always; the person's page is one more client of it, through the workroom's own
+  relay; the owner is the room's visitor. Every room that hosts is built this way from 1.0 on: a new room from the
+  guide's steps, a room that hosted before 1.0 by its "Upgrading: a room that hosts today", which lists what the
+  split breaks and how each was fixed. Released with visit-client.
 
 The feature list is whatever those docs say Visit has. The table under "Where to look" is only a hint for finding a
 feature in a workroom's code. If the changelog has something newer than the table, it counts all the same.
@@ -117,6 +122,7 @@ feature in a workroom's code. If the changelog has something newer than the tabl
 | its database (chat history, pictures, links, bans), `visit-client migrate` | 0.20 | step 1 | `VISIT_DATABASE_URL` in the `.env`; the launcher passes it on |
 | pictures and links in chat (paste, previews, 🖼 shared), history up the log | 0.20 | vanilla | the panel's chat window; `visit.share(`, `visit.preview(`, `visit.history(`, `visit.shared(` |
 | telemetry (⏱) | 0.14 | troubleshooting | the panel's ⏱, `visit.perf(`: nothing to integrate, a tool for when a room feels slow |
+| the engine: the room's page in a headless Chromium beside visit-client, the person's page a client of it through the server's relay, the owner the room's visitor; settings, the theme and the owner's look through the server; the room draws its owner | 1.0 | engine/INTEGRATING.md (steps 1–7; a room that hosted before: "Upgrading") | `?role=host`, `window.VISIT_ENGINE`, `Visit.connect({ url: "/visit/ws", role: "user"`, `/visit/ws`, `/visit/mode`, `visit.world({ three, renderer, self`, `look:` in `visit.host(`, `world.point(` |
 | sign-in: auth-client (accounts, sessions, API keys, visit-client's token for a session), the database's plain roles | 0.21 | auth/INTEGRATING.md | `AUTH_TOKEN_FILE`, `/v1/check` in the server's middleware, `GET /login`, `/v1/visit` |
 
 ## List

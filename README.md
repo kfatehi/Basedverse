@@ -47,6 +47,7 @@ two hooks, and two pieces everyone drops in unchanged.
 |---|---|
 | [visit/](visit/) | Visit: **visit-client** (the local client, Rust: all the networking) and **visit.js** (the library for the workroom's page), [the spec](visit/SPEC.md), [the integration guide](visit/INTEGRATING.md) and [bodies, things and positions](visit/MODELS.md), written for the coding agent doing it |
 | [auth/](auth/) | **auth-client**: a workroom's sign-in (Rust: the owner's account, made in a terminal; sessions; API keys for scripts and agents), [its spec](auth/SPEC.md), [its integration guide](auth/INTEGRATING.md), and [the sign-in page](auth/web/login.html) to start from |
+| [engine/](engine/) | **visit-engine**: your room's page in a headless Chromium beside visit-client, your browser one more client of it, from the desk or anywhere; the owner is the room's visitor. [engine/SPEC.md](engine/SPEC.md) is the contract, [engine/INTEGRATING.md](engine/INTEGRATING.md) the guide for your coding agent (1.0) |
 | [lobby/](lobby/) | the lobby server everyone connects to (Python): presence, knocks, introductions. [Its protocol](lobby/PROTOCOL.md), its tests, and its deployment (Caddy for TLS, coturn) |
 | [bin/setup](bin/setup) | sets up Visit for a workroom: the lobby (or deploys your own), your office, visit-client and auth-client, their database's roles, the owner's account, your `.env` |
 | [bin/deploy-lobby](bin/deploy-lobby) | puts the lobby on a server over ssh, and updates it |
@@ -110,10 +111,10 @@ visit-client on `127.0.0.1`, and only the workroom's server talks to it. `bin/se
 One small server for everyone: [lobby/README.md](lobby/README.md) says what to rent and which ports to
 open, then `bin/deploy-lobby user@server` sets it up, and later updates it.
 
-## Releasing visit-client and auth-client
+## Releasing visit-client, auth-client and visit-engine
 
 They are released together, at one version. Set it in `visit/client/Cargo.toml` and `auth/client/Cargo.toml`
-(and `VERSION` in `visit/client/web/visit.js`), and add
+(and `VERSION` in `visit/client/web/visit.js`, and `engine/VERSION`), and add
 its entry at the top of [CHANGELOG.md](CHANGELOG.md): what changed, and **what an integration does**, step
 by step, for the agent upgrading a workroom. A new feature also gets a row in the plugin skill's "Where to look"
 table (`plugins/basedverse/skills/visit/SKILL.md`), and, if it is a default, a line in INTEGRATING.md's "The
@@ -131,6 +132,7 @@ tag the changelog has no entry for is not released).
 | `visit/client/cargo test` | visit-client's unit tests, in Docker |
 | `visit/client/tests/run-e2e.sh` | the lobby, two visit-clients and two stand-in pages, in Docker |
 | `visit/client/tests/run-browser.sh` | visit.js in two headless Chromes on this machine (it needs `google-chrome`): a three.js room's scene, drawn by its visitor; two rooms' worlds (on different three.js releases) |
+| `engine/tests/run-engine.sh` | visit-engine's image, hosting a test room against a stand-in server: loads, hosts, reloads, idles, measures |
 | `auth/client/cargo test` | auth-client's unit tests, in Docker |
 | `auth/client/tests/run-e2e.sh` | auth-client against Postgres 17 in Docker: the database's roles made, and a 0.20 database moved over; its terminal commands; its API (signing in, guesses slowed, expiry, revoking, keys) |
 | `visit/client/tests/perf/run-perf.sh` | visits through simulated networks (delay, jitter, loss, rate caps; several visitors), each in its own container: the host's answer, updates, stalls, bandwidth (and with `BROWSERS=1`, real browsers drawing), against targets |

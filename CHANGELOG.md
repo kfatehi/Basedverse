@@ -9,7 +9,7 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
-## Unreleased — the engine (branch `engine`, [#17](https://github.com/sarmiena/Basedverse/issues/17); EXPERIMENTAL until proven)
+## v1.0.0 — 2026-10-29 — the engine ([#17](https://github.com/sarmiena/Basedverse/issues/17))
 
 **Your room runs in the engine, a headless Chromium beside visit-client, and your browser is one more client of it**
 ([engine/SPEC.md](engine/SPEC.md), [engine/INTEGRATING.md](engine/INTEGRATING.md)). The room's page (its scene, its

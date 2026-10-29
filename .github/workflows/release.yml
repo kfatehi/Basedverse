@@ -100,16 +100,19 @@ jobs:
           sha256sum * > SHA256SUMS
           repo="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY"
           cat > ../notes.md <<EOF
-          visit-client $GITHUB_REF_NAME, Visit's local client (one file for your machine, with visit.js built in), and
-          auth-client, a workroom's sign-in. [visit/INTEGRATING.md]($repo/blob/$GITHUB_REF_NAME/visit/INTEGRATING.md) and
-          [auth/INTEGRATING.md]($repo/blob/$GITHUB_REF_NAME/auth/INTEGRATING.md) say how to use them, and
+          visit-client $GITHUB_REF_NAME, Visit's local client (one file for your machine, with visit.js built in),
+          auth-client, a workroom's sign-in, and visit-engine, the room's page in a headless Chromium beside them
+          (an image built from [engine/]($repo/blob/$GITHUB_REF_NAME/engine/) with Docker, not a file here).
+          [visit/INTEGRATING.md]($repo/blob/$GITHUB_REF_NAME/visit/INTEGRATING.md),
+          [auth/INTEGRATING.md]($repo/blob/$GITHUB_REF_NAME/auth/INTEGRATING.md) and
+          [engine/INTEGRATING.md]($repo/blob/$GITHUB_REF_NAME/engine/INTEGRATING.md) say how to use them, and
           [CHANGELOG.md]($repo/blob/$GITHUB_REF_NAME/CHANGELOG.md) how to upgrade. This release:
 
           EOF
           # This release's entry in the changelog, without its heading.
           awk -v v="## $GITHUB_REF_NAME" 'index($0, v) == 1 && (length($0) == length(v) || substr($0, length(v) + 1, 1) == " ") { on = 1; next }
                                            on && /^## / { exit } on' ../CHANGELOG.md \
-            | sed -E "s#\]\((visit/|auth/|lobby/|bin/)#](${repo}/blob/${GITHUB_REF_NAME}/\1#g" >> ../notes.md   # its links, from the release page
+            | sed -E "s#\]\((visit/|auth/|lobby/|bin/|engine/)#](${repo}/blob/${GITHUB_REF_NAME}/\1#g" >> ../notes.md   # its links, from the release page
           cat >> ../notes.md <<EOF
 
           ### The files
