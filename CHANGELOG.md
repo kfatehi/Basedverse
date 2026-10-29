@@ -15,9 +15,10 @@ keep the names, so offices on different versions still meet and visit each other
 **`visit` is everything a workroom runs.** visit-client, auth-client and the engine's driver are one Rust program,
 `visit`, and a Postgres and a headless Chrome are inside it, each with every library it needs: one file per
 platform, about 150 MB (Linux x86_64 and ARM64 with glibc 2.28 or newer, macOS 11 or later on Apple silicon and
-Intel, Windows x86_64). Nothing is downloaded as it runs, nothing is installed, and no Docker runs a workroom any
-more: Docker is for building and testing basedverse, never for what someone runs. A workroom that ran four
-services (visit-client, auth-client, a Postgres, the engine's image) runs one program
+Intel, Windows x86_64). Nothing is downloaded as it runs, nothing is installed, and Visit needs no Docker any more:
+Docker is for building and testing basedverse, never for running Visit (a room's own server may keep its
+container, on the host's network). A workroom that ran four services (visit-client, auth-client, a Postgres, the
+engine's image) runs one program
 ([visit/SPEC.md](visit/SPEC.md) 4).
 
 - **Its database is inside it** (visit/SPEC.md 4.4). `visit` runs its own Postgres as its child, on 127.0.0.1 at a
@@ -43,6 +44,9 @@ services (visit-client, auth-client, a Postgres, the engine's image) runs one pr
   mailbox's marks, pictures and voice messages, links, whispers held, bans, accounts, sessions, keys), once, into a
   workroom with none yet; `visit psql`, a psql on the workroom's database as its superuser; `visit status`, where
   its data is, what it carries and whether it runs; `visit --version` names the Postgres and the Chrome it carries.
+- **The lobby is optional.** Without `VISIT_LOBBY` the office keeps to itself: nobody visits, links or knocks, and
+  its pages, its sign-in and its engine run all the same, so a room can have its sign-in before it has a lobby.
+- **`ENGINE_DEBUG`** takes `1`, `yes`, `true` or `0`, `no`, `false`: a test aid, never left on in a workroom.
 - **A state file always.** `VISIT_STATE_FILE` and `VISIT_CACHE_DIR` default to `state.json` and `landscapes/` in the
   data directory, so every office keeps its key, its door and its guests across restarts without being told where.
 - **Settings.** The `VISIT_*`, `AUTH_*` and `ENGINE_*` variables keep their names (the sign-in's and the engine's
@@ -66,42 +70,13 @@ are visited as before, and a room's pages change nothing.
 
 ### Upgrading (from 1.1)
 
-A workroom on an older release upgrades to 1.1 first (its database migrated), then does this, in this order: the
-old database is read once, before the new `visit` first runs.
-
-1. **Stop the workroom** (its launcher, or its compose: visit-client, auth-client, the engine), but leave its old
-   database running for step 3. Tag your workroom as it is, so it can go back.
-2. **Get `visit`**: pull basedverse and run `bin/setup` again (it keeps your `.env`'s answers; choose download). It
-   writes `VISIT_DATA_DIR` and `VISIT_PATH`, and takes `VISIT_CLIENT_PATH`, `AUTH_CLIENT_PATH`,
-   `VISIT_DATABASE_URL`, `AUTH_DATABASE_URL` and `VISIT_DATABASE_ADMIN_URL` out of the `.env`: note the last first,
-   if you will import by hand.
-3. **Move the database in.** Setup offers it when your `.env` names a 1.x database: say yes. By hand, with the
-   `.env` loaded and before `visit` first runs: `visit import <the old database's superuser URL>` (1.x's
-   `VISIT_DATABASE_ADMIN_URL`). The old database must be reachable from this machine: a `visit-db` container with
-   no port published gets one on `127.0.0.1` for the import. It refuses a workroom that has data already: then
-   import into a new `VISIT_DATA_DIR`.
-4. **Keep the office's key.** A `VISIT_STATE_FILE` your `.env` names is used as before. A state file that lived in
-   a container's volume (1.0's engine guide had `/visit/state.json`, `.visit/state.json` on the machine): copy it to
-   `state.json` in `VISIT_DATA_DIR`, or point `VISIT_STATE_FILE` at it. Without it the office comes up with a new
-   key, and friends who made it their guest have to again.
-5. **The launcher: one `visit` in place of four services.** Start `"$VISIT_PATH"` with the `.env`'s settings and
-   the token files it had (the page's; the user's, for a room on the engine), and stop it with SIGTERM, waiting for
-   it (visit/INTEGRATING.md step 2). Drop the database, `auth` and `engine` services, and pass none of the gone
-   settings:
-   - the sign-in: give `visit` `AUTH_TOKEN_FILE`, and it serves the API; your server keeps that file and
-     `AUTH_PORT` as before;
-   - the engine: give `visit` `ENGINE_ROOM_URL`. Its key step goes: no `auth-client key add engine`, no key file;
-     `visit` makes the key at each start, and your server checks it with `/v1/check` as before;
-   - where it runs: on the machine beside your server, on `127.0.0.1`, with `ENGINE_ROOM_URL` and `VISIT_ORIGINS`
-     naming your server's local origin. A server of yours in a container reaches it there from the host's network,
-     or keeps `visit` as one service on its compose network in place of four (`VISIT_LISTEN` and `AUTH_LISTEN`
-     `0.0.0.0`, no `ports:`; visit/SPEC.md 4.4 says what it needs in a container);
-   - your server's relay, its `/visit/visit.js` and its key check are unchanged, but for where they reach `visit`.
-6. **Start it, and check**: `visit status` says it runs; `visit auth user list` lists your account; the chat
-   window has your history; with the engine, `/health` says `hosting`. Then visit/INTEGRATING.md step 8 and step
-   9's check.
-7. **The old pieces go**: the old database (its container and volume; back it up first if you like), and the
-   auth-client and engine images.
+**Follow [visit/INTEGRATING.md](visit/INTEGRATING.md), "Upgrading a 1.x room to 2.0"**, whole and first: what to
+expect, a checklist with a check for each step, how to go back, and a worked example (a room whose board ran in
+Docker). In short: the room's pages do not change; one `visit`, on the machine, replaces four services; with the
+old Postgres still running and `VISIT_DATA_DIR` set, `visit import <its superuser URL>` brings everything across
+before the first start; the state file keeps its path, so friends still know the office; the database, roles,
+`migrate` and engine-key steps go; the room's server reaches `visit` on `127.0.0.1` (on the machine, or a container
+on the host's network), and so does `ENGINE_ROOM_URL`. A workroom on an older release upgrades to 1.1 first.
 
 ## v1.1.0 — 2026-10-29
 
