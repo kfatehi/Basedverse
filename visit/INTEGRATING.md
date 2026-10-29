@@ -394,7 +394,9 @@ visit.host({
   their **feet** are: your `spawn` and `move` return that, never their eyes. Give your user's body with
   `visit.avatar(model)`: a model of its own, its feet at its origin, facing −z, in metres, with an `eyes` point and
   `idle`, `walk`, `ride` clips; check it with `Visit.checkModel`. Visit draws your visitors' own models at their
-  feet: draw your own figure for a visitor only where `visit.visitors[i].look` is "mine".
+  feet: draw your own figure for a visitor only where `visit.visitors[i].look` is "mine". To decide that yourself for
+  some of them, give `visit.host` a `look(visitor)` hook that returns "mine" or "theirs" (anything else: as the
+  panel says); a room that poses its owner itself (engine/SPEC.md 4: a seat, a drink) says "mine" of `who.owner`.
 - **Mounts**: one riding into your room has its mount in your scene, under its feet. Your `move` hears what it
   rides (`who.riding`: { id, name, fly, speed, lift }) and does as your room's physics would: we suggest lifting the
   rider onto it (their eyes `lift` higher), walking them at its pace (`speed` times yours; say `walk: { speed,

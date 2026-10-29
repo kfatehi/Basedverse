@@ -1161,6 +1161,13 @@
     useAvatars(use) { this._send({ type: "avatars", default: use === "theirs" ? "theirs" : "mine" }); }
     useAvatar(key, use) { this._send({ type: "avatar_use", key, use: use === "theirs" || use === "mine" ? use : null }); }
     avatarUse(key) { const b = this.avatars.by.find(x => x.key === key); return b ? b.use : this.avatars.default; }
+    // How a visitor hosted here is drawn: as the room's `look` hook says of them ("mine": the room draws them, "theirs":
+    // their own model, drawn by Visit), else as the panel has it (avatarUse). A room that poses its owner itself
+    // (engine/SPEC.md 4) says "mine" of who.owner.
+    _lookUse(h) {
+      const hk = this._hooks, say = hk && typeof hk.look === "function" ? hk.look(h.visitor) : undefined;
+      return say === "mine" || say === "theirs" ? say : h.visitor.key ? this.avatarUse(h.visitor.key) : "mine";
+    }
     _avatarsFrom(m) {
       if (!isObj(m)) return;
       this.avatars = { default: m.default === "theirs" ? "theirs" : "mine",
@@ -1171,7 +1178,7 @@
     _avatarWants() {
       if (this.role === "user") return;   // the room's visits, seen, not served
       for (const h of this._hosted.values()) {
-        if (!h.avatarAsked && h.visitor.key && this.avatarUse(h.visitor.key) === "theirs") {
+        if (!h.avatarAsked && this._lookUse(h) === "theirs") {
           h.avatarAsked = true;
           this._send({ type: "avatar_want", channel: h.channel });
         }
@@ -1185,7 +1192,7 @@
     // it, its eyes the room's `eye`); and why not as itself, if this room would show it so (`problem`).
     _bodyTell(h) {
       if (h.mirror) return;
-      const want = !!h.visitor.key && this.avatarUse(h.visitor.key) === "theirs", look = want && h.avatar ? "theirs" : "mine";
+      const want = this._lookUse(h) === "theirs", look = want && h.avatar ? "theirs" : "mine";
       const problem = want && !h.avatar ? (h.modelProblem || null) : null;
       h.look = look;
       h.eyes = look === "theirs" ? h.avatar.eyes || this._eyeRoom() : this._eyeRoom();
