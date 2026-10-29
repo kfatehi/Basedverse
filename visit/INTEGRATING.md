@@ -80,6 +80,10 @@ Check these about the sim you are integrating; if one is not true, stop and tell
 3. **The browser has WebGL 2**: current Chrome, Edge, Safari and Firefox do.
 4. **Its page is served from the same machine** (`http://localhost:…` or `http://127.0.0.1:…`). A page
    served from a public `https://` site can be stopped by some browsers from reaching 127.0.0.1.
+5. **Which Visit it has, if any.** A room integrated before 2.0 (its `.env` names `VISIT_DATABASE_URL`,
+   `AUTH_DATABASE_URL`, `VISIT_CLIENT_PATH` or `AUTH_CLIENT_PATH`; its launcher or compose runs `visit-client`,
+   `auth-client`, a `visit-db` Postgres or a `visit-engine` service; it keeps an engine key): do "Upgrading a 1.x
+   room to 2.0", below, first, and only then anything else here.
 
 Then the settings. **Have your user run basedverse's setup**, from your workroom's project, in a terminal
 of their own (it asks them questions, so a shell that cannot answer prompts will not do):
@@ -106,7 +110,8 @@ Without setup, by hand: [`../.env.example`](../.env.example) is the template. Co
 `VISIT_*` lines, with their comments) into your workroom's own settings, its `.env` if it has one (make one
 from that section if not, and keep it out of version control), and fill in:
 
-- `VISIT_LOBBY`: the **lobby URL** (`wss://…`), from whoever runs your lobby;
+- `VISIT_LOBBY`: the **lobby URL** (`wss://…`), from whoever runs your lobby (left blank, `visit` runs without one:
+  nobody visits, but your page, the sign-in and the engine work);
 - `VISIT_NAME`: the **office name** your user wants (1–24 letters, digits, space, `_ . -`, starting and
   ending with a letter or digit; in quotes if it has a space, so a shell can read the file too);
 - `VISIT_SIM`: your sim's **name and version**, e.g. `my-workroom/1.0`;
@@ -177,52 +182,69 @@ separately: `visit` serves it.
 
 ## Step 2 — Start `visit` from your launcher
 
-Every time your sim starts:
+`visit` runs on the machine itself, beside your sim: it needs no container. Every time your sim starts:
 
 1. **Make a new token**: 32 random bytes from a cryptographically secure source, as 64 hex characters.
    Never a fixed string, never reused between runs.
 2. **Write it to a file only your user can read** (mode 0600), so it stays off the process list.
-3. **Start `visit`** with your settings, and keep it running while your sim runs.
-4. **Wait for its ready line** on stdout (`{"ready": true, …}`) before opening your page. The first start takes
-   longer than the rest: it unpacks the Postgres and the Chrome it carries (once for every workroom of the user)
-   and makes your workroom's database.
-5. **Stop it** when your sim stops: SIGTERM (or Ctrl-C), and wait for it to exit. It leaves the lobby and stops
-   its Postgres before it does. One killed outright (SIGKILL; on Windows, a kill from another program) leaves its
-   Postgres running, until its next start stops it first.
+3. **Start `visit`** in the background with your settings, and keep it running while your sim runs. Keep its pid
+   and its log (its stderr) in a directory of your workroom's own, kept out of version control.
+4. **Wait for its ready line**, its first line on stdout (`{"ready": true, …}`), before starting what talks to it
+   or opening your page. If it exits first, its log says why. The first start takes longer than the rest: it
+   unpacks the Postgres and the Chrome it carries (once for every workroom of the user) and makes your
+   workroom's database.
+5. **Stop it** when your sim stops: SIGTERM (or Ctrl-C), and wait for it to exit. It leaves the lobby, stops its
+   engine, and stops its Postgres last. One killed outright (SIGKILL; on Windows, a kill from another program)
+   leaves its Postgres running, until its next start stops it first.
 
 `visit` reads its settings from its environment, under the names in `.env.example`, so a launcher loads your
 `.env` and passes its environment on, adding only the token file:
 
 ```sh
-# a shell launcher; its settings in the workroom's .env (the VISIT_* lines of ../.env.example)
+# a shell launcher; its settings in the workroom's .env (the VISIT_* lines of ../.env.example);
+# .visit/ is the workroom's own directory for visit's run (git-ignored)
 set -a; . ./.env; set +a
-umask 077
-export VISIT_TOKEN_FILE="${XDG_RUNTIME_DIR:-/tmp}/my-workroom-visit.token"
+umask 077; mkdir -p .visit
+export VISIT_TOKEN_FILE="$PWD/.visit/token"
 head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$VISIT_TOKEN_FILE"
-"${VISIT_PATH:-visit}" &
-VISIT_PID=$!
-trap 'kill $VISIT_PID; wait $VISIT_PID' EXIT
+"${VISIT_PATH:-visit}" > .visit/visit.out 2>> .visit/visit.log &
+echo $! > .visit/visit.pid
+until grep -q '"ready"' .visit/visit.out; do                     # its first line: ready
+  kill -0 "$(cat .visit/visit.pid)" 2>/dev/null || { tail .visit/visit.log >&2; exit 1; }   # it exited: why
+  sleep 0.5
+done
+stop_visit() { kill -TERM "$(cat .visit/visit.pid)"; while kill -0 "$(cat .visit/visit.pid)" 2>/dev/null; do sleep 0.2; done; }
+trap stop_visit EXIT
+# ... then start your sim
 ```
 
 ```js
 // a Node launcher; its settings in the workroom's .env (the VISIT_* lines of ../.env.example)
 require("dotenv").config();   // or your own .env reader
 const { randomBytes } = require("crypto"), fs = require("fs"), { spawn } = require("child_process");
-const tokenFile = `${process.env.XDG_RUNTIME_DIR || "/tmp"}/my-workroom-visit.token`;
+fs.mkdirSync(".visit", { recursive: true });
+const tokenFile = `${process.cwd()}/.visit/token`;
 fs.writeFileSync(tokenFile, randomBytes(32).toString("hex"), { mode: 0o600 });
 const visit = spawn(process.env.VISIT_PATH || "visit", [], { env: { ...process.env, VISIT_TOKEN_FILE: tokenFile },
-                                          stdio: ["ignore", "pipe", "inherit"] });
-process.on("exit", () => visit.kill());   // SIGTERM: it stops by itself, its Postgres with it
+                    stdio: ["ignore", "pipe", fs.openSync(".visit/visit.log", "a")] });
+process.on("exit", () => visit.kill());   // SIGTERM: it stops by itself, its Postgres last
+new Promise((ready, failed) => {          // its first line: ready
+  require("readline").createInterface({ input: visit.stdout }).once("line", ready);
+  visit.once("exit", code => failed(new Error(`visit exited (${code}): see .visit/visit.log`)));
+}).then(startMySim, e => { console.error(e.message); process.exit(1); });
 ```
 
 ```python
 # a Python launcher; its settings in the workroom's .env (the VISIT_* lines of ../.env.example)
-import secrets, os, subprocess, atexit
+import atexit, json, os, secrets, subprocess
 from dotenv import load_dotenv; load_dotenv()   # or your own .env reader
-token_file = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "my-workroom-visit.token")
+os.makedirs(".visit", exist_ok=True)
+token_file = os.path.abspath(".visit/token")
 fd = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, secrets.token_hex(32).encode()); os.close(fd)
 visit = subprocess.Popen([os.environ.get("VISIT_PATH", "visit")], env=dict(os.environ, VISIT_TOKEN_FILE=token_file),
-                         stdout=subprocess.PIPE)
+                         stdout=subprocess.PIPE, stderr=open(".visit/visit.log", "a"), text=True)
+if not json.loads(visit.stdout.readline() or "{}").get("ready"):   # its first line: ready
+    raise SystemExit("visit did not start: see .visit/visit.log")
 atexit.register(lambda: (visit.terminate(), visit.wait(30)))
 ```
 
@@ -236,11 +258,17 @@ page, even one that got hold of the token. **Always set it**: blank lets any pag
 **The sign-in and the engine are this same `visit`**, given more settings by the same launcher: `AUTH_TOKEN_FILE`
 turns on the sign-in API ([../auth/INTEGRATING.md](../auth/INTEGRATING.md) step 4), `VISIT_USER_TOKEN_FILE` and
 `ENGINE_ROOM_URL` the engine ([../engine/INTEGRATING.md](../engine/INTEGRATING.md) steps 3 and 5). Never a second
-program.
+program. Each token is a file your launcher makes, new each run, before it starts `visit` and before it starts
+anything that reads one at its own start (your server).
 
-If your sim runs in a container, run `visit` on the host machine (or in the same network namespace
-as the browser): it must be reachable at `127.0.0.1:<port>` **from the browser**, and must not be
-published on any other address.
+**Where your sim's own server runs.** `visit` listens on the machine's `127.0.0.1`, and what talks to it (your
+page, and later your server: the sign-in, the relay) must reach it there. The default, for a new room: **your
+server on the machine too, beside `visit`, and no Docker anywhere.** A room that keeps its server in a container
+(its choice) has to know that a container cannot reach the machine's `127.0.0.1` (`host.docker.internal` does not
+lead there on Linux or in WSL): give that container the host's network (`network_mode: host`) and bind the server
+to `127.0.0.1` itself, never `0.0.0.0`; a reverse proxy in a container (Caddy, say) likewise, with
+`reverse_proxy 127.0.0.1:<your server's port>`. The browser, too, must reach `visit` at `127.0.0.1:<port>`, and
+nothing may reach it on any other address.
 
 **Check:** `curl http://127.0.0.1:7401/health` answers `{"ok": true, …}`, and
 `curl http://<your LAN address>:7401/health` does not connect. With your `.env` loaded, `visit status` says it
@@ -637,7 +665,10 @@ marked offline, walked into but not through its walls; start it again, and the p
 
 - [ ] Your settings live in your workroom's own `.env` (or config), written by setup or started from
       `../.env.example`; that `.env` is not committed, and `.env.example` keeps no real values.
-- [ ] `visit` starts with your launcher, with a new token each run, and stops with your sim (SIGTERM, waited for).
+- [ ] `visit` starts with your launcher, on the machine, in the background, with a new token each run; the
+      launcher waits for its ready line, and stops it with your sim (SIGTERM, waited for).
+- [ ] Whatever talks to `visit` reaches it on `127.0.0.1`: your server on the machine too (no Docker), or its
+      container on the host's network, bound to `127.0.0.1`.
 - [ ] It listens on 127.0.0.1 only; the token is in a 0600 file, not on the command line or in `.env`;
       `VISIT_ORIGINS` names your page's origin.
 - [ ] Your page gets the token by a same-origin route (answering only `Host: localhost` or `127.0.0.1`), a
@@ -723,11 +754,102 @@ integration does about it**. To upgrade a workroom that works, read it from the 
 1. Pull basedverse (`git pull` in its checkout).
 2. Get the new `visit`: run setup again (it keeps the `.env`'s answers; choose download), or step 1. Stop the
    old one and start the new one: its first start brings its database up to date by itself, with nothing to run.
-   From 1.x, the database is moved in once, before that start: `visit import` (setup offers it; the changelog's
-   v2.0.0, "Upgrading", says the rest).
+   **From 1.x** (visit-client, auth-client and the rest), do "Upgrading a 1.x room to 2.0", below, instead of this
+   list, then come back for the versions after 2.0.
 3. Do each "what an integration does" of the versions you skipped, in order, and add any new setting it
    names to the `.env` (setup adds its own).
 4. Run step 8 again, and step 9's check.
+
+## Upgrading a 1.x room to 2.0
+
+For a room integrated before 2.0 ("Before you start", point 5): do this first, whole, in this order, and only then
+anything else. This is the one full copy of these steps: the changelog's v2.0.0 and the plugin's skill point here.
+
+### What to expect
+
+- **The room's pages do not change.** Its HTML and JavaScript, how it calls visit.js, its server's relay
+  (`/visit/ws`, `/visit/visit.js`), its sign-in routes and key checks, the protocols: all as they were. Only how
+  Visit is run changes.
+- **One `visit` replaces four**: visit-client, auth-client, the engine's image and the Postgres beside them. It runs
+  on the machine, started by your launcher. Visit needs no Docker any more.
+- **Everything comes across**: accounts, sessions (people stay signed in), API keys (agents' and scripts' keys keep
+  working), the chat and its history, pictures and voice messages, links, whispers held for someone away, bans, and
+  the office's identity (its key, door and guests, in its state file), so friends still know it.
+- **Nothing to migrate, ever again**: `visit` brings its database up to date at every start.
+
+### What to do
+
+Tick these off in order; each says how to check it.
+
+1. **Make a way back.** Tag the room's repository as it is (`git tag before-visit-2`), and keep the old database
+   and its volume until step 12 says otherwise. Leave the old Postgres running: step 4 reads it.
+2. **Stop the old Visit**: visit-client, auth-client and the engine (the launcher's, or their compose services).
+   Not the old Postgres.
+3. **Get `visit`**: `bin/setup` again (it keeps the `.env`'s answers; choose download), a release's file (step 1),
+   or a build. Setup writes `VISIT_DATA_DIR` and `VISIT_PATH` into the `.env`, and takes the 1.x database and
+   program settings out of it: copy `VISIT_DATABASE_ADMIN_URL`'s value first, for step 4. By hand: set
+   `VISIT_DATA_DIR` in the `.env` once, a directory of the user's own outside the repository, and `VISIT_PATH`.
+   **Check:** `visit --version` says 2.
+4. **Move the database in**, with the old Postgres still running, before `visit` first starts, and with the `.env`
+   loaded (so `VISIT_DATA_DIR` is set): `visit import <the old database's superuser URL>` (1.x's
+   `VISIT_DATABASE_ADMIN_URL`). Setup offers to do it when the `.env` names a 1.x database. The old Postgres must be
+   reachable from the machine: one in a container with no port published gets one on `127.0.0.1` for the import.
+   It imports only into a workroom with nothing in it yet. **Check:** it prints what came, a count of each
+   (accounts, API keys, chat lines, pictures and voice messages, whispers held, bans), and `visit auth user list`
+   lists the accounts.
+5. **Keep the office's identity**: `VISIT_STATE_FILE` at the old state file, as a path on the machine (one a
+   container saw as `/visit/state.json` is in the directory mounted there), and `VISIT_CACHE_DIR` at the old
+   `landscapes/` beside it. Without them the office comes up with a new key, and friends who made it their guest
+   have to again.
+6. **Delete the old services and their settings**: the visit-client, auth-client, engine and Postgres services (in
+   compose, or the launcher's lines for them); `VISIT_DATABASE_URL`, `AUTH_DATABASE_URL`,
+   `VISIT_DATABASE_ADMIN_URL` and any database password; `VISIT_CLIENT_PATH`, `AUTH_CLIENT_PATH`, `AUTH_VISIT_PROBE`,
+   `AUTH_LOG`; the `migrate` and database-roles steps; the engine's key (an `ENGINE_KEY` or key file, its
+   `auth-client key add engine`) and the engine's `VISIT_HOST`. In scripts, `auth-client …` is now `visit auth …`.
+   **Check:** a search of the launcher, the compose file and the `.env` for `visit-client`, `auth-client`,
+   `visit-db`, `visit-engine`, `DATABASE_URL`, `ENGINE_KEY` and `migrate` finds nothing of Visit's.
+7. **Reach `visit` on `127.0.0.1`** (step 2, "Where your sim's own server runs"). Best: the room's server on the
+   machine too. Else its container on the host's network (`network_mode: host`), the server bound to `127.0.0.1`,
+   and whatever told it where Visit was (its own `VISIT_HOST`, `AUTH_HOST`, or a service name in its settings) now
+   `127.0.0.1`. A reverse proxy in a container likewise: the host's network, `reverse_proxy 127.0.0.1:<port>`.
+8. **The engine's page on `127.0.0.1`**: `ENGINE_ROOM_URL=http://127.0.0.1:<your server's port>/<its page>?role=host`,
+   and its origin, `http://127.0.0.1:<port>`, in `VISIT_ORIGINS` (where a container's name was). Your server goes on
+   checking the engine's key with `/v1/check` as it checks any key: `visit` makes it, fresh, at each start.
+9. **Tokens stay launcher-made files, new each run**: `VISIT_TOKEN_FILE` (the host's: `visit`'s alone),
+   `VISIT_USER_TOKEN_FILE` (`visit`'s and your server's, for the relay) and `AUTH_TOKEN_FILE` (`visit`'s and your
+   server's), each written before `visit` starts, and before your server starts if it reads them at its start.
+10. **Start `visit` from the launcher** (step 2): in the background, its settings in its environment, its pid and
+    log in the workroom's own directory; wait for its ready line; SIGTERM to stop it, and wait.
+11. **Check it**: `visit status` says it runs; the engine's `/health` (`curl http://127.0.0.1:7405/health`) says
+    `"room": "hosting"`; signing in works with an account from before, and a session from before still holds; the
+    agents' or scripts' API keys still work; the room loads, its chat history in the chat window. Then step 8, and
+    step 9's check.
+12. **Write it down**: a line in `VISIT.md`'s History (from what, to 2.0, what was imported, what is kept for going
+    back). Keep the old database's volume until your user says it can go.
+
+**Going back**: stop `visit`, check out the tag, and start the old services: their database was only read
+(`visit import` changes nothing in it). What happened meanwhile (new chat, new sign-ins) stays in the 2.0 data
+directory.
+
+### Worked example: a room whose board ran in Docker
+
+A 1.0 room ran everything in one compose file: its own server (a Python board), a Caddy proxy for the LAN, and
+Visit's four services: visit-client on the compose network, auth-client, the engine's image, and Postgres in
+`visit-db`, with its state file and landscapes in `.visit/`. Its upgrade:
+
+- **Docker kept for its own server only, on the host's network.** The board's and Caddy's services got
+  `network_mode: host`; the board binds `127.0.0.1` (`BOARD_HOST=127.0.0.1`) and finds Visit there (its own
+  `VISIT_HOST` and `AUTH_HOST` set to `127.0.0.1`); Caddy proxies to `127.0.0.1:<the board's port>`.
+- **Everything of Visit's gone from Docker.** The `visit`, `auth`, `engine` and `visit-db` services were deleted,
+  with the database passwords, the roles and `migrate` steps, and the engine's key. The launcher writes the three
+  token files, starts `visit` on the machine in the background (its pid file and log in the room's own directory),
+  waits for its ready line, and stops it with SIGTERM.
+- **What was imported.** With `visit-db` still running and `VISIT_DATA_DIR` set, `visit import` brought its
+  accounts, sessions, API keys, chat and the rest of its `visit` and `auth` schemas. `VISIT_STATE_FILE` and
+  `VISIT_CACHE_DIR` point at `.visit/state.json` and `.visit/landscapes/`, so its friends still know it.
+  `ENGINE_ROOM_URL` is `http://127.0.0.1:<the board's port>/room?role=host`, its origin in `VISIT_ORIGINS`. The old
+  `visit-db` volume stays, for going back.
+- **Its pages did not change.**
 
 ## Don't
 
