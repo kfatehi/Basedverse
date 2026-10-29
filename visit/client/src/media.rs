@@ -1,5 +1,5 @@
-//! Pictures and links shared in chat (../SPEC.md 8.12): what a picture may be, and a link's preview, made by its
-//! sender's visit-client, as messaging apps do (those who get it never contact the site).
+//! Pictures, voice messages and links shared in chat (../SPEC.md 8.12): what a picture or a voice message may be, and
+//! a link's preview, made by its sender's visit-client, as messaging apps do (those who get it never contact the site).
 use std::{io::Read, time::Duration};
 
 use bytes::Bytes;
@@ -11,7 +11,11 @@ use crate::VERSION;
 pub const MAX_MEDIA: usize = 8 << 20;
 const MAX_PREVIEW_IMAGE: usize = 2 << 20;
 const MAX_PAGE: u64 = 512 << 10;
-/// At most this many pictures, and links, in a line.
+/// The largest voice message (Visit 0.22.0): a minute, recorded as a browser does (Opus, else AAC), fits.
+pub const MAX_VOICE: usize = 2 << 20;
+/// Its longest, in seconds, as its sender says.
+pub const VOICE_SECS: f64 = 60.0;
+/// At most this many pictures (a voice message among them, at most one), and links, in a line.
 pub const MEDIA_PER_LINE: usize = 4;
 pub const LINKS_PER_LINE: usize = 2;
 
@@ -30,6 +34,23 @@ pub fn sniff(b: &[u8]) -> Option<&'static str> {
     }
 }
 
+/// A voice message's type, by what its bytes start with: WebM (Chrome's and Firefox's recordings), Ogg, or MP4
+/// (Safari's); else none.
+pub fn sniff_voice(b: &[u8]) -> Option<&'static str> {
+    if b.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) && b[..b.len().min(64)].windows(4).any(|w| w == b"webm") {
+        Some("audio/webm")
+    } else if b.starts_with(b"OggS") {
+        Some("audio/ogg")
+    } else if b.len() >= 12 && &b[4..8] == b"ftyp" {
+        Some("audio/mp4")
+    } else {
+        None
+    }
+}
+
+/// The kinds a voice message may be.
+pub const VOICE_KINDS: [&str; 3] = ["audio/webm", "audio/ogg", "audio/mp4"];
+
 /// A picture, checked: one of the four kinds, by its bytes, at most `max`; its id (the blake3 hash of it, hex) and
 /// type.
 pub fn picture(b: &[u8], max: usize) -> Option<(String, &'static str)> {
@@ -39,14 +60,24 @@ pub fn picture(b: &[u8], max: usize) -> Option<(String, &'static str)> {
     Some((blake3::hash(b).to_hex().to_string(), sniff(b)?))
 }
 
+/// What a line may share, checked: a picture (at most MAX_MEDIA) or a voice message (at most MAX_VOICE), by its bytes;
+/// its id and type.
+pub fn shared(b: &[u8]) -> Option<(String, &'static str)> {
+    match sniff_voice(b) {
+        Some(mime) if !b.is_empty() && b.len() <= MAX_VOICE => Some((blake3::hash(b).to_hex().to_string(), mime)),
+        Some(_) => None,
+        None => picture(b, MAX_MEDIA),
+    }
+}
+
 /// A picture's id: 64 lowercase hex characters.
 pub fn id_ok(id: &str) -> bool {
     id.len() == 64 && id.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
 }
 
 /// The pictures and links a line carries, as a page or a link gives them, checked (at most MEDIA_PER_LINE and
-/// LINKS_PER_LINE): each picture { id, mime, size }; each link { url (http or https), title, description, site,
-/// image (a picture) }.
+/// LINKS_PER_LINE): each picture { id, mime, size }, or one voice message { id, mime, size, secs }; each link { url
+/// (http or https), title, description, site, image (a picture) }.
 pub fn attachments(m: &Value) -> (Vec<Value>, Vec<Value>) {
     let pic = |p: &Value| -> Option<Value> {
         let id = p.get("id").and_then(Value::as_str).filter(|id| id_ok(id))?;
@@ -54,7 +85,16 @@ pub fn attachments(m: &Value) -> (Vec<Value>, Vec<Value>) {
         let size = p.get("size").and_then(Value::as_u64).filter(|s| *s > 0 && *s as usize <= MAX_MEDIA)?;
         Some(json!({ "id": id, "mime": mime, "size": size }))
     };
-    let media = m.get("media").and_then(Value::as_array).into_iter().flatten().take(MEDIA_PER_LINE).filter_map(pic).collect();
+    let voice = |p: &Value| -> Option<Value> {
+        let id = p.get("id").and_then(Value::as_str).filter(|id| id_ok(id))?;
+        let mime = p.get("mime").and_then(Value::as_str).filter(|m| VOICE_KINDS.contains(m))?;
+        let size = p.get("size").and_then(Value::as_u64).filter(|s| *s > 0 && *s as usize <= MAX_VOICE)?;
+        let secs = p.get("secs").and_then(Value::as_f64).filter(|s| s.is_finite()).map_or(0.0, |s| (s.clamp(0.0, VOICE_SECS) * 10.0).round() / 10.0);
+        Some(json!({ "id": id, "mime": mime, "size": size, "secs": secs }))
+    };
+    let mut voices = 0;
+    let media = m.get("media").and_then(Value::as_array).into_iter().flatten().take(MEDIA_PER_LINE)
+        .filter_map(|p| pic(p).or_else(|| voice(p).filter(|_| { voices += 1; voices == 1 }))).collect();
     let links = m.get("links").and_then(Value::as_array).into_iter().flatten().take(LINKS_PER_LINE).filter_map(|l| {
         let url = l.get("url").and_then(Value::as_str).filter(|u| url_ok(u))?;
         let s = |k: &str, n: usize| clip(l.get(k).and_then(Value::as_str).unwrap_or(""), n);
@@ -295,6 +335,20 @@ mod tests {
     }
 
     #[test]
+    fn voice_messages_by_their_bytes() {
+        let webm = b"\x1a\x45\xdf\xa3\x9f\x42\x86\x81\x01\x42\xf7\x81\x01\x42\x82\x84webm\x42\x87";
+        assert_eq!(sniff_voice(webm), Some("audio/webm"));
+        assert_eq!(sniff_voice(b"\x1a\x45\xdf\xa3\x9f\x42\x82\x88matroska"), None);   // a Matroska file that says it is no WebM
+        assert_eq!(sniff_voice(b"OggS\0\x02"), Some("audio/ogg"));
+        assert_eq!(sniff_voice(b"\0\0\0\x18ftypiso5"), Some("audio/mp4"));
+        assert_eq!(sniff_voice(b"GIF89a.."), None);
+        assert_eq!(shared(webm).map(|x| x.1), Some("audio/webm"));
+        assert_eq!(shared(b"GIF89a..").map(|x| x.1), Some("image/gif"));
+        let big = [&webm[..], &vec![0u8; MAX_VOICE][..]].concat();
+        assert!(shared(&big).is_none() && picture(webm, MAX_MEDIA).is_none());   // a voice message: never a picture (a link's preview)
+    }
+
+    #[test]
     fn a_line_s_pictures_and_links_are_checked() {
         let id = "a".repeat(64);
         let (media, links) = attachments(&json!({
@@ -302,6 +356,9 @@ mod tests {
             "links": [{ "url": "https://example.com/a", "title": "A\u{7}  title", "image": { "id": id, "mime": "image/jpeg", "size": 3 } }, { "url": "javascript:alert(1)" }],
         }));
         assert_eq!(media, vec![json!({ "id": id, "mime": "image/png", "size": 10 })]);
+        let (media, _) = attachments(&json!({ "media": [{ "id": id, "mime": "audio/webm", "size": 900, "secs": 4.26 }, { "id": id, "mime": "audio/ogg", "size": 9, "secs": 2 },
+                                                        { "id": id, "mime": "audio/webm", "size": MAX_VOICE + 1, "secs": 1 }, { "id": id, "mime": "audio/mp4", "size": 9, "secs": 1e9 }] }));
+        assert_eq!(media, vec![json!({ "id": id, "mime": "audio/webm", "size": 900, "secs": 4.3 })]);   // one voice message a line, each checked
         assert_eq!(links, vec![json!({ "url": "https://example.com/a", "title": "A title", "description": "", "site": "", "image": { "id": id, "mime": "image/jpeg", "size": 3 } })]);
     }
 

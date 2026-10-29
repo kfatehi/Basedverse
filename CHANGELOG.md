@@ -9,6 +9,143 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## Unreleased
+
+**A room's own figures say lines** ([#14](https://github.com/sarmiena/Basedverse/pull/14), Keyvan's, for
+[#13](https://github.com/sarmiena/Basedverse/issues/13)'s say half). `v.sayAs(id, name, text)`: something of the
+room's that talks (a receptionist, a guide; never a person) says a line in the room, to everyone who can see it,
+over the object named `visit:npc:<id>`, and in everyone's chat under its own name, kept as its (`npc`), never as
+the room's user, each figure on a limit of its own (5 lines every 10 s). Page → visit-client `say_as`; `said` and
+`chat` carry `npc`. On the engine it is the server page's to say (engine/SPEC.md 3.3; the client page's is refused
+`wrong_role`), and the owner has each line once.
+
+**What an integration does about it:** nothing. A room with a figure that talks may name its object
+`visit:npc:<id>` and say its lines with `v.sayAs` (visit/INTEGRATING.md step 5) instead of drawing a bubble into its
+scene.
+
+## v1.0.1 — 2026-10-29
+
+**The tests on every push, on a GPU** ([#19](https://github.com/sarmiena/Basedverse/pull/19), Keyvan's). A workflow
+(`.github/workflows/ci.yml`) runs the README's tests (the lobby, both unit suites, both end-to-end suites, and the
+browser test) on every push and pull request, on a self-hosted runner with a GPU, so the browser test's Chromes
+draw on it and never in software; its screenshots and logs are kept with the run. A fork's pull request runs there
+too, once a maintainer approves it.
+
+**Fixed in the browser test:** the chat checks counted every bubble over a speaker, and a fake microphone's tone (a
+beep every 500 ms) could put a 🔊 mark over someone at any moment, failing them now and then. They count the lines
+said.
+
+**Fixed: chat lines from before the page, in time order.** A line from before the page (one kept for you, one from
+another day) went just above the chat window's first note, after any others from before the page, newer ones
+included: a line from two days ago that came after one from a moment ago was drawn under it, and under the wrong
+day. Each now goes where its time puts it, and the days over the log follow. The browser test's check for it failed
+now and then for this reason (on CI first); it now makes that order on purpose.
+
+**What an integration does about it:** nothing. The protocols are 1.0.0's; the fix is in visit.js's chat window,
+which comes with visit-client.
+
+## v1.0.0 — 2026-10-29 — the engine ([#17](https://github.com/sarmiena/Basedverse/issues/17))
+
+**Your room runs in the engine, a headless Chromium beside visit-client, and your browser is one more client of it**
+([engine/SPEC.md](engine/SPEC.md), [engine/INTEGRATING.md](engine/INTEGRATING.md)). The room's page (its scene, its
+agents, its physics, its interactions) runs in the engine's container always, signed in with a key of its own; the
+person's page, at the desk or on a laptop at a coffee shop, connects through your server's relay and draws what the
+room sends, as a visitor does. The owner is the room's visitor (`who.owner`): the room spawns, walks and draws them.
+No browser reaches `127.0.0.1` for anything any more: visit-client answers on the compose network only, and your
+server relays the person to it. **Breaking for every room that hosts.** The lobby protocol did not change: an
+office on 0.22 and one on this meet, visit and are visited as before, so nobody else moves when you do.
+
+In visit-client: page roles (`hello.role` host or user; a page without a role is both, as today), the relay preface,
+`--listen`, a second token (`--user-token-file`), the owner's visit as a pair of local visits. In visit.js:
+`Visit.connect({ url, role })`, `v.home`, `v.owner`, `visitors[i].owner`, `v.world({ three, renderer, self })` for a
+page with no scene of its own, `world.point(target)`, `world.atHome`, `world.room`, a host's `look(visitor)` hook, the
+stage's first-person home view. Fixed for everyone: an `EdgesGeometry` or `WireframeGeometry` travels as its lines
+(it arrived as a warning and a lost object); a user page's own room counted among the plots round it.
+
+**What an integration does about it**, in this order; the Sweatshop did it in a day and then spent a day at the
+desk on what the split breaks, and every one of those is written down so you need not:
+
+1. **Read [engine/INTEGRATING.md](engine/INTEGRATING.md) whole**, then its "Upgrading: a room that hosts today"
+   before touching anything. Tag your room as it is (`git tag before-engine`) so it can go back.
+2. **Containers.** visit-client on the compose network (`VISIT_LISTEN=0.0.0.0`, no port published, your server by
+   name in `VISIT_ORIGINS` with your proxy's addresses); two token files, the host's and the user's, written by your
+   launcher each start; the `engine` service built from `engine/`, its key made with `auth-client key add engine`
+   and given to it alone, `ENGINE_ROOM_URL=http://<your server>/room?role=host`. Never recreate the engine with a
+   bare `docker compose up -d engine`: it recreates visit-client without your launcher's environment.
+3. **Your server.** Serve `/visit/visit.js` from visit-client; relay `/visit/ws` to it with the preface and the user
+   token (one a session, 1 MiB buffered then 4408); say what runs at `/visit/mode`; serve the room's page to the
+   engine's key only; retire `/api/visit`. Add a settings route (the Sweatshop's `/api/room`) your pages post to and
+   your snapshot carries: the environment, the person's theme, the owner's look.
+4. **Split the page by role** (one file, `?role=host` for the engine, nothing for the person). The engine's page:
+   `window.visit = await Visit.connect({ ...window.VISIT_ENGINE, role: "host" })`, your scene and hooks, nothing of the
+   person's. The person's page: `Visit.connect({ url: "/visit/ws", role: "user" })`, no room of its own,
+   `v.world({ three, renderer, self: "room" })`, your HUD, a sign-out.
+5. **Move what the browser decided to your server.** Grep the page for `localStorage`, `matchMedia`,
+   `prefers-color-scheme`, `location.search`, `devicePixelRatio`, `innerWidth`: the engine's page has none of the
+   person's. The environment, dark mode (headless Chromium is light: white walls under a dark theme), the owner's
+   look: through the settings route, every page following the snapshot.
+6. **Marks by name, not `userData`** (it is stripped to `visitor`, `visitPoint`, `visitRider`): what is a floor, rock,
+   a roof to lift, anything your page reads of its own scene. A deformed primitive travels as its recipe: copy it
+   into a plain `BufferGeometry` first. Visibility you toggle for your own camera is done on the received scene.
+7. **The owner is a visitor.** Physics your page did to its owner (a jump) goes into `move`, for everyone. The room
+   draws its owner itself (`look: who => who.owner ? "mine" : undefined` in `visit.host`), with the look from your
+   server, since Visit's clips for an avatar are walk, idle and ride, not your seat or your drink; the person's page
+   shows that copy (`self: "room"`) and hides its own dude at home. Clicks: the person's page casts its own ray into
+   the received scene and calls `world.point(hit.point)`; the hand by `userData.visitPoint` there; your division of
+   clicks kept (`visitor.owner` is you; screen-only entries never from a point); the reach rule said on the page.
+8. **Prove it before you trust it.** The engine's `/health` says `hosting`; its log is your only screen
+   (`console.info` in the room's page lands there: log each point and each `tell` while proving; `ENGINE_DEBUG=1`
+   gives `/debug/eval` on the compose network, for the proving alone); the person's console; the ⏱ report before and
+   after. Reload the person's page after every deploy before judging anything. Then from another device.
+
+Each thing that went wrong at the Sweatshop's desk is a row in INTEGRATING.md's troubleshooting table, symptom to
+cause, and an item in its checklist.
+
+## v0.22.0 — 2026-10-28
+
+**auth-client in a container of its own** ([auth/INTEGRATING.md](auth/INTEGRATING.md), step 4). auth-client
+answered on `127.0.0.1` only, so a server in a container could reach it only by sharing its network namespace
+(compose's `network_mode: "service:<your server>"`), and each restart of the server left auth-client in a network
+that was gone: every route refused until auth-client restarted too, and restarting both at once can leave it down.
+Now `AUTH_LISTEN=0.0.0.0` (`--listen`) has it answer on its container's own network, where your server reaches it by
+the service's name, with no port published: either restarts on its own. The default is still `127.0.0.1`.
+
+**The mailbox, voice messages, and whispers left for someone away** (visit/SPEC.md 8.9, 8.12).
+
+- **📬 The mailbox.** A line meant for you (a whisper, a line in your room's chat, an @mention) that comes while
+  nobody is looking at your chat stays unseen until you read it. Your visit-client keeps the mark in its database, so
+  a reload or a restart keeps it. The chat window shows 📬 and how many, even when it has faded; a click lists them,
+  and a click on one answers there. Looking means the page is shown and focused, with a key, a click or the pointer
+  used in the last 2 minutes (`v.attention`, said by the chat window). For a room's own UI: `v.unseen`, `v.read()`,
+  the `unseen` event.
+- **🎙 Voice messages.** Recorded by the box (a minute at most), kept and passed on as a picture is: in a room, a
+  room's chat, or a whisper to someone you are linked with; never through the lobby. A line plays it from ▶. 🖼 has a
+  Voice tab. `v.share(blob)` takes a recording (WebM, Ogg or MP4, at most 2 MB), and the line gives its `secs`.
+- **⏳ Whispers left for someone away.** `/w <name>` for someone not in the lobby (whom you have whispered with, or a
+  guest) is kept by your own visit-client and passed on through the lobby once you are both in it. The lobby still
+  keeps nothing. Text only. The 📬 list shows them, each to take back. `v.awayTargets`, `v.held`, `v.unhold()`.
+
+**When a line came.** Each line in the chat window has its time before it, dim, as WoW's chat timestamps do (the
+time as your browser writes one), and when the log holds more than today, each day's first line has its day over
+it: the chat now keeps lines across reloads and days, and the mailbox brings back old ones.
+
+**Tab in the chat window** ([#15](https://github.com/sarmiena/Basedverse/issues/15); visit/SPEC.md 8.9). With no
+name to finish, Tab moves the box on to the next place a line can go (Say, Tell whoever you last whispered with,
+your room, each linked room, Lobby, and round again; Shift+Tab: back), keeping what is typed. Before, it took the
+focus out of the box. A name over the box still comes first, and a command in the box (`/w …`) says where itself.
+
+### What an integration does
+
+1. Nothing, if auth-client runs on the host's network beside your server, or you keep `network_mode`.
+2. With your server in a container: auth-client as a service of its own on that network, `AUTH_LISTEN=0.0.0.0`,
+   no `ports:`, no `network_mode`; your server asks it at the service's name (`AUTH_HOST` in step 5's sketch).
+3. **visit-client's database: `visit-client migrate`** before starting it (schema 2: the mailbox's marks, whispers
+   left for someone away). A visit-client of this release refuses a database at schema 1 and says so.
+4. Nothing for the chat window: `Visit.chat` does the mailbox, voice messages, whispers left, times and Tab. A page that
+   draws its own chat: `v.unseen` and the `unseen` event, `v.read()`, and `v.attention(on)` while someone looks at it
+   (else every line meant for its user counts as unseen); a voice message is a line's `media` item with `secs`. A page
+   that relied on Tab leaving the chat box gets the box's own Tab.
+
 ## v0.21.1 — 2026-10-28
 
 **Your workroom from another device, and local services relayed** ([auth/INTEGRATING.md](auth/INTEGRATING.md),

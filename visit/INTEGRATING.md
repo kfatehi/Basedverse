@@ -42,7 +42,9 @@ take them unless your user asks for something else. The defaults are Visit's own
   a friend's world put your room), and ⏱ (how this page is doing);
 - **the chat window** (the panel's, `Visit.chat`): bottom left, as in a game. Enter to type, and say a line to
   everyone who can see you, whisper to one person (`/w name`), say it in your room's chat (`/room`: everyone in it
-  and linked with it) or a linked friend's (`/room name`), or to the lobby (`/1`); Tab finishes a name; 🎧 joins a
+  and linked with it) or a linked friend's (`/room name`), or to the lobby (`/1`); Tab finishes a name, else moves on to the next of those (Shift+Tab: back); 🎙 a voice
+  message; 📬 what came for your user while nobody looked (whispers, your room's chat, mentions), kept until read;
+  a whisper to someone away is kept by your visit-client until you are both in the lobby; 🎧 joins a
   room's voice (everyone in it hears everyone else), and a line over the box says who is in it; it fades when nobody has said anything for a while;
 - **mounts** (`visit.ride`, M, the panel's "your mount"): Visit carries them and puts them under their rider in
   the room they ride into; what they are (models, names, paces) is your room's to say (`visit.possessions`), and the
@@ -382,7 +384,7 @@ visit.host({
   game's party), `/room name` in a linked friend's, `/1` to the whole lobby
   (`visit.say(text, to)` from code). Something of your room's own that talks (a receptionist, a guide; not a
   person): name its object `visit:npc:<id>` and say its lines with `visit.sayAs(id, name, text)`: in your room, over
-  it, in everyone's chat under its own name, never as your user. With a world (step
+  it, in everyone's chat under its own name, never as your user (on the engine, from the server page). With a world (step
   9) Visit draws the bubbles in your room too; without one, draw them yourself from `visit.chats`
   (`Visit.bubble(THREE, text, unit)` makes one). Make sure your room's keys ignore a text box (WASD there is typing,
   not walking), and leave Enter and `/` to the chat window. Something of yours bottom left: move the window
@@ -394,7 +396,9 @@ visit.host({
   their **feet** are: your `spawn` and `move` return that, never their eyes. Give your user's body with
   `visit.avatar(model)`: a model of its own, its feet at its origin, facing −z, in metres, with an `eyes` point and
   `idle`, `walk`, `ride` clips; check it with `Visit.checkModel`. Visit draws your visitors' own models at their
-  feet: draw your own figure for a visitor only where `visit.visitors[i].look` is "mine".
+  feet: draw your own figure for a visitor only where `visit.visitors[i].look` is "mine". To decide that yourself for
+  some of them, give `visit.host` a `look(visitor)` hook that returns "mine" or "theirs" (anything else: as the
+  panel says); a room that poses its owner itself (engine/SPEC.md 4: a seat, a drink) says "mine" of `who.owner`.
 - **Mounts**: one riding into your room has its mount in your scene, under its feet. Your `move` hears what it
   rides (`who.riding`: { id, name, fly, speed, lift }) and does as your room's physics would: we suggest lifting the
   rider onto it (their eyes `lift` higher), walking them at its pace (`speed` times yours; say `walk: { speed,
@@ -423,7 +427,11 @@ visit.host({
   redraw (`texture.needsUpdate = true`: encoded again in the background and sent at most once a second, so mark one
   changed only when its picture did), the background and the fog. **What does not**: custom shaders (a
   `ShaderMaterial` is code: it arrives plain grey), HTML overlays, post-processing (an `EffectComposer`), and
-  anything drawn outside the scene.
+  anything drawn outside the scene. **A primitive travels as its parameters**: a `BoxGeometry`, an
+  `IcosahedronGeometry` and the rest go as what made them (`toJSON`), so corners you pulled on one arrive as
+  the primitive, unpulled. A geometry whose vertices you edit must be a plain one: `new
+  THREE.BufferGeometry().copy(new THREE.IcosahedronGeometry(1, 1))`, then edit. (An `EdgesGeometry` or a
+  `WireframeGeometry`, lines along another's edges, travels as its lines: Visit sees to it.)
 - **What it costs you**: under 1 ms of your page's time 30 times a second while you have visitors (Visit reads
   the scene for changes, your landscape aside), and the whole scene once as each visitor starts (`toJSON`: some
   tens of ms for a room of a few hundred objects; your landscape apart, once, to visitors who do not have it).

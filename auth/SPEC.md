@@ -13,8 +13,9 @@ standard pieces. It:
 - makes API keys for the owner's scripts and agents;
 - hands visit-client's port and token to a signed-in session, in place of each workroom's own `/api/visit`.
 
-It is started by the workroom's launcher beside visit-client, and listens on `127.0.0.1` only. **The browser
-never talks to it: only the workroom's server does.**
+It is started by the workroom's launcher beside visit-client, and listens on `127.0.0.1` only, or, in a
+container, on its container's own network (`AUTH_LISTEN`, 8), its port never published. **The browser never
+talks to it: only the workroom's server does.**
 
 ```
 browser (this machine, or another device over HTTPS)
@@ -58,7 +59,7 @@ There is no sign-up page, ever: having a terminal on the machine is the proof of
 
 ## 3. The API
 
-HTTP and JSON on `127.0.0.1:<port>` (default 7403). Every call but `/health` carries
+HTTP and JSON on `127.0.0.1:<port>` (default 7403; in a container, its address there). Every call but `/health` carries
 `Authorization: Bearer <service token>`: the launcher makes that token each run and writes it to a file only the
 user can read (mode 0600), given to auth-client (`--token-file`) and to the workroom's server, as visit-client's
 page token is. Secrets travel in bodies, never in URLs. A body is JSON, at most 16 KiB.
@@ -159,7 +160,8 @@ Each is a flag and a variable in its environment (`AUTH_PORT` is `--port`).
 | variable | default | |
 |---|---|---|
 | `AUTH_DATABASE_URL` | (required) | postgres://auth:password@host:port/database: Visit's database, as auth-client's role |
-| `AUTH_PORT` | 7403 | its port on 127.0.0.1 |
+| `AUTH_PORT` | 7403 | its port |
+| `AUTH_LISTEN` | `127.0.0.1` | its address: `127.0.0.1`, or, in a container, `0.0.0.0`: its container's own network, where a workroom's server in another container on that network reaches it by name (its port never published, so nothing else does) |
 | `AUTH_TOKEN_FILE` | (required to run) | the service token's file (at least 32 characters; it warns if others can read it) |
 | `AUTH_IDLE` | `7d` | a session ends after this long unused (a number and s, m, h or d) |
 | `AUTH_MAX_AGE` | `30d` | ...and after this long in all |

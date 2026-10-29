@@ -21,11 +21,11 @@ pub const MAX_SCENE_JSON: usize = 64 << 20;
 const KEY: u8 = 1;
 const EDIT: u8 = 2;
 /// A page's own avatar (8.6): gzipped JSON, kept by its visit-client for the hosts that ask.
-const AVATAR: u8 = 4;
+pub const AVATAR: u8 = 4;
 /// A moment of the page's own user's voice (8.7: its channel says where it may go, VOICE_ROOM, VOICE_CALLS and
 /// VOICE_CHANNEL; its visit-client decides who hears it), or to the page, another office's: one Opus packet. To the
 /// page, the first byte of the timestamp's place says how it came (ROUTE_NEAR, ROUTE_CALL, ROUTE_VOICE).
-const AUDIO: u8 = 8;
+pub const AUDIO: u8 = 8;
 /// To the page, a moment of someone else's voice an office passed on (8.7, 8.8): a visitor's, from the room to
 /// another visitor near them; a call's, from a phone on speaker to those near it, and theirs to the call. Who spoke
 /// (an id, then a name, each a length byte and UTF-8), then the Opus packet.
@@ -35,10 +35,10 @@ const RELAY: u8 = 16;
 const LAND: u8 = 32;
 /// One of a page's own possessions (8.11): its model, gzipped JSON, its slot in the list the page gave (the frame's
 /// channel). Kept by its visit-client for the hosts that ask.
-const POSSESSION: u8 = 64;
+pub const POSSESSION: u8 = 64;
 /// A picture shared in chat (8.12): from the page, one to keep (its channel a slot the page names, answered with
 /// `media_ready`); to the page, one it asked for (who it is, its type, then its bytes; never dropped).
-const MEDIA: u8 = 128;
+pub const MEDIA: u8 = 128;
 /// The most one packet of voice takes (20 ms of Opus is some tens of bytes).
 pub const MAX_AUDIO: usize = 1000;
 /// The most an avatar takes gzipped, and unpacked.

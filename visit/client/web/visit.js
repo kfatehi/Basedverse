@@ -13,7 +13,7 @@
 // visitor's page walks at once and the host corrects it), and a host renders and encodes nothing for anyone.
 "use strict";
 (function () {
-  const VERSION = "0.21.1", PROTO = "basedverse-visit-local/2";
+  const VERSION = "1.0.1", PROTO = "basedverse-visit-local/2";
   const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, LOOK = 0.0025;
   const POINT_MS = 200, AIM_MS = 125;   // a visitor's points, at most one this often; what it aims at, looked for this often
   // A visitor's up and down (SPEC 8.2: its input's `up`), as WoW flies: what they do is the room's (its move).
@@ -50,6 +50,7 @@
   // data (cleanScene). The visitor walks at once, predicted here, and the host's answer corrects it.
   const KEY = 1, EDIT = 2, AVATAR = 4, AUDIO = 8, RELAY = 16, LAND = 32, POSSESSION = 64, MEDIA = 128;   // frames' flags: bit 0 a key delta; bit 1 a scene edit, bit 2 this office's avatar (page to visit-client); bit 3 voice; bit 5 this room's landscape (page to visit-client); bit 6 one of its possessions, its slot the channel (8.11); bit 7 a picture shared in chat (8.12) (SPEC 5.4)
   const MEDIA_MAX = 8 << 20, MEDIA_KINDS = ["image/png", "image/jpeg", "image/webp", "image/gif"];   // a picture shared (8.12): at most 8 MB, of these kinds
+  const VOICE_MAX = 2 << 20, VOICE_SECS = 60, VOICE_KINDS = ["audio/webm", "audio/ogg", "audio/mp4"];   // a voice message (0.22.0): at most 2 MB, a minute, of these kinds
   // A landscape (SPEC 8.10) goes to visit-client this long after what is static last changed: once, for a room still
   // loading.
   const LAND_QUIET = 1000;
@@ -70,6 +71,9 @@
   const CHAT_LEN = 200, CHATS = 5, CHAT_WINDOW = 10000, chatShows = text => Math.min(12000, 4000 + 70 * text.length);
   // The chat window (Visit.chat) keeps the last CHAT_LOG lines, and fades CHAT_FADE ms after the last one.
   const CHAT_LOG = 100, CHAT_FADE = 20000;
+  // Someone is looking at the chat window while its page is shown and focused, and they used a key, a click or the
+  // pointer this recently (ms): what comes meanwhile is seen, not in the mailbox (8.9).
+  const LOOKING = 120000, STIRS = ["pointerdown", "pointermove", "keydown", "wheel", "touchstart"];
   // The microphone's side: 20 ms at a time, to the page (an AudioWorklet, from a blob: as the ticker's Worker is).
   const MIC_WORKLET = `registerProcessor("visit-mic", class extends AudioWorkletProcessor {
     constructor() { super(); this.b = new Float32Array(${VOICE_FRAME}); this.n = 0; }
@@ -234,7 +238,10 @@
   const bansFrom = l => (Array.isArray(l) ? l : []).filter(b => isObj(b) && typeof b.key === "string").map(b => ({ key: b.key, name: String(b.name || ""), voice: b.voice === true, chat: b.chat === true }));
   // A line's pictures and links (8.12), as the visit-client gives them: [{ id, mime, size }], [{ url, title, description,
   // site, image }].
-  const picturesFrom = l => (Array.isArray(l) ? l : []).filter(p => isObj(p) && /^[0-9a-f]{64}$/.test(p.id)).slice(0, 4).map(p => ({ id: p.id, mime: String(p.mime || ""), size: Number(p.size) || 0 }));
+  // A line's pictures, and its voice message (`secs`: how long, as its sender says).
+  const picturesFrom = l => (Array.isArray(l) ? l : []).filter(p => isObj(p) && /^[0-9a-f]{64}$/.test(p.id)).slice(0, 4).map(p => ({ id: p.id, mime: String(p.mime || ""), size: Number(p.size) || 0,
+    ...(VOICE_KINDS.includes(String(p.mime)) ? { secs: Math.round(Math.min(VOICE_SECS, Math.max(0, Number(p.secs) || 0)) * 10) / 10 } : {}) }));
+  const isVoice = p => VOICE_KINDS.includes(p.mime);
   const linksFrom = l => (Array.isArray(l) ? l : []).filter(x => isObj(x) && /^https?:\/\/\S+$/.test(String(x.url || ""))).slice(0, 2).map(x => ({ url: String(x.url),
     title: String(x.title || ""), description: String(x.description || ""), site: String(x.site || ""), image: picturesFrom(isObj(x.image) ? [x.image] : [])[0] || null }));
   // A picture made small enough to share (8.12): at most 4096 px a side and MEDIA_MAX, as WebP (else JPEG).
@@ -258,6 +265,7 @@
     const arr = k => (Array.isArray(json[k]) ? json[k] : []).filter(isObj);
     json.materials = arr("materials").map(m => MATERIALS.has(m.type) ? m : { uuid: String(m.uuid), type: "MeshLambertMaterial", color: 0x808080 });
     json.geometries = arr("geometries").map(g => {
+      if (NO_RECIPE.has(g.type)) return { uuid: String(g.uuid), type: "BufferGeometry", data: { attributes: {} } };   // from an older host, with nothing to make it from: empty, not a warning an object
       let n = 1;
       if (isObj(g.data)) n = (((g.data.attributes || {}).position || {}).array || []).length / 3;
       else {
@@ -335,9 +343,13 @@
   // the host's own, where a sim keeps its state (who a figure is, its handles), and never leaves its page; it is
   // put back as it was the moment the JSON is made.
   const SHARED_DATA = ["visitor", "visitPoint", "visitRider"];
+  // A geometry three.js's loader makes from no recipe: an EdgesGeometry or a WireframeGeometry (lines along another
+  // geometry's edges) says in its JSON only what it was made from, which is not there to make it from again.
+  const NO_RECIPE = new Set(["EdgesGeometry", "WireframeGeometry"]);
   function sharedJSON(o, meta) {
-    const kept = [];
+    const kept = [], lines = [];
     o.traverse(x => {
+      if (x.geometry && NO_RECIPE.has(x.geometry.type) && x.geometry.attributes && x.geometry.attributes.position) lines.push(x.geometry);
       const u = x.userData;
       if (!u || typeof u !== "object" || !Object.keys(u).length) return;
       const shared = {};
@@ -345,7 +357,16 @@
       kept.push([x, u]);
       x.userData = shared;
     });
-    try { return o.toJSON(meta); } finally { for (const [x, u] of kept) x.userData = u; }
+    try {
+      const json = o.toJSON(meta);
+      // Those travel as their lines: a plain geometry with their vertices, loaded anywhere.
+      for (const g of lines) {
+        const at = meta && meta.geometries ? meta.geometries : null, pos = g.attributes.position;
+        if (!at || !at[g.uuid] || at[g.uuid].type !== g.type) continue;
+        at[g.uuid] = { uuid: g.uuid, type: "BufferGeometry", data: { attributes: { position: { itemSize: pos.itemSize, type: pos.array.constructor.name, array: Array.from(pos.array), normalized: !!pos.normalized } } } };
+      }
+      return json;
+    } finally { for (const [x, u] of kept) x.userData = u; }
   }
 
   // Every uuid in a landscape's JSON named anew, in the order each first comes (L1, L2, ...), and every mention of
@@ -651,8 +672,15 @@
   }
 
   class Client {
-    constructor(port, token, sim, { threeBase = null } = {}) {
-      Object.assign(this, { port, token, sim, _threeBase: threeBase });
+    constructor(port, token, sim, { threeBase = null, url = null, role = null } = {}) {
+      // Where visit-client is (SPEC 7): a URL (ws:// or wss://), a path on this page's own origin (a workroom's
+      // server's relay, "/visit/ws"), or, as before, a port on 127.0.0.1. And which role this page is: the room
+      // ("host"), the person ("user"), or both (null: every page before the engine).
+      if (role != null && role !== "host" && role !== "user") throw new Error('Visit.connect: role is "host", "user", or none');
+      const where = url ? (/^wss?:\/\//.test(url) ? url : (location.protocol === "https:" ? "wss://" : "ws://") + location.host + (url.startsWith("/") ? url : "/" + url)) : `ws://127.0.0.1:${port}/ws`;
+      Object.assign(this, { port, token, sim, _threeBase: threeBase, url: where, role, _wantRole: role });
+      this.home = null;        // the user's: their own room as a visit (engine/SPEC.md 4): { id, channel, paused }, while the room is up
+      this.owner = null;       // the host's: the person in it, as a visitor of its own: { id, channel }, while they are here
       this.state = "connecting";   // then "online", "offline" (the lobby out of reach), or "away" (left on purpose)
       this.office = null;
       this.status = "available";
@@ -697,6 +725,9 @@
       this.chatLog = [];       // the last CHAT_LOG lines of chat, of every scope (8.9), as "chat" gave them, with `at` (ms);
                                //   `old`, from before this page (kept by the visit-client: a reload keeps the chat)
       this.lobbyChat = false;  // the lobby relays chat (8.9): say(text, "lobby") goes to everyone in it
+      this.unseen = { count: 0, conversations: [], lines: [] };   // the mailbox (8.9): lines meant for you, not read yet
+      this.held = [];          // whispers you left for someone away, still with your visit-client: [{ id, key, name, text, at }]
+      this._attention = false; // someone looking at this page's chat (Visit.chat says), as last told
       this._kept = new Map();     // guests' plots kept while they are away (8.10): key -> { key, name, plot, unit, json, asked, built }
       this._landText = null;      // this room's landscape, as last given to visit-client
       this._said = [];            // when you last said lines (CHATS every CHAT_WINDOW)
@@ -743,10 +774,10 @@
     async _open() {
       const token = typeof this.token === "function" ? await this.token() : this.token;
       return new Promise((resolve, reject) => {
-        const ws = this._ws = new WebSocket(`ws://127.0.0.1:${this.port}/ws`);
+        const ws = this._ws = new WebSocket(this.url);
         ws.binaryType = "arraybuffer";
         let ready = false;
-        ws.onopen = () => ws.send(JSON.stringify({ type: "hello", proto: PROTO, token, sim: this.sim }));
+        ws.onopen = () => ws.send(JSON.stringify({ type: "hello", proto: PROTO, sim: this.sim, ...(token ? { token } : {}), ...(this._wantRole ? { role: this._wantRole } : {}) }));
         ws.onmessage = e => {
           if (typeof e.data !== "string") return this._frame(e.data);
           let m;
@@ -759,7 +790,7 @@
           if (ws !== this._ws) return;
           this._dropAll();
           if (!ready) {
-            const err = new Error(e.code === 4401 ? "visit-client refused the token" : `visit-client is not running on 127.0.0.1:${this.port}, or refused this page`);
+            const err = new Error(e.code === 4401 ? "visit-client refused the token" : e.code === 4400 ? "visit-client refused this page's hello" : `visit-client is not running at ${this.url}, or refused this page`);
             err.code = e.code;
             return reject(err);
           }
@@ -788,10 +819,15 @@
 
     _ready(m) {
       this.state = m.away ? "away" : m.online ? "online" : "offline";
+      this.role = m.role === "host" || m.role === "user" ? m.role : null;
+      this.home = isObj(m.home) ? { id: String(m.home.id), channel: Number(m.home.channel), paused: m.home.paused === true } : null;
+      this.owner = isObj(m.owner) ? { id: String(m.owner.id), channel: Number(m.owner.channel) } : null;
       this.office = m.office && m.office.id ? m.office : null;
       this.status = m.status; this.maxVisitors = m.max_visitors;
       this.key = typeof m.key === "string" ? m.key : null;
       this.lobbyChat = m.lobby_chat === true;
+      this.unseen = { count: 0, conversations: [], lines: [] }; this.held = [];   // (said again after, if any)
+      if (this._attention) this._send({ type: "attention", on: true });
       this._guests(m);
       this.layout = Array.isArray(m.layout) ? m.layout : [];
       this.voiceRange = Number(m.voice_range) > 0 ? Number(m.voice_range) : VOICE_RANGE;
@@ -869,6 +905,16 @@
         case "call": this._callIn(m); break;
         case "layout": this.layout = Array.isArray(m.layout) ? m.layout : []; break;
         case "chat": this._chatMsg(m, false); break;
+        case "unseen": {   // the mailbox (8.9): lines meant for you that came while nobody looked, until read
+          const lines = [];
+          for (const l of Array.isArray(m.lines) ? m.lines : []) { const c = isObj(l) && this._chatFrom(l, true); if (c) lines.push(this._lineOf(c, true)); }
+          this.unseen = { count: Number(m.count) || 0, lines,
+            conversations: (Array.isArray(m.conversations) ? m.conversations : []).filter(c => isObj(c) && typeof c.conversation === "string").map(c => ({ conversation: c.conversation, count: Number(c.count) || 0 })) };
+          this._emit("unseen", this.unseen); this._changed(); break;
+        }
+        case "held": this.held = (Array.isArray(m.held) ? m.held : []).filter(h => isObj(h) && typeof h.id === "string")
+          .map(h => ({ id: h.id, key: String(h.key || ""), name: String(h.name || ""), text: String(h.text || ""), at: Number(h.at) || 0 })); this._emit("held", this.held); this._changed(); break;
+        case "held_sent": this._emit("held_sent", { id: String(m.id || ""), key: String(m.key || ""), name: String(m.name || ""), text: String(m.text || ""), at: Number(m.at) || 0 }); break;
         case "media_ready": {   // a picture shared, kept by the visit-client (8.12): its id
           const put = this._puts.get(m.slot);
           if (put) { this._puts.delete(m.slot); clearTimeout(put.t); put.resolve({ id: String(m.id), mime: String(m.mime), size: Number(m.size) || 0 }); }
@@ -910,6 +956,7 @@
         case "visit_started": this._started(m); break;
         case "visit_ended": this._ended(m); break;
         case "host_paused": case "host_resumed":
+          if (this.home && this.home.channel === m.channel) this.home.paused = m.type === "host_paused";
           if (this.visiting && this._viewer && this._viewer.channel === m.channel) this.visiting.paused = m.type === "host_paused";
           if (this._watches.has(m.channel)) this._watches.get(m.channel).paused = m.type === "host_paused";
           if (this._links.has(m.channel)) this._links.get(m.channel).paused = m.type === "host_paused";
@@ -933,14 +980,23 @@
     }
 
     // ---------- actions ----------
+    // What is the room's to do, and what the person's (engine/SPEC.md 7): a page of the other role is refused here, as
+    // its visit-client would refuse it (`wrong_role`).
+    _as(role, what) {
+      if (this.role && this.role !== role) {
+        const e = new Error(`visit.${what}: the ${role === "host" ? "room's" : "person's"} to do, and this page is the ${this.role === "host" ? "room" : "person"}`);
+        e.code = "wrong_role";
+        throw e;
+      }
+    }
     setStatus(status) { this._send({ type: "status", status }); }
     setMaxVisitors(n) { this._send({ type: "max_visitors", n }); }
     rename(name) { this._send({ type: "rename", name }); }
     // A knock: to walk into their room as soon as they let you in. A link (8.5; to an office whose `links` is
     // true): let in, you see their room in a corner (the stage's), from above, and choose: go there (stepIn), put it
     // in your world (toWorld), or not (unlink). To an older office a link is a knock.
-    knock(officeId, message = "") { this._send({ type: "knock", to: officeId, message }); }
-    link(officeId, message = "") { this._send({ type: "knock", to: officeId, message, link: true }); }
+    knock(officeId, message = "") { this._as("user", "knock"); this._send({ type: "knock", to: officeId, message }); }
+    link(officeId, message = "") { this._as("user", "link"); this._send({ type: "knock", to: officeId, message, link: true }); }
     answer(knockId, accept, message = "") { this.knocks = this.knocks.filter(k => k.id !== knockId); this._send({ type: "answer", knock: knockId, accept, message }); this._changed(); }
     leave() { if (this.visiting) this._send({ type: "end", visit: this.visiting.id }); }   // a link: unlinked
     // Your links (by visit id; the corner's, by default). Into its room, as a visit is (its host's spawn says where),
@@ -993,6 +1049,7 @@
     // { cosmetic, agreed, label (what a visitor sees), who ("everyone" | "guests"), reach (scene units), run }, run
     // getting { id, visitor, type, object, point, distance }. Called again, it replaces them all.
     interactions(types) {
+      this._as("host", "interactions");
       const map = new Map();
       for (const [type, t] of Object.entries(types || {})) {
         if (!/^[\w.-]{1,40}$/.test(type)) throw new Error(`visit.interactions: "${type}" is not a type (letters, digits, _ . -, at most 40)`);
@@ -1011,6 +1068,7 @@
     // room that would show you as yourself asks for it (null: none). And whose look your visitors have in your room:
     // their own avatars ("theirs"), or your models ("mine"), by default and for a friend (null: the default).
     avatar(object, { unit } = {}) {
+      this._as("user", "avatar");
       if (object == null) { this._avatarOwn = null; this._send({ type: "avatar_clear" }); return; }
       if (!object.isObject3D) throw new Error("visit.avatar: a three.js object (or null)");
       const u = Number(unit) > 0 ? Number(unit) : this._unit();
@@ -1040,6 +1098,7 @@
     // are in decides: one may keep mounts out (`mounts: false`) or anyone from flying (`fly: false`); one that says
     // nothing lets them ride, and a mount that flies, fly.
     possessions(list) {
+      this._as("user", "possessions");
       if (!Array.isArray(list) || list.length > POSSESSIONS) throw new Error(`visit.possessions: a list of at most ${POSSESSIONS}`);
       const ids = new Set(), num = (x, d, lo, hi) => x != null && Number.isFinite(Number(x)) ? Math.min(hi, Math.max(lo, Number(x))) : d;
       const own = list.map(p => {
@@ -1103,6 +1162,13 @@
     useAvatars(use) { this._send({ type: "avatars", default: use === "theirs" ? "theirs" : "mine" }); }
     useAvatar(key, use) { this._send({ type: "avatar_use", key, use: use === "theirs" || use === "mine" ? use : null }); }
     avatarUse(key) { const b = this.avatars.by.find(x => x.key === key); return b ? b.use : this.avatars.default; }
+    // How a visitor hosted here is drawn: as the room's `look` hook says of them ("mine": the room draws them, "theirs":
+    // their own model, drawn by Visit), else as the panel has it (avatarUse). A room that poses its owner itself
+    // (engine/SPEC.md 4) says "mine" of who.owner.
+    _lookUse(h) {
+      const hk = this._hooks, say = hk && typeof hk.look === "function" ? hk.look(h.visitor) : undefined;
+      return say === "mine" || say === "theirs" ? say : h.visitor.key ? this.avatarUse(h.visitor.key) : "mine";
+    }
     _avatarsFrom(m) {
       if (!isObj(m)) return;
       this.avatars = { default: m.default === "theirs" ? "theirs" : "mine",
@@ -1111,8 +1177,9 @@
     // Host side: ask each visitor whose own look this room shows for its avatar, once a visit; and tell each how it is
     // drawn here now (its look changed: their model, or ours).
     _avatarWants() {
+      if (this.role === "user") return;   // the room's visits, seen, not served
       for (const h of this._hosted.values()) {
-        if (!h.avatarAsked && h.visitor.key && this.avatarUse(h.visitor.key) === "theirs") {
+        if (!h.avatarAsked && this._lookUse(h) === "theirs") {
           h.avatarAsked = true;
           this._send({ type: "avatar_want", channel: h.channel });
         }
@@ -1125,7 +1192,8 @@
     // "theirs": its own model, which Visit draws, its eyes that model's) or as this room's model ("mine": the room draws
     // it, its eyes the room's `eye`); and why not as itself, if this room would show it so (`problem`).
     _bodyTell(h) {
-      const want = !!h.visitor.key && this.avatarUse(h.visitor.key) === "theirs", look = want && h.avatar ? "theirs" : "mine";
+      if (h.mirror) return;
+      const want = this._lookUse(h) === "theirs", look = want && h.avatar ? "theirs" : "mine";
       const problem = want && !h.avatar ? (h.modelProblem || null) : null;
       h.look = look;
       h.eyes = look === "theirs" ? h.avatar.eyes || this._eyeRoom() : this._eyeRoom();
@@ -1237,14 +1305,16 @@
     // This room's plot ({ center, size } in its units: as host() said, or what its scene covers), and in metres.
     _plot() {
       const hk = this._hooks;
-      if (!hk) return null;
+      if (!hk) { const hs = this._homeScene(); return hs ? hs.plot : (this.role === "user" ? { center: [0, 0], size: [10, 10] } : null); }
       if (this._plotFrom !== hk) { this._plotFrom = hk; this._plotIs = plotOf(hk.plot, hk.scene.root, hk.scene.three); }
       return this._plotIs;
     }
-    _unit() { return this._hooks && Number(this._hooks.unit) > 0 ? Number(this._hooks.unit) : 1; }
+    _unit() { const hs = !this._hooks && this._homeScene(); return hs ? hs.unit || 1 : this._hooks && Number(this._hooks.unit) > 0 ? Number(this._hooks.unit) : 1; }
+    // A user page's own room, as its host sends it (engine/SPEC.md 4), once it has arrived.
+    _homeScene() { const w = this.home && this._watches.get(this.home.channel); return w && w.scene ? w.scene : null; }
     _plotMetres() { const p = this._plot(); return p ? p.size.map(x => x * this._unit()) : [10, 10]; }
     // Your friends' plots around your room, and walking onto them (../../WORLD.md): see World.
-    world(opts = {}) { if (this._world) this._world.release(); return new World(this, opts); }
+    world(opts = {}) { this._as("user", "world"); if (this._world) this._world.release(); return new World(this, opts); }
     _guests(m) {
       this.door = m.door === "closed" ? "closed" : "open";
       this.guests = (Array.isArray(m.guests) ? m.guests : []).map(g => ({ key: String(g.key), name: String(g.name || "") }));
@@ -1264,19 +1334,28 @@
       if (m.role === "host") {
         // A watcher (../../WORLD.md) sees this room's plot from outside it: sent the scene, never spawned, until it
         // steps in (`enter`).
-        const h = { id: m.id, channel: m.channel, visitor: m.peer || {}, guest: m.guest === true, watch: m.watch === true, link: m.link === true, inside: m.watch !== true || m.inside === true,
+        // The owner's visit (engine/SPEC.md 4): the person in their own room, a watch of its plot by its owner, whom
+        // the room spawns and walks as it does anyone (who.owner says who). To a user page, the room's visits are to
+        // see (the panel's rows), never to serve: a mirror, with nothing sent for it.
+        const owner = m.owner === true, mirror = this.role === "user";
+        const h = { id: m.id, channel: m.channel, visitor: Object.assign({}, m.peer || {}, owner ? { owner: true } : {}), owner, mirror, guest: m.guest === true, watch: m.watch === true, link: m.link === true,
+          inside: m.watch !== true || m.inside === true,
           pose: null, yaw0: 0, input: null, inputAt: 0, keyNext: true, fails: 0, sceneSent: false, posed: null, sharedAdds: m.shared_adds === true,
           landscapes: m.landscapes === true, since: performance.now(), possessions: possessionsFrom(m.possessions), models: new Map(), wanted: new Set(), ride: null };
         if (m.state && m.state.pose && h.inside) { h.pose = m.state.pose; h.yaw0 = m.state.yaw0 || 0; }   // back after this page reloaded
         this._hosted.set(m.channel, h);
-        if (h.inside) this._spawn(h);
+        if (owner) this.owner = { id: m.id, channel: m.channel };
+        if (h.inside && !mirror) this._spawn(h);
         this._avatarWants();
       } else if (m.watch) {
-        // A plot watched (the world's), or a link (8.5): the corner's if it is free, else aside, waiting for it.
-        const w = { id: m.id, channel: m.channel, host: m.peer || {}, watch: true, link: m.link === true, plot: m.link !== true, where: m.link ? "aside" : null,
-          inside: false, paused: false, count: 0, scene: null, sceneQ: null, since: performance.now(), loading: false, failed: false };
+        // A plot watched (the world's), or a link (8.5): the corner's if it is free, else aside, waiting for it. Or home
+        // (engine/SPEC.md 4): the person's own room, a watch they are in, drawn by their world as its own plot.
+        const home = m.home === true;
+        const w = { id: m.id, channel: m.channel, host: m.peer || {}, watch: true, link: m.link === true, plot: m.link !== true, home, where: m.link ? "aside" : null,
+          inside: home && m.inside === true, paused: false, count: 0, scene: null, sceneQ: null, since: performance.now(), loading: false, failed: false };
         if (w.link) this._links.set(m.channel, w); else this._watches.set(m.channel, w);
-        if (m.inside) this._send({ type: "exit", channel: m.channel });   // this page lost where it was: it starts at home
+        if (home) { this.home = { id: m.id, channel: m.channel, paused: false }; if (this._world) this._world.listAt = -1; }
+        if (m.inside && !home) this._send({ type: "exit", channel: m.channel });   // this page lost where it was: it starts at home
         if (w.link && m.where === "world") { w.wantWorld = true; if (this._world) this.toWorld(w.id); }   // where it was put, before a reload
         else if (w.link && this._world && this.isGuest(w.host.key)) this.toWorld(w.id);   // a guest's: its plot (_guestLinksToWorld)
         else if (w.link && !this._viewer) this._toCorner(w);
@@ -1293,6 +1372,8 @@
 
     _ended(m) {
       this._nearBy.delete(m.channel);
+      if (this.home && this.home.id === m.id) this.home = null;
+      if (this.owner && this.owner.id === m.id) this.owner = null;
       const h = this._hosted.get(m.channel);
       if (h && h.id === m.id) { this._avatarDrop(h); this._rideDrop(h); this._hosted.delete(m.channel); this._visitorsList(); }
       const w = this._watches.get(m.channel);
@@ -1322,10 +1403,10 @@
 
     _visitorsList() {
       const hs = [...this._hosted.values()];
-      this.visitors = hs.filter(h => h.inside).map(h => ({ id: h.id, visitor: h.visitor, guest: h.guest, pose: h.pose, link: h.link,
+      this.visitors = hs.filter(h => h.inside).map(h => ({ id: h.id, visitor: h.visitor, guest: h.guest, pose: h.pose, link: h.link, owner: !!h.owner,
         look: h.look || "mine", eyes: h.eyes || this._eyeRoom(), problem: h.modelProblem || null, avatar: null,
         riding: h.ride ? { id: h.ride.id, name: h.ride.name, fly: h.ride.fly } : null }));
-      this.watchers = hs.filter(h => h.watch).map(h => ({ id: h.id, visitor: h.visitor, inside: h.inside, link: h.link }));
+      this.watchers = hs.filter(h => h.watch && !h.owner).map(h => ({ id: h.id, visitor: h.visitor, inside: h.inside, link: h.link }));
       this.links = [...this._links.values()].map(w => ({ id: w.id, host: w.host, where: w.where, inside: w.inside }));
     }
 
@@ -1409,6 +1490,10 @@
       }
       const h = this._home, k = this._unit(), ears = h && { x: h.x * k, y: h.y * k + 1.6, z: h.z * k, yaw: h.yaw };
       const wd = this._world, w = wd && wd.inside && this._watches.get(wd.in);
+      if (w && w.scene && w.home) {   // the person at home, their room a plot their world has them in (engine/SPEC.md 4): heard from where its host has them
+        const s = w.scene, ks = s.unit || 1;
+        return { kind: "home", w, s, k: ks, ears: { x: s.pose.x * ks, y: (s.pose.y + s.vis.y) * ks, z: s.pose.z * ks, yaw: wd.look.yaw } };
+      }
       if (w && w.scene) return { kind: "plot", w, s: w.scene, k, ears };
       return { kind: "home", k, ears };
     }
@@ -1427,7 +1512,9 @@
     _near(r) {
       const out = new Map();
       if (r.kind === "home") {
-        for (const h of this._hosted.values()) if (h.inside && h.pose && h.visitor.key) out.set(h.visitor.key, { key: h.visitor.key, name: h.visitor.name || "", channel: h.channel,
+        if (r.s) {   // a user page: its visitors where their bodies are in the room's scene (as the room marks them)
+          for (const h of this._hosted.values()) if (h.inside && h.visitor.key && !h.owner) { const b = this._body(r.s, h.id); if (b) out.set(h.visitor.key, Object.assign({ key: h.visitor.key, name: h.visitor.name || "", channel: h.channel }, this._where(r.s, b, r.k))); }
+        } else for (const h of this._hosted.values()) if (h.inside && h.pose && h.visitor.key && !h.owner) out.set(h.visitor.key, { key: h.visitor.key, name: h.visitor.name || "", channel: h.channel,
           x: h.pose.x * r.k, y: (Number(h.pose.y) || 0) * r.k, z: h.pose.z * r.k });
         for (const x of this._worldNear()) if (!out.has(x.key)) out.set(x.key, x);
         return out;
@@ -1508,9 +1595,13 @@
     // it changes, at most ten times a second.
     _voiceWhere(r) {
       const k = this._unit(), q = x => Math.round(x * 10) / 10, pa = this._phoneAt;
-      const where = { me: r.kind === "home" && r.ears ? [q(r.ears.x), q(r.ears.y), q(r.ears.z)] : null, phone: pa ? [q(pa.x * k), q((pa.y || 0) * k), q(pa.z * k)] : null,
-        visitors: [...this._hosted.values()].filter(h => h.inside && h.pose).map(h => [h.channel, q(h.pose.x * k), q((Number(h.pose.y) || 0) * k), q(h.pose.z * k)]),
-        world: r.kind === "home" ? this._worldNear().map(x => [x.key, q(x.x), q(x.y), q(x.z)]) : [] };
+      // The room says where everyone in it is, its owner among them (engine/SPEC.md 3.3: the owner is a visitor of its
+      // own; their ears, their eyes); the person says where their world has their friends; a page that is both, both.
+      const o = this.owner && this._hosted.get(this.owner.channel), ownerAt = o && o.inside && o.pose ? [q(o.pose.x * k), q(((Number(o.pose.y) || 0) + (o.eyes || 0)) * k), q(o.pose.z * k)] : null;
+      const where = this.role === "user" ? { world: r.kind === "home" ? this._worldNear().map(x => [x.key, q(x.x), q(x.y), q(x.z)]) : [] }
+        : { me: this.role === "host" ? ownerAt : r.kind === "home" && r.ears ? [q(r.ears.x), q(r.ears.y), q(r.ears.z)] : null, phone: pa ? [q(pa.x * k), q((pa.y || 0) * k), q(pa.z * k)] : null,
+          visitors: [...this._hosted.values()].filter(h => h.inside && h.pose).map(h => [h.channel, q(h.pose.x * k), q((Number(h.pose.y) || 0) * k), q(h.pose.z * k)]),
+          world: this.role !== "host" && r.kind === "home" ? this._worldNear().map(x => [x.key, q(x.x), q(x.y), q(x.z)]) : [] };
       const sig = JSON.stringify(where), now = performance.now();
       if (sig === this._whereTold.sig || now - this._whereTold.at < 100 || !this._ws || this._ws.readyState !== 1) return;
       Object.assign(this._whereTold, { sig, at: now });
@@ -1641,7 +1732,7 @@
       const row = { t: Date.now(), fps: Math.round(gaps.length / secs), frame_p95_ms: gaps.length ? r1(gaps[Math.floor(gaps.length * 0.95)]) : null,
         frame_max_ms: gaps.length ? r1(gaps[gaps.length - 1]) : null, long_tasks: long.length, long_max_ms: long.length ? r1(Math.max(...long)) : 0, parts,
         counts: { visitors: [...this._hosted.values()].filter(h => h.inside).length, watchers: [...this._hosted.values()].filter(h => h.watch && !h.inside).length,
-          plots: w ? w.plots.length : 0, offline: w ? w.plots.filter(x => x.offline).length : 0, objects: sync ? sync.objs.size : 0,
+          plots: w ? w.plots.filter(x => !x.home).length : 0, offline: w ? w.plots.filter(x => x.offline).length : 0, objects: sync ? sync.objs.size : 0,
           landscape: sync ? sync.statics.length : 0, voices: this.voices.length, visiting: !!(this.visiting && this.visiting.inside) } };
       p.rows.push(row); if (p.rows.length > 120) p.rows.shift();
       p.cur = {}; p.at = now;
@@ -1675,12 +1766,24 @@
     // over heads still showing. Visit draws those in the views it draws (your world, and another's room); a room
     // without a world draws its own (Visit.bubble). Visit.chat, the chat window (the panel's), shows them all.
     say(text, to, { media = [], links = [] } = {}) {
+      this._as("user", "say");
       const t = [...String(text == null ? "" : text).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim()].slice(0, CHAT_LEN).join("").trim(), now = Date.now();
       const scope = to == null || to === "here" ? "say" : to === "lobby" ? "lobby" : isObj(to) && to.whisper != null ? "whisper" : "sim";
       const target = to === "room" ? { key: this.key || "", name: this.office ? this.office.name : "" }
         : scope === "sim" ? this.chatTargets.find(o => o.key === String(isObj(to) ? to.key : to))
         : scope === "whisper" ? this.whisperTargets.find(o => o.id === String(to.whisper) || (o.key && o.key === String(to.whisper))) : null;
+      // Someone away (not in the lobby), by their key: your visit-client keeps it for them (text only).
+      const away = scope === "whisper" && !target && /^[0-9a-f]{64}$/.test(String(to.whisper)) ? { key: String(to.whisper), name: String(to.name || this._nameOf(String(to.whisper)) || "") } : null;
       const pics = picturesFrom(media), cards = linksFrom(links), shares = pics.length + cards.length > 0;
+      if (away) {
+        this._said = this._said.filter(at => now - at < CHAT_WINDOW);
+        if (!t || shares || this._said.length >= CHATS || !this._ws || this._ws.readyState !== 1) return false;
+        this._said.push(now);
+        this._send({ type: "say", text: t, to: { whisper: away.key, name: away.name } });
+        this._chatIn({ key: this.key || "", name: this._userName || (this.office ? this.office.name : ""), text: t, mine: true, owner: false, id: null, scope, held: true,
+          to: { key: away.key, name: away.name }, conversation: "person:" + away.key });
+        return true;
+      }
       const att = { ...(pics.length ? { media: pics } : {}), ...(cards.length ? { links: cards } : {}) };
       this._said = this._said.filter(at => now - at < CHAT_WINDOW);
       if ((!t && !shares) || this._said.length >= CHATS || !this._ws || this._ws.readyState !== 1) return false;
@@ -1699,8 +1802,8 @@
     // `name` is what it goes by in everyone's chat. Said in your room, to everyone who can see it, and kept in its
     // chat; never as your user, and on a limit of its own (each figure CHATS lines every CHAT_WINDOW). False if not sent.
     sayAs(id, name, text) {
-      const t = [...String(text == null ? "" : text).replace(/[ --]/g, " ").trim()].slice(0, CHAT_LEN).join("").trim(), now = Date.now();
-      const i = String(id == null ? "" : id), n = String(name == null ? "" : name).replace(/[ --]/g, " ").trim();
+      const t = [...String(text == null ? "" : text).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim()].slice(0, CHAT_LEN).join("").trim(), now = Date.now();
+      const i = String(id == null ? "" : id), n = String(name == null ? "" : name).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim();
       if (!/^[A-Za-z0-9_.-]{1,40}$/.test(i) || !n || !t || !this._ws || this._ws.readyState !== 1) return false;
       const said = (this._saidAs.get(i) || []).filter(at => now - at < CHAT_WINDOW);
       if (said.length >= CHATS) return false;
@@ -1718,6 +1821,7 @@
     // The name your user goes by (1 to 24 characters; null: your office's), shown to others with what they say, over
     // their voice, in a room's voice, and in their panel: told to everyone linked with you, now and as they link.
     setName(name) {
+      this._as("user", "setName");
       const n = name == null ? null : [...String(name).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim()].slice(0, 24).join("").trim() || null;
       if (n === this._userName) return;
       this._userName = n;
@@ -1730,11 +1834,14 @@
 
     // ---------- pictures and links in chat (8.12) ----------
     // Share a picture (a Blob or File, as pasted or dropped: PNG, JPEG, WebP or GIF; a bigger one, or another kind, is
-    // made smaller as WebP first): kept by your visit-client, in its database. Resolves to { id, mime, size }, for
-    // say(text, to, { media: [it] }).
+    // made smaller as WebP first), or a voice message (0.22.0: a recording, WebM, Ogg or MP4, at most a minute and
+    // 2 MB): kept by your visit-client, in its database. Resolves to { id, mime, size }, for say(text, to, { media: [it] })
+    // (a voice message's with `secs`, how long it is: at most one a line).
     async share(blob) {
-      if (!blob || typeof blob.arrayBuffer !== "function") throw new Error("visit.share: a picture (a Blob or a File)");
-      const b = blob.size <= MEDIA_MAX && MEDIA_KINDS.includes(blob.type) ? blob : await smaller(blob);
+      if (!blob || typeof blob.arrayBuffer !== "function") throw new Error("visit.share: a picture or a recording (a Blob or a File)");
+      const voice = /^audio\//.test(blob.type);
+      if (voice && blob.size > VOICE_MAX) throw new Error("visit.share: a voice message is at most a minute (2 MB)");
+      const b = voice || (blob.size <= MEDIA_MAX && MEDIA_KINDS.includes(blob.type)) ? blob : await smaller(blob);
       const bytes = new Uint8Array(await b.arrayBuffer());
       if (!this._ws || this._ws.readyState !== 1) throw new Error("visit.share: not connected to visit-client");
       const slot = this._slot = (this._slot % 65535) + 1;
@@ -1786,11 +1893,11 @@
       for (const l of Array.isArray(m.lines) ? m.lines : []) { const c = isObj(l) && this._chatFrom(l, true); if (c && this._hasContent(c)) lines.push(this._lineOf(c, true)); }
       return { lines, more: !!m.more };
     }
-    // The pictures (kind "media") or the links ("links") shared in a conversation ("room:<key>", "person:<key>",
-    // "lobby"; a line's `conversation`), newest first: { items, more }: a picture's { id, mime, size, at, key, name,
-    // mine }, a link's { url, title, description, site, image, at, key, name, mine }.
+    // The pictures (kind "media"), voice messages ("voice") or links ("links") shared in a conversation ("room:<key>",
+    // "person:<key>", "lobby"; a line's `conversation`), newest first: { items, more }: a picture's or a voice
+    // message's { id, mime, size, at, key, name, mine }, a link's { url, title, description, site, image, at, key, name, mine }.
     async shared(conversation, kind = "media", { before, limit } = {}) {
-      const m = await this._ask("shared", { conversation: String(conversation), kind: kind === "links" ? "links" : "media", ...(Number(before) > 0 ? { before: Number(before) } : {}), ...(limit ? { limit: Number(limit) } : {}) });
+      const m = await this._ask("shared", { conversation: String(conversation), kind: ["links", "voice"].includes(kind) ? kind : "media", ...(Number(before) > 0 ? { before: Number(before) } : {}), ...(limit ? { limit: Number(limit) } : {}) });
       return { items: Array.isArray(m.items) ? m.items.filter(isObj) : [], more: !!m.more };
     }
     _ask(type, body, ms = 15000) {
@@ -1807,6 +1914,29 @@
       if (this.state !== "online") return [];
       return this.offices.filter(o => o.whisper && !(this.office && o.id === this.office.id)).map(o => ({ id: o.id, key: o.key, name: o.name }));
     }
+    // Whom you may leave a whisper for (say(text, { whisper: key, name })), not in the lobby now (0.22.0): those you
+    // have whispered with, and your guests, by their keys. Your visit-client keeps it, text only, and passes it on once
+    // they and you are both in the lobby (v.held until then; "held_sent" as it goes).
+    get awayTargets() {
+      const here = new Set(this.whisperTargets.map(o => o.key)), by = new Map();
+      const put = (key, name) => { if (key && /^[0-9a-f]{64}$/.test(key) && key !== this.key && !here.has(key) && name) by.set(key, name); };
+      for (const g of this.guests) put(g.key, g.name);
+      for (const l of this.chatLog) if (l.scope === "whisper") { if (l.mine && l.to) put(l.to.key, l.to.name); else put(l.key, l.name); }
+      return [...by].map(([key, name]) => ({ key, name })).sort((a, b) => a.name.localeCompare(b.name));
+    }
+    // The mailbox (8.9): you have read its lines of a conversation ("person:<key>", "room:<key>", "lobby"), or all of
+    // them (none). v.unseen: { count, conversations: [{ conversation, count }], lines (the newest, as "chat" gives
+    // them) }, and "unseen" as it changes. A line meant for you (whispered, said in your room's chat, or mentioning you)
+    // that comes while nobody looks at your chat (attention) is in it, kept by your visit-client.
+    read(conversation) { this._send({ type: "read", ...(conversation ? { conversation: String(conversation) } : {}) }); }
+    // Whether someone is looking at this page's chat now (Visit.chat says, by itself): what comes meanwhile is seen.
+    attention(on) {
+      if (!!on === this._attention) return;
+      this._attention = !!on;
+      this._send({ type: "attention", on: this._attention });
+    }
+    // A whisper left for someone away, taken back before it went (its id, from v.held).
+    unhold(id) { this._send({ type: "unhold", id: String(id) }); }
     // Whom you may say a line to (say(text, { key })): the offices linked with yours, either way, now.
     get chatTargets() {
       const by = new Map();
@@ -1831,7 +1961,7 @@
       if (m.mine === true) {
         if (!old) return null;
         const to = isObj(m.to) ? { key: String(m.to.key || ""), name: String(m.to.name || ""), ...(m.to.id ? { id: String(m.to.id) } : {}) } : null;
-        return { ...line, scope: ["sim", "whisper"].includes(m.scope) ? m.scope : "say", mine: true, to };
+        return { ...line, scope: ["sim", "whisper"].includes(m.scope) ? m.scope : "say", mine: true, to, ...(m.held === true ? { held: true } : {}) };
       }
       if (m.scope === "lobby") return { ...line, scope: "lobby", mine: !!this.office && m.id === this.office.id };
       if (m.scope === "whisper") return { ...line, scope: "whisper", id: typeof m.id === "string" ? m.id : null };
@@ -1852,7 +1982,7 @@
     _hasContent(c) { return !!c.text || (c.media && c.media.length > 0) || (c.links && c.links.length > 0); }
     _lineOf(c, old) {
       return { scope: c.scope || "say", key: c.key, name: c.name, text: c.text, mine: !!c.mine, owner: !!c.owner, id: c.id || null, npc: c.npc || null, channel: c.channel, to: c.to || null,
-        media: c.media || [], links: c.links || [], conversation: c.conversation || null, mention: !c.mine && this._mentions(c.text),
+        media: c.media || [], links: c.links || [], conversation: c.conversation || null, mention: !c.mine && this._mentions(c.text), ...(c.held ? { held: true } : {}),
         at: old ? c.at : Date.now(), ...(old ? { old: true } : {}) };
     }
     // Whether a line mentions your user (8.9): @ and the name they go by, or your office's, as a word of its own.
@@ -1961,6 +2091,7 @@
     // keeps you out of its voice). Whoever you also hear another way (in person, or on a call) you hear that way only.
     // The "room_voice" event: the one you are in now (null: none; `out`, why you are out: "kicked", "banned", "gone").
     joinVoice(key) {
+      this._as("user", "joinVoice");
       const k = key === "room" || key === true ? this.key : key == null ? null : String(key);
       if (!this._ws || this._ws.readyState !== 1 || (k && !this.key)) return false;
       if (k && k !== this.key && (!this.chatTargets.some(o => o.key === k) || this.bannedBy.some(b => b.key === k && b.voice))) return false;
@@ -2080,6 +2211,7 @@
     // lifts them above the floor its `move` gives. Without it, a visitor that came in high (from a world, in the air)
     // floats gently down to that floor. It is read at every move, so a room may change it.
     host(hooks) {
+      this._as("host", "host");
       if (!hooks || typeof hooks.spawn !== "function" || typeof hooks.move !== "function") throw new Error("visit.host needs spawn and move functions");
       const sc = hooks.scene;
       if (!sc || !(sc.root && sc.root.isObject3D && sc.three && sc.three.REVISION)) {
@@ -2351,20 +2483,21 @@
     // A plot watched (../../WORLD.md), read with this page's own three.js, to be drawn in its world (World.render)
     // where its layout puts it: its plot (or what its scene covers) and its units, lit as this page lights.
     async _watchStart(w, e) {
-      const hk = this._hooks;
-      if (!hk) throw new Error("a plot is drawn with this page's own three.js: v.host first");
+      const hk = this._hooks, wd = this._world;
+      if (!hk && !wd) throw new Error("a plot is drawn with this page's own three.js: v.host first (or, the person's page, v.world({ three, renderer }))");
       this._sceneDrop(w);
-      const T = hk.scene.three, s = this._sceneRead(T, e, w.id);
+      const T = hk ? hk.scene.three : wd.T, renderer = hk ? hk.scene.renderer : wd.renderer, s = this._sceneRead(T, e, w.id);
       s.plot = plotOf(e.plot, s.root, T);
       s.unit = Number(e.unit) > 0 ? Math.min(1000, Number(e.unit)) : 1;
       s.pose = { x: 0, y: 0, z: 0 }; s.yaw0 = 0; s.hostPose = null;
-      s.relight = [legacyLights(Number(e.three), isObj(e.renderer) ? e.renderer : null), legacyLights(Number(T.REVISION), hk.scene.renderer)];
+      s.relight = [legacyLights(Number(e.three), isObj(e.renderer) ? e.renderer : null), legacyLights(Number(T.REVISION), renderer)];
       relight(s.root, ...s.relight);
       this._sceneOwn(s);
       w.scene = s;
       this._landAttach(w);
+      if (w.home && wd) wd.listAt = -1;   // home has arrived: the world's own plot is known
       const key = w.host && w.host.key;
-      if (key && this.isGuest(key)) {   // a guest's plot: kept to draw while they are away (8.10), here and by visit-client
+      if (key && this.isGuest(key) && !w.home) {   // a guest's plot: kept to draw while they are away (8.10), here and by visit-client
         const k = this._kept.get(key) || { key, json: null, asked: false, built: null };
         if (!k.plot || JSON.stringify(k.plot) !== JSON.stringify(s.plot) || k.unit !== s.unit) this._send({ type: "plot_keep", key, name: w.host.name || "", plot: s.plot, unit: s.unit });
         this._kept.set(key, Object.assign(k, { name: w.host.name || "", plot: s.plot, unit: s.unit }));
@@ -2792,7 +2925,9 @@
       for (const w of this._watches.values()) if (!w.scene && !w.loading && !w.failed && now - (w.askedAt || w.since) > 3000) { w.askedAt = now; this._sceneResync(w); }
       if (now - (this._voiceAt || 0) >= 33) {   // voice: who is near, where each is heard from; and this room's own user's mark
         this._voiceAt = now;
-        const m = this._mark, h = this._home, away = this._inRoom() || (this._world && this._world.inside);
+        const o = this.role === "host" && this.owner && this._hosted.get(this.owner.channel);   // a host page: its owner, a visitor of its own, is who stands here
+        const m = this._mark, h = this.role === "host" ? (o && o.inside && o.pose ? { x: o.pose.x, y: Number(o.pose.y) || 0, z: o.pose.z } : null) : this._home;
+        const away = this.role !== "host" && (this._inRoom() || (this._world && this._world.inside));
         if (m) { m.visible = !!h && !away; if (h && !away) m.position.set(h.x, h.y + 1.5 / this._unit(), h.z); }
         const pm = this._phoneMark, pa = this._phoneAt;
         if (pm) { pm.visible = !!(this._phone && pa); if (pa) pm.position.set(pa.x, pa.y, pa.z); }
@@ -2829,7 +2964,7 @@
       let p;
       try {
         const turned = Object.assign({}, h.pose, { yaw: h.yaw0 + (input.yaw || 0), pitch: input.pitch || 0 });
-        const r = h.ride, who = { id: h.id, visitor: h.visitor, riding: r ? { id: r.id, name: r.name, fly: r.fly, speed: r.speed, lift: r.lift } : null };
+        const r = h.ride, who = { id: h.id, visitor: h.visitor, owner: !!h.owner, riding: r ? { id: r.id, name: r.name, fly: r.fly, speed: r.speed, lift: r.lift } : null };
         p = Object.assign({}, this._hooks.move(turned, input, dt, who) || turned);
         h.fails = 0;
       } catch (e) { return this._hookFailed(h, "move", e); }
@@ -3420,15 +3555,21 @@
   // and your page draws them itself, from v.chats); and a 🔊 over each one your user hears speaking (8.7; speaking:
   // false, and your page draws its own, from v.voices).
   class World {
-    constructor(v, { scene, renderer, ground = 0x30363d, gap = WORLD_GAP, clipOwn = true, bubbles = true, speaking = true } = {}) {
+    // A host page's world: its scene (clipped to its plot) and its renderer, friends' plots round it. A user page's
+    // (engine/SPEC.md 7): no scene of its own, its room comes from its host and is drawn as its own plot; `three` (any
+    // release this visit.js knows) and `renderer` are the page's.
+    // `self`: a user page's own body at home (engine/SPEC.md 4): "mine" (the default) hides the room's copy of it, as a
+    // visitor's page does (8.1), for the page's own; "room" shows the room's copy, with all the room does to it (a
+    // seat, a drink, a mount), for a page that draws none of its own there. Settable as the page goes (first person).
+    constructor(v, { scene, renderer, three, ground = 0x30363d, gap = WORLD_GAP, clipOwn = true, bubbles = true, speaking = true, self = "mine" } = {}) {
       const hk = v._hooks;
-      if (!hk) throw new Error("visit.world: v.host first (the world is drawn with your three.js, round your plot)");
-      this.v = v; this.T = hk.scene.three;
-      this.scene = scene || (hk.scene.root.isScene ? hk.scene.root : null);
-      this.renderer = renderer || hk.scene.renderer;
-      if (!this.scene || !this.renderer) throw new Error("visit.world needs { scene, renderer }: your whole scene, and the renderer that draws it");
-      Object.assign(this, { gap: Number(gap) >= 0 ? Number(gap) : WORLD_GAP, clipOwn: clipOwn !== false, in: null, home: null, bounce: null, yHome: null, me: null,
-        bubbles: bubbles === false && speaking === false ? null : new Bubbles(hk.scene.three), showLines: bubbles !== false, showSpeaking: speaking !== false,
+      if (!hk && !(v.role === "user" && three && three.REVISION && renderer)) throw new Error(v.role === "user" ? "visit.world needs { three, renderer }: the three.js this page draws with, and its renderer (its room comes from its host)" : "visit.world: v.host first (the world is drawn with your three.js, round your plot)");
+      this.v = v; this.T = hk ? hk.scene.three : three;
+      this.scene = hk ? scene || (hk.scene.root.isScene ? hk.scene.root : null) : null;
+      this.renderer = renderer || (hk && hk.scene.renderer);
+      if ((hk && !this.scene) || !this.renderer) throw new Error("visit.world needs { scene, renderer }: your whole scene, and the renderer that draws it");
+      Object.assign(this, { gap: Number(gap) >= 0 ? Number(gap) : WORLD_GAP, clipOwn: clipOwn !== false, self: self === "room" ? "room" : "mine", in: null, home: null, bounce: null, yHome: null, me: null,
+        bubbles: bubbles === false && speaking === false ? null : new Bubbles(this.T), showLines: bubbles !== false, showSpeaking: speaking !== false,
         refused: new Map(), holders: new Map(), sent: { at: 0, sig: "" }, look: { yaw: 0, pitch: 0 }, list: [], listAt: -1, plots: [], told: new Map() });
       const T = this.T;
       this.commons = new T.Scene();   // the ground between plots
@@ -3444,6 +3585,10 @@
     }
 
     get inside() { return this.in != null; }
+    get atHome() { return this.in != null && !!this.v.home && this.in === this.v.home.channel; }   // a user page, in its own room (engine/SPEC.md 4)
+    // A user page's own room, as its host sends it (engine/SPEC.md 7): its scene's root, to read (a camera following
+    // something in it), never to change (its host owns it; the next delta puts it back). Null until it has arrived.
+    get room() { const s = this.v._homeScene(); return s ? s.root : null; }
 
     // Every plot you watch (with its scene), placed.
     _layout() {
@@ -3452,7 +3597,15 @@
       const v = this.v, mine = v._plot(), unit = v._unit(), taken = [], out = [], wait = [];
       taken.push([mine.center[0] - mine.size[0] / 2, mine.center[1] - mine.size[1] / 2, mine.center[0] + mine.size[0] / 2, mine.center[1] + mine.size[1] / 2]);
       const xs = [];
-      for (const w of v._watches.values()) if (w.scene && w.host.key) xs.push({ key: w.host.key, name: w.host.name || "", w, plot: w.scene.plot, k: w.scene.unit / unit });
+      for (const w of v._watches.values()) {
+        if (!(w.scene && w.host.key)) continue;
+        if (w.home) {   // the person's own room (engine/SPEC.md 4): its own plot, where its scene has it, as it is
+          const x = { key: w.host.key, name: w.host.name || "", w, plot: w.scene.plot, k: 1, home: true, at: { x: w.scene.plot.center[0], z: w.scene.plot.center[1], turn: 0 } };
+          x.rect = this._rect(x); out.push(x);
+          continue;
+        }
+        xs.push({ key: w.host.key, name: w.host.name || "", w, plot: w.scene.plot, k: w.scene.unit / unit });
+      }
       for (const k of v._kept.values()) {   // a guest's plot while they are away (8.10): its last landscape, where it was
         if (xs.some(x => x.key === k.key) || !isObj(k.plot) || !v.isGuest(k.key)) continue;
         if (!k.json) { if (!k.asked) { k.asked = true; v._send({ type: "plot_load", key: k.key }); } continue; }
@@ -3477,7 +3630,7 @@
         taken.push(x.rect); out.push(x);
       }
       this.list = out; this.listAt = now;
-      this.plots = out.map(x => ({ key: x.key, name: x.name, at: x.at, rect: x.rect, inside: !!(x.w && x.w.inside), offline: !!x.kept }));
+      this.plots = out.map(x => ({ key: x.key, name: x.name, at: x.at, rect: x.rect, inside: !!(x.w && x.w.inside), offline: !!x.kept, home: !!x.home }));
       const psig = this.plots.map(p => p.key + (p.offline ? "~" : "")).join();
       if (psig !== this.plotSig) { this.plotSig = psig; queueMicrotask(() => v._changed()); }   // a plot came, went, or is kept while its office is away
       this._tell(out, mine, unit);
@@ -3490,6 +3643,7 @@
     _tell(out, mine, unit) {
       const v = this.v, r = x => Math.round(x * 100) / 100, size = v._plotMetres().map(r), now = new Set();
       for (const x of out) {
+        if (x.home) continue;   // (not a friend's)
         const at = { dx: r((x.at.x - mine.center[0]) * unit), dz: r((x.at.z - mine.center[1]) * unit), turn: x.at.turn, size }, sig = JSON.stringify(at);
         now.add(x.key);
         if (this.told.get(x.key) !== sig) { this.told.set(x.key, sig); v._send({ type: "seen", key: x.key, at }); }
@@ -3609,6 +3763,7 @@
       if (this.bounce) { const b = this.bounce; this.bounce = null; this.home = b; return Object.assign({}, b, { yaw: me.yaw, pitch: me.pitch, in: null }); }
       const list = this._layout();
       v._home = null;   // said below, where they end up
+      const user = v.role === "user", onto = (px, pz) => list.find(y => y.w && y.w.scene && !y.w.home && !y.w.inside && (this.refused.get(y.w.channel) || 0) <= now && within(y.rect, px, pz));
       let x = this.in != null ? list.find(y => y.w && y.w.channel === this.in) : null;
       if (x && !(x.w.inside && x.w.scene)) x = null;
       if (!x) {
@@ -3616,7 +3771,11 @@
         // came with, not one its host had us at, which a page that keeps the y it is given would otherwise keep.
         if (this.yHome != null) { me.y = this.yHome; this.yHome = null; }
         this.in = null;
-        x = list.find(y => y.w && y.w.scene && !y.w.inside && (this.refused.get(y.w.channel) || 0) <= now && within(y.rect, me.x, me.z));
+        x = onto(me.x, me.z);
+        if (!x && user) {   // a user page (engine/SPEC.md 4): home is a plot too, its host walks them; into it where they are
+          x = list.find(y => y.w && y.w.home && y.w.scene);
+          if (!x) { this.home = me; return Object.assign({}, me, { in: null }); }   // their room not here yet: nowhere to be
+        }
         if (!x) { me = this._walls(list, me); this.home = me; v._home = { x: me.x, y: me.y, z: me.z, yaw: me.yaw }; this._homeRide(me, dt); return Object.assign({}, me, { in: null }); }
         this._enter(x, me, now);
       }
@@ -3630,6 +3789,18 @@
       this._input(w, inp, yaw, me.pitch, now);
       const hp = s.hostPose, pl = s.plot, margin = 0.3 / x.k;
       if (!hp && now - s.inAt > ENTER_WAIT) { this._refused(w, "no answer"); return this._frame(0, me, {}); }   // its host never had us: back out
+      if (w.home) {   // at home, walked by its room: onto a friend's plot where the room has them on one; never off home by its edge
+        const at = new T.Vector3(s.pose.x + s.vis.x, 0, s.pose.z + s.vis.z).applyMatrix4(h.place.matrix), y = hp ? this._feet(x, s, h) : me.y;
+        const other = hp ? onto(at.x, at.z) : null;
+        if (other) {
+          const me2 = { x: at.x, y, z: at.z, yaw: me.yaw, pitch: me.pitch, air: me.air };
+          this._enter(other, me2, now);
+          return Object.assign({}, me2, { in: { key: other.key, name: other.name } });
+        }
+        this.home = { x: at.x, y, z: at.z, yaw: me.yaw, pitch: me.pitch };
+        v._home = { x: at.x, y, z: at.z, yaw: me.yaw };
+        return { x: at.x, y, z: at.z, yaw: me.yaw, pitch: me.pitch, in: null };
+      }
       if (hp && (Math.abs(hp.x - pl.center[0]) > pl.size[0] / 2 + margin || Math.abs(hp.z - pl.center[1]) > pl.size[1] / 2 + margin)) {
         this._exit(w);   // its host has us off its plot: home again, walking on from there
         const out = new T.Vector3(hp.x, 0, hp.z).applyMatrix4(h.place.matrix);
@@ -3656,6 +3827,7 @@
 
     _enter(x, me, now) {
       const w = x.w, s = w.scene, h = this._holder(x), p = new this.T.Vector3(me.x, 0, me.z).applyMatrix4(h.inverse), yaw = me.yaw - x.at.turn * Math.PI / 2;
+      if (this.in != null && this.in !== w.channel) { const was = this.v._watches.get(this.in); if (was) { was.inside = false; if (was.scene) was.scene.hostPose = null; } }   // out of the one before (its host told by visit-client)
       this.v._send({ type: "enter", channel: w.channel, pose: { x: p.x, y: me.y / x.k, z: p.z, yaw, air: me.air / x.k } });
       w.inside = true; this.in = w.channel;
       Object.assign(s, { pose: { x: p.x, y: 0, z: p.z }, yaw0: 0, hist: [], vis: { x: 0, y: 0, z: 0 }, hostPose: null, inAt: now });
@@ -3688,10 +3860,21 @@
     }
 
     // While in a plot: point where you look (SPEC 8.3). Home: out of the plot you are in.
-    point() {
+    // A click, as a visitor's point (SPEC 8.3): where this page looks, or, given `target` (a point in this page's world,
+    // what its own ray from its camera met in the plot), the way to it from where the host has this page's eyes: a
+    // camera behind you looks along another line than your eyes do (a user page's, engine/SPEC.md 7).
+    point(target) {
       const x = this.in != null && this.list.find(y => y.w && y.w.channel === this.in);
       if (!x) return false;
-      this.v._send({ type: "point", yaw: this.look.yaw - x.at.turn * Math.PI / 2, pitch: this.look.pitch });
+      let yaw = this.look.yaw - x.at.turn * Math.PI / 2, pitch = this.look.pitch;
+      if (target && this.me) {
+        const T = this.T, h = this._holder(x), eyes = ((this.v._bodies.get(x.w.channel) || {}).eyes) || EYES;
+        const from = new T.Vector3(this.me.x, 0, this.me.z).applyMatrix4(h.inverse), to = new T.Vector3(Number(target.x) || 0, 0, Number(target.z) || 0).applyMatrix4(h.inverse);
+        from.y = this.me.y / x.k + eyes; to.y = (Number(target.y) || 0) / x.k;
+        to.sub(from);
+        if (to.lengthSq() > 1e-6) { yaw = Math.atan2(-to.x, -to.z); pitch = Math.max(-1.4, Math.min(1.4, Math.asin(to.y / to.length()))); }
+      }
+      this.v._send({ type: "point", yaw, pitch });
       return true;
     }
     leave() { const w = this.in != null && this.v._watches.get(this.in); if (w) this._exit(w); }
@@ -3717,15 +3900,16 @@
         // ground between plots; then the rooms farthest first, the nearest last, so that each one's see-through things
         // (a name over a head, a window) land on what is behind them, not under a farther room drawn after it.
         const mask = camera.layers.mask, su = r.shadowMap.autoUpdate;
+        const hx = !this.scene && list.find(x => x.home), sky = this.scene || (hx ? hx.w.scene.root : this.commons);   // a user page: its room's sky
         r.clippingPlanes = []; r.shadowMap.autoUpdate = false; camera.layers.set(31);
-        try { r.render(this.scene, camera); } finally { camera.layers.mask = mask; r.shadowMap.autoUpdate = su; }
+        try { r.render(sky, camera); } finally { camera.layers.mask = mask; r.shadowMap.autoUpdate = su; }
         r.autoClear = false;
-        this.commons.fog = this.scene.fog || null;
+        this.commons.fog = sky.fog || null;
         r.render(this.commons, camera);
         const eye = camera.getWorldPosition(this._eye || (this._eye = new this.T.Vector3()));
         const far = q => Math.hypot(Math.max(q[0] - eye.x, 0, eye.x - q[2]), Math.max(q[1] - eye.z, 0, eye.z - q[3]));
         const home = [mine.center[0] - mine.size[0] / 2, mine.center[1] - mine.size[1] / 2, mine.center[0] + mine.size[0] / 2, mine.center[1] + mine.size[1] / 2];
-        const passes = [{ x: null, d: far(home) }, ...list.filter(x => x.kept || (x.w && x.w.scene)).map(x => ({ x, d: far(x.rect) }))].sort((a, b) => b.d - a.d);
+        const passes = [...(this.scene ? [{ x: null, d: far(home) }] : []), ...list.filter(x => x.kept || (x.w && x.w.scene)).map(x => ({ x, d: far(x.rect) }))].sort((a, b) => b.d - a.d);
         for (const { x } of passes) {
           if (!x) {   // your own room (its sky already drawn)
             const bg = this.scene.background;
@@ -3737,7 +3921,8 @@
           if (x.kept) { const h = this._holder(x); r.clippingPlanes = h.planes; r.render(h.holder, camera); continue; }   // a guest away: its kept plot
           const h = this._holder(x), s = x.w.scene;
           if (s.offset !== null) v._sceneInterp(s, now - s.offset - INTERP_MS);
-          for (const o of s.own) o.visible = false;
+          const shown = x.w.home && this.self === "room";   // at home, the room's copy of you is you (self)
+          for (const o of s.own) o.visible = shown;
           r.clippingPlanes = h.planes;
           r.render(h.holder, camera);
           if (now - s.gcAt > 30000) { s.gcAt = now; v._sceneGc(s); }   // what its room no longer uses, freed
@@ -3752,11 +3937,13 @@
     _bubbles(camera, list) {
       const v = this.v, b = this.bubbles, u = v._unit(), hk = v._hooks, me = this.me, x = this.in != null && list.find(p => p.w && p.w.channel === this.in);
       const mine = () => me ? { x: me.x, y: (Number(me.y) || 0) + 2.4 / u, z: me.z } : null;
-      if (!this.homeBodies || this.homeBodies.root !== hk.scene.root) this.homeBodies = { root: hk.scene.root, bodiesAt: 0 };   // your scene's bodies, looked for once a second
+      const homeRoot = hk ? hk.scene.root : (v._homeScene() || {}).root;   // your scene's bodies (a user page's: its room's, from its host), looked for once a second
+      if (!homeRoot) return;
+      if (!this.homeBodies || this.homeBodies.root !== homeRoot) this.homeBodies = { root: homeRoot, bodiesAt: 0 };
       const over = (h, up, gap) => b.over(v._body(this.homeBodies, h.id), up, gap) || (h.pose ? { x: h.pose.x, y: (Number(h.pose.y) || 0) + (h.eyes || 0) + gap * 2, z: h.pose.z } : null);
       let items = v._chatsIn("home", c => {
         if (c.mine) return mine();
-        if (c.npc) return b.over(hk.scene.root.getObjectByName("visit:npc:" + c.npc), 2.4 / u, 0.6 / u);   // one of your room's figures
+        if (c.npc) return b.over(homeRoot.getObjectByName("visit:npc:" + c.npc), 2.4 / u, 0.6 / u);   // one of your room's figures
         const h = v._hosted.get(c.channel);
         return h ? over(h, 2.4 / u, 0.6 / u) : null;
       }), speakers = [];
@@ -3850,6 +4037,7 @@
   }
 
   function panel(element, v, { chat: withChat = true } = {}) {
+    v._as("user", "panel");
     if (!document.getElementById("visit-panel-css")) {
       const st = document.createElement("style"); st.id = "visit-panel-css"; st.textContent = PANEL_CSS; document.head.appendChild(st);
     }
@@ -3930,7 +4118,8 @@
       // Your mount (8.11), once your room gives one: which one M gets you on, and on or off.
       if (v.mounts.length) rows.push(`<div class="row"><span class="grow">${v.riding ? "riding" : "your mount"}</span><select data-v="mount" title="the one M gets you on" style="max-width: 9em">${v.mounts.map(m =>
         `<option value="${esc(m.id)}"${m.id === v.mount ? " selected" : ""}>${esc(m.name)}${m.fly ? " (flies)" : ""}</option>`).join("")}</select><button data-v="ride" class="${v.riding ? "go" : ""}" title="M: on your mount, or off">${v.riding ? "Get off" : "Ride"}</button></div>`);
-      if (v._world && v.state === "online") rows.push(`<div class="row"><span class="grow">your world: ${v._world.plots.length} ${v._world.plots.length === 1 ? "room" : "rooms"} round yours${(n => n ? ` (${n} offline)` : "")(v._world.plots.filter(p => p.offline).length)}</span><button data-v="map" title="where your friends' rooms sit round yours, from above">Map</button></div>`);
+      const roundYours = v._world ? v._world.plots.filter(p => !p.home) : [];   // (a user page's own room is a plot too)
+      if (v._world && v.state === "online") rows.push(`<div class="row"><span class="grow">your world: ${roundYours.length} ${roundYours.length === 1 ? "room" : "rooms"} round yours${(n => n ? ` (${n} offline)` : "")(roundYours.filter(p => p.offline).length)}</span><button data-v="map" title="where your friends' rooms sit round yours, from above">Map</button></div>`);
       // People: one row each, whoever is in the lobby and whoever you are linked with, either way, linked first. A
       // linked one says where you two stand (in your room, in theirs, linked); click it for the rest: where each sees
       // the other, Go there or Put in my world, how they look in your room, Kick, Unlink. One not linked: Link.
@@ -3946,7 +4135,7 @@
       for (const l of v.links) person(l.host, p => p.links.push(l));
       for (const x of v.visitors) person(x.visitor, p => { p.visit = x; });
       for (const x of v.watchers) if (!x.inside) person(x.visitor, p => p.watches.push(x));
-      for (const w of v._watches.values()) if (!w.link) person(w.host, p => { p.plot = w; });
+      for (const w of v._watches.values()) if (!w.link && !w.home) person(w.host, p => { p.plot = w; });   // (home is your own room)
       if (v.visiting && !v.visiting.link) person(v.visiting.host, p => { p.there = true; });
       const linked = p => !!(p.links.length || p.visit || p.watches.length || p.plot || p.there);
       const more = p => {   // a linked one, opened: where each sees the other (beyond its row's own word), what you can do
@@ -4090,7 +4279,9 @@
   // your room / To <name>'s room (a room's chat: everyone in it, and linked with it), Lobby (everyone in it). Pick it
   // there, or start the line with /s, /w <name> (/t, /tell), /r (back to whoever last whispered to you, else whom
   // you last whispered), /room (yours) or /room <name>, /1 (/l) and a space; it stays for the next line. Tab
-  // finishes a name (again: the next one), from those it could be, shown over the box. 🎧 by the box (or /voice)
+  // finishes a name, from those it could be, shown over the box; else it moves the box on to the next place (Shift:
+  // back), in the choices' order: only where a line can go now, and one Tell, to whoever you last whispered with
+  // (0.22.0); not while a command is in the box (that says where). 🎧 by the box (or /voice)
   // joins the voice of the room the box talks to (else your own room's), or leaves it: while you are in one, a line
   // over the box says whose and who is in it (🔊: speaking), and stays. The rest fades `fade` ms after the last line,
   // and comes back with the next one, or Enter.
@@ -4107,7 +4298,7 @@
 .visit-chat { position: fixed; left: var(--visit-chat-left, 16px); bottom: var(--visit-chat-bottom, 16px); z-index: 19; width: min(660px, calc(100vw - 32px)); font: 19.5px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif; color: #fff; transition: opacity .8s; }
 .visit-chat.idle { pointer-events: none; }
 .visit-chat > * { transition: opacity .8s; }
-.visit-chat.idle > :not(.voice) { opacity: 0; }
+.visit-chat.idle > :not(.voice):not(.mail) { opacity: 0; }
 .visit-chat .voice { margin-top: 4px; padding: 2px 8px; width: fit-content; max-width: 100%; font-size: 85%; color: #7ee787; background: rgba(0,0,0,.45); border-radius: 6px; pointer-events: auto; }
 .visit-chat .voice:empty { display: none; }
 .visit-chat .voice .muted { color: #c9d1d9; opacity: .8; }
@@ -4148,6 +4339,9 @@
 .visit-chat .line.sim, .visit-chat[data-scope=sim] form { color: #aaaaff; }
 .visit-chat .line.lobby, .visit-chat[data-scope=lobby] form { color: #ffc864; }
 .visit-chat .line.note { color: #ffff00; }
+.visit-chat .line[data-time]::before { content: attr(data-time); margin-right: .45em; font-size: 78%; opacity: .6; font-variant-numeric: tabular-nums; }
+.visit-chat .day { display: flex; align-items: center; gap: 8px; margin: 6px 0 3px; font-size: 72%; opacity: .7; }
+.visit-chat .day::before, .visit-chat .day::after { content: ""; flex: 1; border-top: 1px solid rgba(255,255,255,.35); }
 .visit-chat .names { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; padding: 0 8px; font-size: 85%; }
 .visit-chat .names:empty { display: none; }
 .visit-chat .names button { font: inherit; color: #c9d1d9; background: rgba(22,27,34,.92); border: 1px solid #30363d; border-radius: 4px; padding: 0 6px; cursor: pointer; }
@@ -4158,7 +4352,25 @@
 .visit-chat select { font: inherit; color: inherit; background: none; border: 0; padding: 0; max-width: 45%; cursor: pointer; }
 .visit-chat option { color: #e6edf3; background: #161b22; }
 .visit-chat input { flex: 1; min-width: 0; font: inherit; color: inherit; background: none; border: 0; outline: none; }
-.visit-chat button.sound { font: inherit; color: inherit; background: none; border: 0; padding: 0 2px; cursor: pointer; opacity: .8; }`;
+.visit-chat button.sound { font: inherit; color: inherit; background: none; border: 0; padding: 0 2px; cursor: pointer; opacity: .8; }
+.visit-chat button.mail { display: none; margin-top: 4px; padding: 1px 8px; font: inherit; font-size: 85%; color: #ffc864; background: rgba(0,0,0,.55); border: 1px solid #ffc864; border-radius: 6px; cursor: pointer; pointer-events: auto; }
+.visit-chat button.mail.on { display: inline-block; }
+.visit-chat .mailbox { display: none; max-height: 16em; overflow-y: auto; margin-bottom: 4px; padding: 6px 8px; font-size: 80%; background: rgba(13,17,23,.94); border: 1px solid #30363d; border-radius: 6px; }
+.visit-chat .mailbox.on { display: block; }
+.visit-chat .mailbox .tabs { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+.visit-chat .mailbox .tabs b { flex: 1; font-weight: 600; }
+.visit-chat .mailbox button { font: inherit; color: #c9d1d9; background: none; border: 1px solid #30363d; border-radius: 4px; padding: 0 6px; cursor: pointer; }
+.visit-chat .mailbox .line { cursor: pointer; border-radius: 3px; }
+.visit-chat .mailbox .line:hover { background: rgba(255,255,255,.08); }
+.visit-chat .mailbox .when { opacity: .6; font-size: 85%; }
+.visit-chat .mailbox .held { display: flex; gap: 6px; align-items: baseline; color: #ff80ff; }
+.visit-chat .mailbox .held span { flex: 1; }
+.visit-chat .line.held { opacity: .75; font-style: italic; }
+.visit-chat button.play { font: inherit; font-size: 90%; color: inherit; background: rgba(255,255,255,.08); border: 1px solid currentColor; border-radius: 12px; padding: 0 8px; margin: 2px 0 0 4px; text-indent: 0; cursor: pointer; }
+.visit-chat button.rec { font: inherit; color: inherit; background: none; border: 0; padding: 0 2px; cursor: pointer; opacity: .8; }
+.visit-chat button.rec.on { opacity: 1; color: #ff6b6b; }
+.visit-chat .chip .clip { display: block; padding: 4px 8px; border: 1px solid #6e7681; border-radius: 12px; }
+.visit-chat .chip.busy > .clip { opacity: .45; }`;
 
   // A picture full size, over everything, until a click or Esc.
   function lightbox(url) {
@@ -4189,32 +4401,34 @@
   }
 
   function chat(v, { element = document.body, fade = CHAT_FADE, sound = true } = {}) {
+    v._as("user", "chat");
     if (!document.getElementById("visit-chat-css")) {
       const st = document.createElement("style"); st.id = "visit-chat-css"; st.textContent = CHAT_CSS; document.head.appendChild(st);
     }
     const root = document.createElement("div");
     root.className = "visit-chat";
     root.dataset.scope = "say";
-    root.innerHTML = `<div class="shared"></div><div class="log" aria-live="polite"></div><div class="names"></div><div class="voice"></div><div class="attach"></div><form><select title="where your line goes"></select><input maxlength="${CHAT_LEN}" autocomplete="off" spellcheck="false"><button type="button" class="gallery" title="pictures and links shared here">🖼</button><button type="button" class="headset">🎧</button><button type="button" class="sound"></button></form>`;
+    root.innerHTML = `<div class="shared"></div><div class="mailbox"></div><div class="log" aria-live="polite"></div><div class="names"></div><div class="voice"></div><button type="button" class="mail"></button><div class="attach"></div><form><select title="where your line goes"></select><input maxlength="${CHAT_LEN}" autocomplete="off" spellcheck="false"><button type="button" class="rec" title="a voice message (click again: done; at most a minute)">🎙</button><button type="button" class="gallery" title="pictures, voice messages and links shared here">🖼</button><button type="button" class="headset">🎧</button><button type="button" class="sound"></button></form>`;
     element.appendChild(root);
     const shared = root.querySelector(".shared"), attach = root.querySelector(".attach"), gallery = root.querySelector("button.gallery");
-    const log = root.querySelector(".log"), names = root.querySelector(".names"), voice = root.querySelector(".voice"), headset = root.querySelector("button.headset"), form = root.querySelector("form"), pick = form.querySelector("select"), input = form.querySelector("input"), bell = form.querySelector("button.sound");
+    const mailbox = root.querySelector(".mailbox"), mail = root.querySelector("button.mail");
+    const log = root.querySelector(".log"), names = root.querySelector(".names"), voice = root.querySelector(".voice"), headset = root.querySelector("button.headset"), form = root.querySelector("form"), pick = form.querySelector("select"), input = form.querySelector("input"), bell = form.querySelector("button.sound"), recBtn = form.querySelector("button.rec");
     // A sound with each line that comes, unless this browser was told not to (the 🔔 by the box).
     let quiet = !sound;
     try { if (localStorage.getItem("visit:chat-quiet") === "1") quiet = true; } catch (e) { /* not kept */ }
     const bellSay = () => { bell.textContent = quiet ? "🔕" : "🔔"; bell.title = quiet ? "no sound with a line (click: a sound)" : "a sound with each line (click: none)"; };
     bellSay();
     bell.addEventListener("click", () => { quiet = !quiet; try { localStorage.setItem("visit:chat-quiet", quiet ? "1" : "0"); } catch (e) { /* not kept */ } bellSay(); input.focus(); });
-    let to = { scope: "say" }, choices = [], typing = false, last = null, told = null, fadeTimer = null, intro = null;
+    let to = { scope: "say" }, choices = [], typing = false, last = null, told = null, tell = null, fadeTimer = null, intro = null;
     try {   // where lines went before a reload (this tab)
       const t = JSON.parse(sessionStorage.getItem("visit:chat-to") || "null");
       if (isObj(t) && ["say", "whisper", "sim", "lobby"].includes(t.scope)) to = { scope: t.scope, ...["key", "id", "name"].reduce((o, k) => (typeof t[k] === "string" ? { ...o, [k]: t[k] } : o), {}) };
     } catch (e) { /* not kept */ }
     const yours = () => ({ scope: "sim", key: v.key || "", name: v.office ? v.office.name : "" });   // your room's chat
     const room = t => t.key === v.key ? "your room" : `${t.name || "a"}'s room`;
-    const label = t => t.scope === "lobby" ? "Lobby" : t.scope === "whisper" ? `Tell ${t.name}` : t.scope === "sim" ? `To ${room(t)}` : "Say";
-    const same = (a, b) => a.scope === b.scope && (a.key || a.id || null) === (b.key || b.id || null);
     const whom = t => v.whisperTargets.find(o => (t.key && o.key === t.key) || o.id === t.id);   // a whisper's person, now
+    const label = t => t.scope === "lobby" ? "Lobby" : t.scope === "whisper" ? `Tell ${t.name}${whom(t) ? "" : " (away)"}` : t.scope === "sim" ? `To ${room(t)}` : "Say";
+    const same = (a, b) => a.scope === b.scope && (a.key || a.id || null) === (b.key || b.id || null);
     // A line's text, in parts: a name ({ name, key }), in its own colour, among the rest.
     const parts = l => {
       const who = { name: `[${l.name || "someone"}]`, key: l.key || l.name };
@@ -4227,7 +4441,7 @@
     const wake = () => {
       root.classList.remove("idle");
       clearTimeout(fadeTimer);
-      if (fade > 0) fadeTimer = setTimeout(function sleep() { if (typing || root.matches(":hover") || shared.classList.contains("on")) fadeTimer = setTimeout(sleep, 1000); else root.classList.add("idle"); }, fade);
+      if (fade > 0) fadeTimer = setTimeout(function sleep() { if (typing || root.matches(":hover") || shared.classList.contains("on") || mailbox.classList.contains("on")) fadeTimer = setTimeout(sleep, 1000); else root.classList.add("idle"); }, fade);
     };
     // A picture by its id, shown once the visit-client has it (a click: full size); a link, as its sender's
     // preview has it (a click: the link, in a new tab).
@@ -4254,24 +4468,78 @@
       a.appendChild(t);
       return a;
     };
-    const lineEl = l => {   // a line: its text, then its pictures and its links' previews
+    // A voice message: ▶ and how long it is; a click plays it (again: stops it).
+    const clock = secs => { const n = Math.round(secs || 0); return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, "0")}`; };
+    const voiceEl = p => {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "play"; b.title = "a voice message";
+      const idle = () => { b.textContent = p.secs ? `▶ ${clock(p.secs)}` : "▶"; };
+      idle();
+      let audio = null;
+      b.addEventListener("click", async e => {
+        e.preventDefault(); e.stopPropagation();
+        if (audio && !audio.paused) { audio.pause(); audio.currentTime = 0; return idle(); }
+        if (!audio) {
+          const url = await v.media(p.id);
+          if (!url) { b.textContent = "(a voice message that cannot be had)"; b.disabled = true; return; }
+          audio = new Audio(url);
+          audio.addEventListener("ended", idle);
+          audio.addEventListener("timeupdate", () => { if (!audio.paused) b.textContent = `■ ${clock(audio.currentTime)}${p.secs ? " / " + clock(p.secs) : ""}`; });
+        }
+        audio.play().catch(() => idle());
+        b.textContent = "■";
+      });
+      return b;
+    };
+    // When a line came, as WoW's chat timestamps have it: its time (this browser's clock and way of writing one), dim,
+    // before it; and over a day's first line, its day, when the log holds more than today.
+    const hhmm = at => new Date(at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const dayOf = at => new Date(at).toDateString();
+    const dayName = at => { const d = new Date(at); return d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric", ...(d.getFullYear() !== new Date().getFullYear() ? { year: "numeric" } : {}) }); };
+    const days = () => {   // the log's days: one over each line whose day is not the one before it's (today, for the first)
+      let prev = dayOf(Date.now());
+      for (const d of log.querySelectorAll(".line[data-at]")) {
+        const at = Number(d.dataset.at), k = dayOf(at), was = d.previousElementSibling, has = was && was.classList.contains("day") ? was : null;
+        if (k === prev) { if (has) has.remove(); continue; }
+        prev = k;
+        if (has) { if (has.textContent !== dayName(at)) has.textContent = dayName(at); continue; }
+        const x = document.createElement("div");
+        x.className = "day"; x.textContent = dayName(at);
+        d.before(x);
+      }
+    };
+    const lineEl = l => {   // a line: its text, then its pictures (or voice message) and its links' previews
       const d = document.createElement("div");
-      d.className = "line " + l.scope + (l.mention ? " mention" : "");
+      d.className = "line " + l.scope + (l.mention ? " mention" : "") + (l.held ? " held" : "");
+      if (l.held) d.title = "kept by your visit-client: it goes once they and you are both in the lobby";
       for (const p of parts(l)) {
         if (typeof p === "string") { d.appendChild(document.createTextNode(p)); continue; }
         const n = document.createElement("span");
         n.className = "who"; n.textContent = p.name; n.style.color = nameColor(p.key || "");
         d.appendChild(n);
       }
-      if (l.at) d.dataset.at = String(l.at);
-      for (const p of l.media || []) d.appendChild(picture(p.id, "pic"));
+      if (l.at) { d.dataset.at = String(l.at); d.dataset.time = hhmm(l.at); }
+      for (const p of l.media || []) d.appendChild(isVoice(p) ? voiceEl(p) : picture(p.id, "pic"));
       for (const c of l.links || []) d.appendChild(card(c));
       return d;
     };
-    const add = l => {   // a line at the end; one from before this page (`old`), before the window's first note
+    // A line from before this page, among the others from before it (above the window's first note), where its time
+    // puts it: one can come after newer ones (a line kept for you, one from another day), and the days over the log
+    // follow the lines' order. Over the day of the line it goes before, if that one has its day over it.
+    const placeOld = d => {
+      const at = Number(d.dataset.at), stop = intro && intro.parentNode === log ? intro : null;
+      if (Number.isFinite(at)) for (let x = log.firstElementChild; x && x !== stop; x = x.nextElementSibling) {
+        if (!x.classList.contains("line") || !(Number(x.dataset.at) > at)) continue;
+        const m = x.previousElementSibling;
+        return log.insertBefore(d, m && m.classList.contains("day") ? m : x);
+      }
+      return stop ? log.insertBefore(d, stop) : log.appendChild(d);
+    };
+    const add = l => {   // a line at the end; one from before this page (`old`), where its time puts it among those (placeOld)
       const end = log.scrollTop + log.clientHeight >= log.scrollHeight - 4, d = lineEl(l);
-      if (l.old && intro && intro.parentNode === log) log.insertBefore(d, intro); else log.appendChild(d);
+      if (l.old) placeOld(d); else log.appendChild(d);
       while (log.childElementCount > CHAT_LOG * 4) { log.firstChild.remove(); older = true; }
+      days();
       if (end) log.scrollTop = log.scrollHeight;
       wake();
       return d;
@@ -4287,6 +4555,7 @@
         older = r.more;
         const top = log.firstChild;
         for (const l of r.lines) log.insertBefore(lineEl(l), top);
+        days();
         log.scrollTop += log.scrollHeight - h;
       }, () => { older = false; }).finally(() => { loadingOlder = false; });
     });
@@ -4299,15 +4568,29 @@
       pick.innerHTML = choices.map((c, i) => `<option value="${i}">${esc(label(c))}:</option>`).join("");
       pick.value = String(choices.findIndex(c => same(c, to)));
       root.dataset.scope = to.scope;
+      if (to.scope === "whisper") tell = to;
       headsetSay();
       try { sessionStorage.setItem("visit:chat-to", JSON.stringify(to)); } catch (e) { /* not kept */ }
+    };
+    // Tab: the box on to the next place a line can go now (back: the one before), in the choices' order, with one Tell:
+    // whoever you last whispered with (the box's, else either way), else none. From a place gone: on from its kind's.
+    const KINDS = ["say", "whisper", "sim", "lobby"];
+    const step = back => {
+      const p = [to.scope === "whisper" && to, tell, last, told].map(t => t && whom(t)).find(Boolean), linked = v.chatTargets;
+      const stops = [{ scope: "say" }, ...(p && v.lobbyChat ? [{ scope: "whisper", id: p.id, key: p.key, name: p.name }] : []),
+        ...(linked.length ? [yours()] : []), ...linked.map(o => ({ scope: "sim", key: o.key, name: o.name })), ...(v.lobbyChat ? [{ scope: "lobby" }] : [])];
+      const n = stops.length, i = stops.findIndex(c => same(c, to)), k = KINDS.indexOf(to.scope);
+      let j = i >= 0 ? (i + (back ? n - 1 : 1)) % n : -1;
+      if (i < 0) for (let x = 0; x < n; x++) if (back ? KINDS.indexOf(stops[x].scope) < k : KINDS.indexOf(stops[x].scope) > k) { j = x; if (!back) break; }
+      to = stops[j >= 0 ? j : back ? n - 1 : 0];
+      fill();
     };
     const open = (start = "") => {
       if (document.pointerLockElement) document.exitPointerLock();
       typing = true; root.classList.add("typing"); fill(); wake();
       input.value = start; input.focus();
     };
-    const close = () => { typing = false; root.classList.remove("typing"); input.value = ""; picker = null; picked = null; drawPicker(); pending = []; linkCard = null; linkSkip.clear(); drawAttach(); if (root.contains(document.activeElement)) document.activeElement.blur(); wake(); };
+    const close = () => { recStop(false); typing = false; root.classList.remove("typing"); input.value = ""; picker = null; picked = null; drawPicker(); pending = []; linkCard = null; linkSkip.clear(); drawAttach(); if (root.contains(document.activeElement)) document.activeElement.blur(); wake(); };
     // The one of `list` whose name starts `rest`, then a space (the longest), or, on Enter (`done`), is all of it or
     // the one name it starts.
     const named = (list, rest, done) => {
@@ -4322,7 +4605,7 @@
       const m = /^\/(w|t|whisper|tell|room|sim)\s([\s\S]*)$/i.exec(input.value);
       if (!m) return null;
       const stem = m[2].toLowerCase(), rooms = /^(room|sim)$/i.test(m[1]);
-      return { cmd: m[1], stem, names: (rooms ? v.chatTargets : v.whisperTargets).map(o => o.name).filter(n => n && n.toLowerCase().startsWith(stem)) };
+      return { cmd: m[1], stem, names: (rooms ? v.chatTargets : [...v.whisperTargets, ...v.awayTargets]).map(o => o.name).filter(n => n && n.toLowerCase().startsWith(stem)) };
     };
     // Whom a line may mention (@): those linked with you, your visitors, those in the lobby; by the names they go by.
     const people = () => {
@@ -4379,9 +4662,9 @@
     const drawAttach = () => {
       attach.textContent = "";
       for (const p of pending) {
-        const img = document.createElement("img");
-        img.src = p.url;
-        const c = chip(img, () => { pending = pending.filter(q => q !== p); });
+        const el = document.createElement(p.voice ? "span" : "img");
+        if (p.voice) { el.className = "clip"; el.textContent = `🎙 ${clock(p.secs)}`; } else el.src = p.url;
+        const c = chip(el, () => { pending = pending.filter(q => q !== p); });
         if (!p.media) c.classList.add("busy");
         attach.appendChild(c);
       }
@@ -4428,7 +4711,7 @@
     const sharedDraw = async more => {
       const c = conversation(), title = c === "lobby" ? "the lobby" : c.startsWith("person:") ? `you and ${to.name || "them"}`
         : c === "room:" + v.key ? "your room" : `${v._nameOf(c.slice(5)) || "their"}'s room`;
-      if (!more) shared.innerHTML = `<div class="tabs"><b>Shared in ${esc(title)}</b><button data-k="media" class="${sharedKind === "media" ? "on" : ""}">Pictures</button><button data-k="links" class="${sharedKind === "links" ? "on" : ""}">Links</button><button data-k="close" title="close">✕</button></div><div class="items"></div>`;
+      if (!more) shared.innerHTML = `<div class="tabs"><b>Shared in ${esc(title)}</b><button data-k="media" class="${sharedKind === "media" ? "on" : ""}">Pictures</button><button data-k="voice" class="${sharedKind === "voice" ? "on" : ""}">Voice</button><button data-k="links" class="${sharedKind === "links" ? "on" : ""}">Links</button><button data-k="close" title="close">✕</button></div><div class="items"></div>`;
       const items = shared.querySelector(".items");
       const moreButton = items.querySelector("button.more");
       if (moreButton) moreButton.remove();
@@ -4436,8 +4719,9 @@
         const r = await v.shared(c, sharedKind, { before: more ? Number(items.dataset.before) : undefined });
         let box = items.querySelector(".grid");
         if (sharedKind === "media" && !box && r.items.length) { box = document.createElement("div"); box.className = "grid"; items.appendChild(box); }
-        for (const i of r.items) (sharedKind === "media" ? box : items).appendChild(sharedKind === "media" ? picture(i.id, "") : card(linksFrom([i])[0] || { url: i.url }));
-        if (!r.items.length && !more) items.textContent = sharedKind === "media" ? "No pictures shared here yet" : "No links shared here yet";
+        const voiceRow = i => { const d = document.createElement("div"); d.textContent = `${i.mine ? "you" : i.name || "someone"}: `; d.appendChild(voiceEl({ id: i.id, secs: 0 })); return d; };
+        for (const i of r.items) (sharedKind === "media" ? box : items).appendChild(sharedKind === "media" ? picture(i.id, "") : sharedKind === "voice" ? voiceRow(i) : card(linksFrom([i])[0] || { url: i.url }));
+        if (!r.items.length && !more) items.textContent = sharedKind === "media" ? "No pictures shared here yet" : sharedKind === "voice" ? "No voice messages here yet" : "No links shared here yet";
         if (r.items.length) items.dataset.before = String(r.items[r.items.length - 1].at);
         if (r.more) { const b = document.createElement("button"); b.className = "more"; b.textContent = "More"; b.dataset.k = "more"; items.appendChild(b); }
       } catch (e) { items.textContent = `Not available: ${e.message || e}`; }
@@ -4485,7 +4769,7 @@
       else if (cmd === "1" || cmd === "l" || cmd === "lobby") next = v.lobbyChat ? { scope: "lobby" } : (done && note("No lobby chat: this lobby does not carry it, or you are not in it"), null);
       else if (cmd === "r" || cmd === "reply") next = last || told || (done && note("Nobody has whispered to you yet"), null);
       else if (["w", "t", "whisper", "tell", "room", "sim"].includes(cmd)) {
-        const rooms = cmd === "room" || cmd === "sim", o = named(rooms ? v.chatTargets : v.whisperTargets, rest, done);
+        const rooms = cmd === "room" || cmd === "sim", o = named(rooms ? v.chatTargets : v.whisperTargets, rest, done) || (!rooms && named(v.awayTargets, rest, done));
         if (o) { next = rooms ? { scope: "sim", key: o.key, name: o.name } : { scope: "whisper", id: o.id, key: o.key, name: o.name }; rest = rest.slice(o.name.length + 1); }
         else if (!done) return false;   // a name still being typed
         else if (rooms && !rest.trim()) next = yours();
@@ -4500,19 +4784,28 @@
     input.addEventListener("keyup", e => { if (/^(ArrowLeft|ArrowRight|Home|End)$/.test(e.key)) hint(); });
     input.addEventListener("keydown", e => {
       e.stopPropagation();   // the page's own keys (walking) are not for this box
-      if (e.key === "Escape") { e.preventDefault(); if (picker) { picked = input.value; picker = null; drawPicker(); } else close(); }
+      if (e.key === "Escape" && recording) { e.preventDefault(); recStop(false); }
+      else if (e.key === "Escape") { e.preventDefault(); if (picker) { picked = input.value; picker = null; drawPicker(); } else close(); }
       else if (picker && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
         e.preventDefault();
         picker.at = (picker.at + (e.key === "ArrowDown" ? 1 : picker.items.length - 1)) % picker.items.length;
         drawPicker();
       } else if (picker && (e.key === "Tab" || e.key === "Enter") && !e.shiftKey) { e.preventDefault(); take(picker.at); }
+      else if (e.key === "Tab" && !e.ctrlKey && !e.altKey && !e.metaKey && !e.isComposing) { e.preventDefault(); if (!input.value.startsWith("/")) step(e.shiftKey); }
     });
     pick.addEventListener("change", () => { to = choices[Number(pick.value)] || { scope: "say" }; fill(); input.focus(); });
     // A line said where the box talks to: false (and why, said) if it could not be.
     const send = (t, media, links) => {
-      const p = to.scope === "whisper" && whom(to);
-      if (v.say(t, to.scope === "say" ? undefined : to.scope === "lobby" ? "lobby" : to.scope === "whisper" ? { whisper: p ? p.id : "" } : to.key === v.key ? "room" : { key: to.key }, { media, links })) return true;
-      if ((media.length || links.length) && (to.scope === "lobby" || (to.scope === "whisper" && p && !v.chatTargets.some(o => o.key === p.key)))) note("Pictures and links go to rooms, and to those you are linked with: not through the lobby");
+      const p = to.scope === "whisper" && whom(to), away = to.scope === "whisper" && !p && /^[0-9a-f]{64}$/.test(to.key || "");   // (away: kept for them)
+      if (v.say(t, to.scope === "say" ? undefined : to.scope === "lobby" ? "lobby" : to.scope === "whisper" ? (away ? { whisper: to.key, name: to.name } : { whisper: p ? p.id : "" })
+        : to.key === v.key ? "room" : { key: to.key }, { media, links })) {
+        if (away) note(`${to.name || "They"}: not in the lobby now. Your visit-client keeps it, and passes it on once you are both in it`);
+        if (v.unseen.conversations.some(c => c.conversation === conversation())) v.read(conversation());   // answered: what came there, read
+        return true;
+      }
+      if (away) note(media.length || links.length ? `${to.name} is away: a whisper kept for them is text only (pictures and voice messages go to those you are linked with)`
+        : `Too fast: at most ${CHATS} lines every ${CHAT_WINDOW / 1000} s`);
+      else if ((media.length || links.length) && (to.scope === "lobby" || (to.scope === "whisper" && p && !v.chatTargets.some(o => o.key === p.key)))) note("Pictures, voice messages and links go to rooms, and to those you are linked with: not through the lobby");
       else if (to.scope === "whisper" && !p) { note(`${to.name} is not in the lobby now`); to = { scope: "say" }; fill(); }
       else if (to.scope === "sim" && to.key !== v.key && !v.chatTargets.some(o => o.key === to.key)) { note(`${to.name}'s room: you are not linked with them now`); to = { scope: "say" }; fill(); }
       else if ((to.scope === "lobby" || to.scope === "whisper") && !v.lobbyChat) { note("No lobby chat: this lobby does not carry it, or you are not in it"); to = { scope: "say" }; fill(); }
@@ -4521,6 +4814,7 @@
     };
     form.addEventListener("submit", e => {
       e.preventDefault();
+      if (recording) { recording.send = true; return recStop(true); }   // the voice message first: then the line, with it
       const cmd = input.value.startsWith("/");
       if (cmd && !command(true)) return;   // not a line (said why)
       const t = input.value.trim(), pics = pending.slice(), links = linkCard && !linkCard.loading && t.includes(linkCard.url) ? [linkCard] : [];
@@ -4530,6 +4824,107 @@
       Promise.all(pics.map(p => p.ready)).then(ms => { const media = ms.filter(Boolean); if (media.length || t) send(t, media, links); });
     });
     root.addEventListener("focusout", () => setTimeout(() => { if (typing && !root.contains(document.activeElement)) { typing = false; root.classList.remove("typing"); wake(); } }, 0));
+    // The mailbox (8.9): 📬 and how many lines meant for you came while nobody looked (whispered, said in your room's
+    // chat, mentioning you), shown even when the window has faded; ⏳, whispers you left for someone away, still kept.
+    // A click: those lines (they are read then; a click on one: the box talks there) and those whispers (✕: taken
+    // back).
+    let mailLines = [], mailMore = 0;
+    const when = at => dayOf(at) === dayOf(Date.now()) ? hhmm(at) : new Date(at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    const replyTo = l => l.scope === "whisper" ? { scope: "whisper", id: l.id, key: l.key, name: l.name }
+      : l.scope === "sim" ? (l.to && l.to.key && l.to.key !== v.key ? { scope: "sim", key: l.to.key, name: l.to.name } : yours()) : l.scope === "lobby" ? { scope: "lobby" } : { scope: "say" };
+    const mailDraw = () => {
+      mailbox.innerHTML = `<div class="tabs"><b>📬 For you</b><button type="button" data-m="close" title="close">✕</button></div>`;
+      if (!mailLines.length && !v.held.length) mailbox.insertAdjacentHTML("beforeend", `<div class="when">Nothing new</div>`);
+      mailLines.forEach((l, i) => {
+        const d = lineEl(l);
+        d.dataset.i = String(i); d.title = "click: answer there";
+        if (l.at) d.dataset.time = when(l.at);   // (its day too, when not today)
+        mailbox.appendChild(d);
+      });
+      if (mailMore > 0) mailbox.insertAdjacentHTML("beforeend", `<div class="when">and ${mailMore} more, older: up the chat</div>`);
+      if (v.held.length) mailbox.insertAdjacentHTML("beforeend", `<div class="tabs" style="margin-top:6px"><b>⏳ Kept for someone away: it goes once you are both in the lobby</b></div>`
+        + v.held.map(h => `<div class="held"><span>To [${esc(h.name || "them")}]: ${esc(h.text)}</span><button type="button" data-h="${esc(h.id)}" title="take it back">✕</button></div>`).join(""));
+    };
+    const mailSay = () => {
+      const n = v.unseen.count, h = v.held.length;
+      mail.classList.toggle("on", n > 0 || h > 0);
+      mail.textContent = [n ? `📬 ${n}` : "", h ? `⏳ ${h}` : ""].filter(Boolean).join(" · ");
+      mail.title = [n ? `${n} line${n === 1 ? "" : "s"} for you, not read yet` : "", h ? `${h} whisper${h === 1 ? "" : "s"} kept for someone away` : ""].filter(Boolean).join("; ") + " (click: see)";
+      if (mailbox.classList.contains("on")) mailDraw();
+    };
+    mail.addEventListener("click", () => {
+      if (mailbox.classList.toggle("on")) {
+        mailLines = v.unseen.lines.slice(); mailMore = Math.max(0, v.unseen.count - mailLines.length);
+        shared.classList.remove("on");
+        mailDraw();
+        if (v.unseen.count) v.read();
+      }
+      wake();
+    });
+    mailbox.addEventListener("click", e => {
+      const b = e.target.closest("button[data-m], button[data-h]");
+      if (b) { if (b.dataset.h) v.unhold(b.dataset.h); else mailbox.classList.remove("on"); return; }
+      const d = e.target.closest(".line[data-i]");
+      if (!d || e.target.closest("button.play, img, a")) return;   // (its voice message, a picture, a link: as in the chat)
+      mailbox.classList.remove("on");
+      to = replyTo(mailLines[Number(d.dataset.i)]);
+      open();
+    });
+    const onHeldSent = h => note(`Passed on to ${h.name || "them"}, now in the lobby: ${h.text}`);
+    // Whether someone is looking at this chat: the page shown and focused, and a key, a click or the pointer within
+    // LOOKING. Your visit-client is told: a line meant for you that comes meanwhile is seen, else it is in the mailbox.
+    let stirred = Date.now();
+    const look = () => v.attention(document.visibilityState === "visible" && document.hasFocus() && Date.now() - stirred < LOOKING);
+    const stir = () => { const was = Date.now() - stirred >= LOOKING; stirred = Date.now(); if (was) look(); };
+    const lookTimer = setInterval(look, 10000);
+    addEventListener("focus", look); addEventListener("blur", look); document.addEventListener("visibilitychange", look);
+    for (const t of STIRS) addEventListener(t, stir, { capture: true, passive: true });
+    // A voice message (🎙): recorded here, at most VOICE_SECS (🎙 again, or Enter: done; Esc: none), then by the box as a
+    // picture is, and said with the line.
+    let recording = null;
+    const recSay = () => { recBtn.classList.toggle("on", !!recording); recBtn.textContent = recording ? `⏺ ${clock((Date.now() - recording.at) / 1000)}` : "🎙"; };
+    const recStop = keep => {
+      const r = recording;
+      if (!r) return;
+      recording = null; clearInterval(r.timer);
+      Object.assign(r, { keep, secs: Math.min(VOICE_SECS, (Date.now() - r.at) / 1000) });
+      if (r.rec.state !== "inactive") r.rec.stop(); else r.done();
+      recSay();
+    };
+    const addVoice = (blob, secs) => {
+      if (!typing) open();
+      pending = pending.filter(p => !p.voice);   // one a line
+      if (pending.length >= 4) return note("At most 4 pictures in a line");
+      const p = { voice: true, secs, url: null, media: null };
+      p.ready = v.share(blob).then(m => { p.media = { ...m, secs }; drawAttach(); return p.media; },
+        e => { pending = pending.filter(q => q !== p); drawAttach(); note(`That voice message cannot be shared: ${e.message || e}`); return null; });
+      pending.push(p);
+      drawAttach();
+    };
+    const recStart = async () => {
+      if (!window.MediaRecorder || !navigator.mediaDevices) return note("This browser cannot record a voice message");
+      const kind = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4"].find(k => MediaRecorder.isTypeSupported(k));
+      let stream;
+      try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); }
+      catch (e) { return note(`No microphone for a voice message: ${e.message || e}`); }
+      if (recording) { for (const t of stream.getTracks()) t.stop(); return; }
+      const rec = new MediaRecorder(stream, { ...(kind ? { mimeType: kind } : {}), audioBitsPerSecond: 32000 }), chunks = [];
+      const r = recording = { rec, at: Date.now(), keep: false, secs: 0, send: false, over: false };
+      r.timer = setInterval(() => { recSay(); if (Date.now() - r.at >= VOICE_SECS * 1000) recStop(true); }, 250);
+      r.done = () => {
+        if (r.over) return;
+        r.over = true;
+        for (const t of stream.getTracks()) t.stop();
+        if (!r.keep || !chunks.length) return;
+        addVoice(new Blob(chunks, { type: (rec.mimeType || kind || "audio/webm").split(";")[0] }), r.secs);
+        if (r.send) form.requestSubmit();
+      };
+      rec.addEventListener("dataavailable", e => { if (e.data && e.data.size) chunks.push(e.data); });
+      rec.addEventListener("stop", () => r.done());
+      rec.start(1000);
+      recSay();
+    };
+    recBtn.addEventListener("click", () => { if (recording) recStop(true); else recStart(); input.focus(); });
     const key = e => {   // Enter (or /), anywhere but a box of the page's own: type a line
       if (e.defaultPrevented || e.repeat || e.ctrlKey || e.metaKey || e.altKey || e.isComposing || typing) return;
       const t = e.target;
@@ -4542,10 +4937,10 @@
       if (!quiet && !l.mine && !l.old && l.scope !== "note") chatSound(l.mention ? "whisper" : l.scope);   // a mention chimes as a whisper does
       heard(l);
     };
-    const heard = l => {   // whom /r answers: who last whispered to you, else whom you last whispered
+    const heard = l => {   // whom /r answers: who last whispered to you, else whom you last whispered; Tab's Tell: either
       if (l.scope !== "whisper") return;
-      if (!l.mine && l.id) last = { scope: "whisper", id: l.id, key: l.key || null, name: l.name };
-      else if (l.mine && l.to && l.to.id) told = { scope: "whisper", id: l.to.id, key: l.to.key || null, name: l.to.name };
+      if (!l.mine && l.id) tell = last = { scope: "whisper", id: l.id, key: l.key || null, name: l.name };
+      else if (l.mine && l.to && l.to.id) tell = told = { scope: "whisper", id: l.to.id, key: l.to.key || null, name: l.to.name };
     };
     const onError = e => { if (e && ["say", "whisper", "chat", "voice_join"].includes(e.ref)) note(String(e.message || e.code)); };
     const onVoice = rv => {   // into a room voice (said once), or out of one (and why)
@@ -4558,15 +4953,21 @@
     const onBanned = b => note(b.voice || b.chat ? `${b.name}'s room keeps you out of its ${b.voice && b.chat ? "voice and chat" : b.voice ? "voice" : "chat"}` : `${b.name}'s room lets you back into its voice and chat`);
     addEventListener("keydown", key);
     v.on("chat", onChat); v.on("error", onError); v.on("room_voice", onVoice); v.on("banned", onBanned); v.on("change", voiceLine); v.on("voice", voiceLine);
+    v.on("unseen", mailSay); v.on("held", mailSay); v.on("held_sent", onHeldSent);
+    mailSay(); look();
     voiceIn = v.roomVoice && !v.roomVoice.joining ? v.roomVoice.key : null;
     voiceLine();
     for (const l of v.chatLog) { add(l); heard(l); }
-    intro = note("Enter to chat · @ mention · paste a picture · 🖼 shared · 🎧 voice · /s say · /w whisper · /r reply · /room yours, /room name · /1 lobby");
+    intro = note("Enter to chat · Tab where it goes · @ mention · paste a picture · 🎙 voice message · 🖼 shared · 🎧 voice · /s say · /w whisper · /r reply · /room yours, /room name · /1 lobby");
     return {
       element: root, open, close,
       release() {
         removeEventListener("keydown", key);
         v.off("chat", onChat); v.off("error", onError); v.off("room_voice", onVoice); v.off("banned", onBanned); v.off("change", voiceLine); v.off("voice", voiceLine);
+        v.off("unseen", mailSay); v.off("held", mailSay); v.off("held_sent", onHeldSent);
+        recStop(false); clearInterval(lookTimer); v.attention(false);
+        removeEventListener("focus", look); removeEventListener("blur", look); document.removeEventListener("visibilitychange", look);
+        for (const t of STIRS) removeEventListener(t, stir, { capture: true });
         clearTimeout(fadeTimer); root.remove();
       },
     };
@@ -4614,6 +5015,7 @@
   // sits. Pick a friend to see their view of the two of you (`v.seen`). What you place is kept by visit-client
   // (with VISIT_STATE_FILE, across reloads and restarts). { element, open(), close(), release() }
   function map(v, { parent = document.body } = {}) {
+    v._as("user", "map");
     if (!document.getElementById("visit-map-css")) {
       const st = document.createElement("style"); st.id = "visit-map-css"; st.textContent = MAP_CSS; document.head.appendChild(st);
     }
@@ -4639,7 +5041,7 @@
         if (l && Math.abs(l.x - p.x) < 1e-6 && Math.abs(l.z - p.z) < 1e-6 && (l.turn | 0) === p.turn) pending.delete(key);
       }
       const mp = v._plot(), mine = [mp.center[0] - mp.size[0] / 2, mp.center[1] - mp.size[1] / 2, mp.center[0] + mp.size[0] / 2, mp.center[1] + mp.size[1] / 2];
-      const list = w.list.map(x => {
+      const list = w.list.filter(x => !x.home).map(x => {   // (a user page's own room is in the world's list as a plot too: "my room" here)
         const at = drag && drag.key === x.key ? drag.at : pending.get(x.key) || x.at;
         return { key: x.key, name: x.name, at, rect: w._rect({ at, plot: x.plot, k: x.k }), plot: x.plot, k: x.k, offline: !!x.kept,
           placed: pending.has(x.key) || v.layout.some(p => p.key === x.key) };
@@ -4833,7 +5235,87 @@
   // offers "Go there" (the full window, in their room: "Back to my room" puts it in the corner again), "Put in my
   // world" (with v.world) and "Unlink". Gone when the visit or link ends. { element, big, shrink(), grow(),
   // release() }
+  // The person's own room, first person (engine/SPEC.md 7): a user page that draws no world of its own gets one here,
+  // read with the newest three.js this visit.js knows, its camera at the person's eyes, WASD, Shift and the mouse as in
+  // a visit, a click pointing (8.3). Behind the stage: a visit fills the window over it, and this comes back after.
+  function homeView(v, parent) {
+    const root = document.createElement("div");
+    root.className = "visit-home"; root.hidden = true;
+    root.style.cssText = "position:fixed;inset:0;z-index:4;background:#000";
+    const canvas = document.createElement("canvas");
+    canvas.style.cssText = "display:block;width:100%;height:100%;cursor:pointer;outline:none"; canvas.tabIndex = 0;
+    const cross = document.createElement("div");
+    cross.style.cssText = "position:absolute;left:50%;top:50%;width:8px;height:8px;margin:-6px 0 0 -6px;border:2px solid rgba(255,255,255,.9);border-radius:50%;box-shadow:0 0 0 1px rgba(0,0,0,.55);pointer-events:none;display:none";
+    const cap = document.createElement("div");
+    cap.style.cssText = "position:absolute;left:0;right:0;bottom:0;padding:6px 10px;font:13px/1.4 system-ui,sans-serif;color:#c9d1d9;background:rgba(13,17,23,.6);pointer-events:none";
+    root.append(canvas, cross, cap);
+    parent.appendChild(root);
+    const h = { world: null, T: null, renderer: null, camera: null, keys: new Set(), yaw: 0, pitch: 0, raf: 0, last: 0, me: { x: 0, y: 0, z: 0, air: 0 }, gone: false };
+    const KEYS = ["KeyW", "KeyA", "KeyS", "KeyD", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "ShiftLeft", "ShiftRight", ...UP_KEYS, ...DOWN_KEYS];
+    const ignore = e => e.ctrlKey || e.metaKey || e.altKey || (e.target && (e.target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)));
+    const active = () => !root.hidden && h.world && v._world === h.world, locked = () => document.pointerLockElement === canvas;
+    const down = e => { if (!active() || ignore(e) || !KEYS.includes(e.code)) return; e.preventDefault(); h.keys.add(e.code); };
+    const up = e => h.keys.delete(e.code), blur = () => h.keys.clear();
+    const click = () => { if (active() && canvas.requestPointerLock) canvas.requestPointerLock(); };
+    const press = e => { if (e.button === 0 && locked() && active()) { h.world.point(); cross.style.transform = "scale(1.6)"; setTimeout(() => { cross.style.transform = ""; }, 120); } };
+    const lock = () => { cross.style.display = locked() ? "block" : "none"; };
+    const look = e => { if (!locked()) return; h.yaw -= e.movementX * LOOK; h.pitch = Math.max(-1.4, Math.min(1.4, h.pitch - e.movementY * LOOK)); };
+    addEventListener("keydown", down); addEventListener("keyup", up); addEventListener("blur", blur);
+    canvas.addEventListener("click", click); canvas.addEventListener("mousedown", press);
+    document.addEventListener("mousemove", look); document.addEventListener("pointerlockchange", lock);
+    const revs = Object.keys(THREE_FILES);
+    loadThree(revs[revs.length - 1], v._threeBase).then(T => {
+      if (h.gone) return;
+      h.T = T;
+      h.renderer = new T.WebGLRenderer({ canvas, antialias: true });
+      h.renderer.shadowMap.enabled = true;
+      h.camera = new T.PerspectiveCamera(70, 1, 0.05, 500);
+      h.camera.rotation.order = "YXZ";
+      h.world = v.world({ three: T, renderer: h.renderer });
+      const loop = t => { h.raf = requestAnimationFrame(loop); if (!root.hidden) frame(t); };
+      h.raf = requestAnimationFrame(loop);
+    }).catch(e => { console.warn("visit: the home view could not load three.js", e); cap.textContent = `your room cannot be drawn here: ${e.message || e}`; });
+    const frame = t => {
+      const dt = h.last ? Math.min(0.1, (t - h.last) / 1000) : 0;
+      h.last = t;
+      if (v._world !== h.world) { root.hidden = true; return; }   // the page made a world of its own: it draws home
+      const w = canvas.clientWidth, hh = canvas.clientHeight;
+      if (canvas.width !== w || canvas.height !== hh) { h.renderer.setSize(w, hh, false); h.camera.aspect = w / Math.max(1, hh); h.camera.updateProjectionMatrix(); }
+      const k = c => h.keys.has(c), input = { forward: (k("KeyW") || k("ArrowUp") ? 1 : 0) - (k("KeyS") || k("ArrowDown") ? 1 : 0), strafe: (k("KeyD") || k("ArrowRight") ? 1 : 0) - (k("KeyA") || k("ArrowLeft") ? 1 : 0),
+        up: (UP_KEYS.some(k) ? 1 : 0) - (DOWN_KEYS.some(k) ? 1 : 0), run: k("ShiftLeft") || k("ShiftRight") };
+      const at = h.world.frame(dt, Object.assign({}, h.me, { yaw: h.yaw, pitch: h.pitch }), input);
+      h.me = { x: at.x, y: at.y, z: at.z, air: 0 };
+      const hs = v._homeScene(), unit = hs ? hs.unit || 1 : 1, b = v.home && v._bodies.get(v.home.channel), eye = b && b.eyes ? b.eyes : hs && hs.eye != null ? hs.eye : EYES / unit;
+      h.camera.position.set(at.x, at.y + eye, at.z); h.camera.rotation.set(h.pitch, h.yaw, 0);
+      h.world.render(h.camera);
+    };
+    const draw = () => {
+      const show = v.role === "user" && !v.visiting && (!v._world || v._world === h.world);
+      root.hidden = !show;
+      if (!show && locked()) document.exitPointerLock();
+      cap.textContent = !v.home ? "your room is not up" : v.home.paused ? "your room (reloading)…" : "your room · click to look around, WASD to walk, Shift to run, Esc frees the mouse";
+    };
+    v.on("change", draw);
+    draw();
+    return {
+      element: root,
+      release() {
+        h.gone = true; cancelAnimationFrame(h.raf);
+        removeEventListener("keydown", down); removeEventListener("keyup", up); removeEventListener("blur", blur);
+        canvas.removeEventListener("click", click); canvas.removeEventListener("mousedown", press);
+        document.removeEventListener("mousemove", look); document.removeEventListener("pointerlockchange", lock);
+        v.off("change", draw);
+        if (locked()) document.exitPointerLock();
+        if (h.world && v._world === h.world) h.world.release();
+        if (h.renderer) { try { h.renderer.dispose(); } catch (e) { /* gone */ } }
+        root.remove();
+      },
+    };
+  }
+
   function stage(v, { parent = document.body } = {}) {
+    v._as("user", "stage");
+    const home = v.role === "user" && !v._world ? homeView(v, parent) : null;   // the person's own room, first person, behind the stage
     if (!document.getElementById("visit-stage-css")) {
       const st = document.createElement("style"); st.id = "visit-stage-css"; st.textContent = STAGE_CSS; document.head.appendChild(st);
     }
@@ -4884,8 +5366,8 @@
     v.on("change", draw); v.on("stats", stats);
     draw();
     return {
-      element: root, get big() { return big; }, shrink: () => set(false), grow: () => set(true),
-      release() { v.off("change", draw); v.off("stats", stats); if (view) view.release(); root.remove(); },
+      element: root, home: home && home.element, get big() { return big; }, shrink: () => set(false), grow: () => set(true),
+      release() { v.off("change", draw); v.off("stats", stats); if (view) view.release(); if (home) home.release(); root.remove(); },
     };
   }
 
@@ -4893,8 +5375,10 @@
     version: VERSION,
     // `threeBase`: where to fetch three.js from instead of the CDN ("{r}" the revision; the same files, checked
     // against the same hashes).
-    connect({ port, token, sim = {}, threeBase = null }) {
-      const c = new Client(port, token, sim, { threeBase });
+    // `url`: where visit-client is, a URL or a path on this origin (a workroom's server's relay), in place of `port`;
+    // `role`: "host" (the room) or "user" (the person) (engine/SPEC.md 7); neither: as before.
+    connect({ port, token, url = null, role = null, sim = {}, threeBase = null }) {
+      const c = new Client(port, token, sim, { threeBase, url, role });
       return c._open().then(() => c, e => { c.close(); throw e; });
     },
     walk,

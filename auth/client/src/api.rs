@@ -1,5 +1,6 @@
-//! auth-client's API (../SPEC.md 3): HTTP and JSON on 127.0.0.1, for the workroom's server only (its service token
-//! on every call but /health); the browser never talks to it. Sessions and keys are checked from memory: a cache of
+//! auth-client's API (../SPEC.md 3): HTTP and JSON on 127.0.0.1 (or its container's network: --listen), for the
+//! workroom's server only (its service token on every call but /health); the browser never talks to it. Sessions
+//! and keys are checked from memory: a cache of
 //! the live ones, read from the database at the start, again whenever the terminal's commands change them (NOTIFY
 //! auth_changed), and every minute besides. A session's last use is written at most once a minute.
 use std::collections::HashMap;
@@ -37,6 +38,8 @@ const ATTEMPTS_KEPT: &str = "90 days";
 /// What a run is given.
 pub struct Config {
     pub database: String,
+    /// Where it answers: 127.0.0.1, or its container's own network (0.0.0.0 there).
+    pub listen: std::net::IpAddr,
     pub port: u16,
     /// The service token the workroom's server sends.
     pub token: String,
@@ -403,11 +406,11 @@ async fn listening(app: &Arc<App>, ticks: &mut u32) -> Result<()> {
     anyhow::bail!(ended)
 }
 
-/// A run: the API on 127.0.0.1 until it is stopped.
+/// A run: the API on its address (127.0.0.1, or its container's network) until it is stopped.
 pub async fn serve(cfg: Config, client: Client) -> Result<()> {
     let dummy = tokio::task::spawn_blocking(|| secret::hash_password(&secret::hex(&secret::random(16)))).await??;
     let db = Db { url: cfg.database.clone(), client: tokio::sync::Mutex::new(Some(Arc::new(client))) };
-    let port = cfg.port;
+    let at = std::net::SocketAddr::new(cfg.listen, cfg.port);
     let app = Arc::new(App { cfg, db, sessions: Mutex::default(), keys: Mutex::default(), dummy, hashing: Semaphore::new(HASHING) });
     app.reload().await?;
     app.sweep().await?;
@@ -420,8 +423,8 @@ pub async fn serve(cfg: Config, client: Client) -> Result<()> {
         .route("/v1/visit", post(visit))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .with_state(app);
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.with_context(|| format!("127.0.0.1:{port}"))?;
-    info!(version = VERSION, "listening on 127.0.0.1:{port}");
+    let listener = tokio::net::TcpListener::bind(at).await.with_context(|| at.to_string())?;
+    info!(version = VERSION, "listening on {at}");
     axum::serve(listener, router).with_graceful_shutdown(async { let _ = tokio::signal::ctrl_c().await; }).await?;
     Ok(())
 }
