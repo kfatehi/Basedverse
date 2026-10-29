@@ -9,6 +9,63 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## Unreleased — the engine (branch `engine`, [#17](https://github.com/sarmiena/Basedverse/issues/17); EXPERIMENTAL until proven)
+
+**Your room runs in the engine, a headless Chromium beside visit-client, and your browser is one more client of it**
+([engine/SPEC.md](engine/SPEC.md), [engine/INTEGRATING.md](engine/INTEGRATING.md)). The room's page (its scene, its
+agents, its physics, its interactions) runs in the engine's container always, signed in with a key of its own; the
+person's page, at the desk or on a laptop at a coffee shop, connects through your server's relay and draws what the
+room sends, as a visitor does. The owner is the room's visitor (`who.owner`): the room spawns, walks and draws them.
+No browser reaches `127.0.0.1` for anything any more: visit-client answers on the compose network only, and your
+server relays the person to it. **Breaking for every room that hosts.** The lobby protocol did not change: an
+office on 0.22 and one on this meet, visit and are visited as before, so nobody else moves when you do.
+
+In visit-client: page roles (`hello.role` host or user; a page without a role is both, as today), the relay preface,
+`--listen`, a second token (`--user-token-file`), the owner's visit as a pair of local visits. In visit.js:
+`Visit.connect({ url, role })`, `v.home`, `v.owner`, `visitors[i].owner`, `v.world({ three, renderer, self })` for a
+page with no scene of its own, `world.point(target)`, `world.atHome`, `world.room`, a host's `look(visitor)` hook, the
+stage's first-person home view. Fixed for everyone: an `EdgesGeometry` or `WireframeGeometry` travels as its lines
+(it arrived as a warning and a lost object); a user page's own room counted among the plots round it.
+
+**What an integration does about it**, in this order; the Sweatshop did it in a day and then spent a day at the
+desk on what the split breaks, and every one of those is written down so you need not:
+
+1. **Read [engine/INTEGRATING.md](engine/INTEGRATING.md) whole**, then its "Upgrading: a room that hosts today"
+   before touching anything. Tag your room as it is (`git tag before-engine`) so it can go back.
+2. **Containers.** visit-client on the compose network (`VISIT_LISTEN=0.0.0.0`, no port published, your server by
+   name in `VISIT_ORIGINS` with your proxy's addresses); two token files, the host's and the user's, written by your
+   launcher each start; the `engine` service built from `engine/`, its key made with `auth-client key add engine`
+   and given to it alone, `ENGINE_ROOM_URL=http://<your server>/room?role=host`. Never recreate the engine with a
+   bare `docker compose up -d engine`: it recreates visit-client without your launcher's environment.
+3. **Your server.** Serve `/visit/visit.js` from visit-client; relay `/visit/ws` to it with the preface and the user
+   token (one a session, 1 MiB buffered then 4408); say what runs at `/visit/mode`; serve the room's page to the
+   engine's key only; retire `/api/visit`. Add a settings route (the Sweatshop's `/api/room`) your pages post to and
+   your snapshot carries: the environment, the person's theme, the owner's look.
+4. **Split the page by role** (one file, `?role=host` for the engine, nothing for the person). The engine's page:
+   `window.visit = await Visit.connect({ ...window.VISIT_ENGINE, role: "host" })`, your scene and hooks, nothing of the
+   person's. The person's page: `Visit.connect({ url: "/visit/ws", role: "user" })`, no room of its own,
+   `v.world({ three, renderer, self: "room" })`, your HUD, a sign-out.
+5. **Move what the browser decided to your server.** Grep the page for `localStorage`, `matchMedia`,
+   `prefers-color-scheme`, `location.search`, `devicePixelRatio`, `innerWidth`: the engine's page has none of the
+   person's. The environment, dark mode (headless Chromium is light: white walls under a dark theme), the owner's
+   look: through the settings route, every page following the snapshot.
+6. **Marks by name, not `userData`** (it is stripped to `visitor`, `visitPoint`, `visitRider`): what is a floor, rock,
+   a roof to lift, anything your page reads of its own scene. A deformed primitive travels as its recipe: copy it
+   into a plain `BufferGeometry` first. Visibility you toggle for your own camera is done on the received scene.
+7. **The owner is a visitor.** Physics your page did to its owner (a jump) goes into `move`, for everyone. The room
+   draws its owner itself (`look: who => who.owner ? "mine" : undefined` in `visit.host`), with the look from your
+   server, since Visit's clips for an avatar are walk, idle and ride, not your seat or your drink; the person's page
+   shows that copy (`self: "room"`) and hides its own dude at home. Clicks: the person's page casts its own ray into
+   the received scene and calls `world.point(hit.point)`; the hand by `userData.visitPoint` there; your division of
+   clicks kept (`visitor.owner` is you; screen-only entries never from a point); the reach rule said on the page.
+8. **Prove it before you trust it.** The engine's `/health` says `hosting`; its log is your only screen
+   (`console.info` in the room's page lands there: log each point and each `tell` while proving; `ENGINE_DEBUG=1`
+   gives `/debug/eval` on the compose network, for the proving alone); the person's console; the ⏱ report before and
+   after. Reload the person's page after every deploy before judging anything. Then from another device.
+
+Each thing that went wrong at the Sweatshop's desk is a row in INTEGRATING.md's troubleshooting table, symptom to
+cause, and an item in its checklist.
+
 ## v0.22.0 — 2026-10-28
 
 **auth-client in a container of its own** ([auth/INTEGRATING.md](auth/INTEGRATING.md), step 4). auth-client
