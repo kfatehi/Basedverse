@@ -45,14 +45,15 @@ two hooks, and two pieces everyone drops in unchanged.
 
 | | |
 |---|---|
-| [visit/](visit/) | Visit: **visit-client** (the local client, Rust: all the networking) and **visit.js** (the library for the workroom's page), [the spec](visit/SPEC.md), [the integration guide](visit/INTEGRATING.md) and [bodies, things and positions](visit/MODELS.md), written for the coding agent doing it |
-| [auth/](auth/) | **auth-client**: a workroom's sign-in (Rust: the owner's account, made in a terminal; sessions; API keys for scripts and agents), [its spec](auth/SPEC.md), [its integration guide](auth/INTEGRATING.md), and [the sign-in page](auth/web/login.html) to start from |
-| [engine/](engine/) | **visit-engine**: your room's page in a headless Chromium beside visit-client, your browser one more client of it, from the desk or anywhere; the owner is the room's visitor. [engine/SPEC.md](engine/SPEC.md) is the contract, [engine/INTEGRATING.md](engine/INTEGRATING.md) the guide for your coding agent (1.0) |
+| [visit/](visit/) | Visit: **`visit`**, the one program a workroom runs (Rust: all the networking, with its database, the sign-in and the engine inside it), and **visit.js** (the library for the workroom's page), [the spec](visit/SPEC.md), [the integration guide](visit/INTEGRATING.md) and [bodies, things and positions](visit/MODELS.md), written for the coding agent doing it |
+| [auth/](auth/) | **the sign-in**, inside `visit`: a workroom's own (the owner's account, made in a terminal; sessions; API keys for scripts and agents), [its spec](auth/SPEC.md), [its integration guide](auth/INTEGRATING.md), and [the sign-in page](auth/web/login.html) to start from |
+| [engine/](engine/) | **the engine**, inside `visit`: your room's page in a headless Chrome, your browser one more client of it, from the desk or anywhere; the owner is the room's visitor. [engine/SPEC.md](engine/SPEC.md) is the contract, [engine/INTEGRATING.md](engine/INTEGRATING.md) the guide for your coding agent |
+| [deps/](deps/) | how the Postgres and the Chrome inside `visit` are built, tested on every platform and pinned ([deps/README.md](deps/README.md)) |
 | [lobby/](lobby/) | the lobby server everyone connects to (Python): presence, knocks, introductions. [Its protocol](lobby/PROTOCOL.md), its tests, and its deployment (Caddy for TLS, coturn) |
-| [bin/setup](bin/setup) | sets up Visit for a workroom: the lobby (or deploys your own), your office, visit-client and auth-client, their database's roles, the owner's account, your `.env` |
+| [bin/setup](bin/setup) | sets up Visit for a workroom: the lobby (or deploys your own), your office, `visit` for your machine, where it keeps the workroom's data, the owner's account, your `.env`; a 1.x workroom's database moved in |
 | [bin/deploy-lobby](bin/deploy-lobby) | puts the lobby on a server over ssh, and updates it |
 | [CHANGELOG.md](CHANGELOG.md) | every release: what changed, and what an integration does about it (read it to upgrade) |
-| [.env.example](.env.example) | every setting, with nothing real in it: the template for a workroom's visit-client settings, and for running the lobby |
+| [.env.example](.env.example) | every setting, with nothing real in it: the template for a workroom's `visit` settings, and for running the lobby |
 
 ## Adding Visit to a workroom
 
@@ -78,27 +79,30 @@ whoever runs your lobby):
 
 The guide takes it from there. Early on, it has the agent ask you to run `bin/setup` in a terminal: it
 asks you for the lobby (an address you have, or your own server, where it deploys one), your office's name
-and your page's address, gets visit-client for your machine, and writes your workroom's `.env`. Then the
+and your page's address, gets `visit` for your machine, and writes your workroom's `.env`. Then the
 agent writes the launcher, the token handoff, the scene and hooks, and the UI, and tests it on one machine.
-Your workroom must be made with three.js (r125 to r186): that is what every room shares.
+Your workroom must be made with three.js (r125 to r186): that is what every room shares. Nothing is installed:
+`visit` is one file for Linux, macOS or Windows, with its database (a Postgres) and a headless Chrome inside it,
+and Docker is never needed to run a workroom.
 By hand, that is:
 
 1. **Get this repository** (`git clone https://github.com/sarmiena/Basedverse`) anywhere; beside your
    workroom's project is the usual place.
 2. **Run `python3 Basedverse/bin/setup --env <your workroom>/.env`** (Windows: `py`). Or, for
-   visit-client alone: download it from the
+   `visit` alone: download it from the
    [newest release](https://github.com/sarmiena/Basedverse/releases/latest) (Linux, macOS, Windows), or
    build it (step 1 of the guide says how).
 3. **Follow [visit/INTEGRATING.md](visit/INTEGRATING.md)**, or hand it to your coding agent.
 
 ## Signing in to your workroom
 
-A workroom's server takes whoever can reach it for its owner. **auth-client** (from 0.21) gives every workroom a
-real sign-in, built from standard pieces, so that none of them invents one: the owner's account is made in a
-terminal (there is no sign-up page, ever), sessions are checked by the workroom's server before every page and
-route, scripts and agents get API keys, and visit-client's token goes only to a signed-in session. It runs beside
-visit-client on `127.0.0.1`, and only the workroom's server talks to it. `bin/setup` gets it and makes the account;
-[auth/INTEGRATING.md](auth/INTEGRATING.md) is the rest, for your coding agent (the plugin's skill offers it).
+A workroom's server takes whoever can reach it for its owner. **The sign-in** (from 0.21; inside `visit` from 2.0)
+gives every workroom a real one, built from standard pieces, so that none of them invents one: the owner's account
+is made in a terminal (`visit auth user add`: there is no sign-up page, ever), sessions are checked by the
+workroom's server before every page and route, scripts and agents get API keys, and `visit`'s token goes only to a
+signed-in session. `visit` serves it on `127.0.0.1`, and only the workroom's server talks to it. `bin/setup` makes
+the account; [auth/INTEGRATING.md](auth/INTEGRATING.md) is the rest, for your coding agent (the plugin's skill
+offers it).
 
 <p align="center">
   <img alt="The sign-in page: a pixel-art night behind it, an aurora, floating islands each with a little lit workroom, a figure-eight portal, the Basedverse logo, and a framed form with a name, a password and an Enter world button" src=".github/assets/login.png">
@@ -111,30 +115,36 @@ visit-client on `127.0.0.1`, and only the workroom's server talks to it. `bin/se
 One small server for everyone: [lobby/README.md](lobby/README.md) says what to rent and which ports to
 open, then `bin/deploy-lobby user@server` sets it up, and later updates it.
 
-## Releasing visit-client, auth-client and visit-engine
+## Releasing `visit`
 
-They are released together, at one version. Set it in `visit/client/Cargo.toml` and `auth/client/Cargo.toml`
-(and `VERSION` in `visit/client/web/visit.js`, and `engine/VERSION`), and add
-its entry at the top of [CHANGELOG.md](CHANGELOG.md): what changed, and **what an integration does**, step
+A release is one program, `visit`, at one version. Set it in the workspace's three crates
+(`visit/client/Cargo.toml`, `auth/client/Cargo.toml`, `engine/Cargo.toml`) and `VERSION` in
+`visit/client/web/visit.js`, and add its entry at the top of [CHANGELOG.md](CHANGELOG.md): what changed, and
+**what an integration does**, step
 by step, for the agent upgrading a workroom. A new feature also gets a row in the plugin skill's "Where to look"
 table (`plugins/basedverse/skills/visit/SKILL.md`), and, if it is a default, a line in INTEGRATING.md's "The
 vanilla experience". Commit, then tag that commit `v<version>` and push the tag
 (`git tag v0.3.0 && git push origin v0.3.0`). [The release workflow](.github/workflows/release.yml)
-builds and tests both on Linux (x86_64, ARM64), macOS (Apple silicon, Intel) and Windows (x86_64),
-and publishes the files, with their checksums, as that tag's release, its notes the changelog's entry (a
-tag the changelog has no entry for is not released).
+builds and tests `visit` on Linux (x86_64, ARM64), macOS (Apple silicon, Intel) and Windows (x86_64), starts it
+fresh on each (its Postgres up, a user made and signed in through its API, a room page hosted by its engine), and
+publishes `visit-<target>` (`.tar.gz`, `.zip` on Windows), with `SHA256SUMS`, as that tag's release, its notes the
+changelog's entry (a tag the changelog has no entry for is not released).
+
+The Postgres and the Chrome inside `visit` are released apart, as `deps-<n>`, when one of them is upgraded
+([deps/README.md](deps/README.md)): a Visit release carries whatever `deps/pinned.json` says at its commit.
 
 ## Tests
 
 | | |
 |---|---|
 | `python3 lobby/server/test_lobby.py`, `python3 lobby/server/test_lobby2.py` | the lobby, versions 1 and 2 (they need `websockets`: `lobby/server/requirements.txt`) |
-| `visit/client/cargo test` | visit-client's unit tests, in Docker |
-| `visit/client/tests/run-e2e.sh` | the lobby, two visit-clients and two stand-in pages, in Docker |
-| `visit/client/tests/run-browser.sh` | visit.js in two headless Chromes on this machine (it needs `google-chrome`): a three.js room's scene, drawn by its visitor; two rooms' worlds (on different three.js releases) |
-| `engine/tests/run-engine.sh` | visit-engine's image, hosting a test room against a stand-in server: loads, hosts, reloads, idles, measures |
-| `auth/client/cargo test` | auth-client's unit tests, in Docker |
-| `auth/client/tests/run-e2e.sh` | auth-client against Postgres 17 in Docker: the database's roles made, and a 0.20 database moved over; its terminal commands; its API (signing in, guesses slowed, expiry, revoking, keys) |
+| `visit/client/cargo test` | `visit`'s unit tests, in Docker |
+| `visit/client/tests/run-e2e.sh` | the lobby, two `visit`s (each with the Postgres inside it) and two stand-in pages, in Docker |
+| `visit/client/tests/run-browser.sh` | visit.js in two headless Chromes on this machine (it needs `google-chrome`): a three.js room's scene, drawn by its visitor; two rooms' worlds (on different three.js releases); a room hosted by the engine inside its `visit` |
+| `engine/tests/run-engine.sh` | `visit` with its engine, in a bare container, hosting a test room against a stand-in server: loads, hosts, reloads, idles, measures |
+| `auth/client/cargo test` | the sign-in's unit tests, in Docker |
+| `auth/client/tests/run-e2e.sh` | the sign-in inside `visit`, in Docker: the database's roles apart; its terminal commands, on a running `visit`'s database and on one started for them; its API (signing in, guesses slowed, expiry, revoking, keys); `visit import` |
+| `deps/postgres/build <platform>`, `deps/chrome/build <platform>` | the Postgres and the Chrome inside `visit`, each built and tested (a Linux one in Docker, on bare Ubuntu 20.04 and Debian 12; deps/README.md) |
 | `visit/client/tests/perf/run-perf.sh` | visits through simulated networks (delay, jitter, loss, rate caps; several visitors), each in its own container: the host's answer, updates, stalls, bandwidth (and with `BROWSERS=1`, real browsers drawing), against targets |
 
 ## License
