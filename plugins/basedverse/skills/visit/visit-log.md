@@ -5,6 +5,9 @@ How this workroom uses basedverse's Visit, and every way it differs from Visit's
 
 **Integrated at:** Visit <version> (<date>)
 
+**How it runs:** `visit` on the machine, started by <the launcher>; the room's server <on the machine beside it | in a
+container on the host's network, bound to 127.0.0.1>; its data in `VISIT_DATA_DIR` (<the path>).
+
 ## Features
 
 | feature | state | how, in this room |
@@ -25,6 +28,7 @@ How this workroom uses basedverse's Visit, and every way it differs from Visit's
 | landscapes, offline plots | vanilla | (what is marked `visitStatic`, and how) |
 | mounts | vanilla | (what they are is the room's: its possessions; riders drawn at their pose's height) |
 | physics (falling, flying, riders) | own | (the room's `spawn` and `move`: Visit has none; say what they do) |
+| the engine (the room's page inside `visit`, the person's page through the server's relay) | vanilla | (the server page's address, `ENGINE_ROOM_URL`) |
 
 State is one of:
 - **vanilla**: Visit's default. This includes the room's own choices where Visit has none: what its landscape is,
@@ -33,7 +37,7 @@ State is one of:
   Deviations.
 - **off**: not used.
 
-## Sign-in (auth-client)
+## Sign-in
 
 - Offered <date>; the user: "<their words>" (yes / no / later).
 - Public routes (work signed out): none (or each, as the user named it, with the date and their words).
@@ -54,4 +58,5 @@ What the user wants that Visit cannot do yet (it needs a change in Visit, not in
 
 ## History
 
-- <date>: <from> → <to>: <what was done>.
+- <date>: <from> → <to>: <what was done>. (An upgrade to 2.0: what was imported with `visit import`, the state file
+  kept, and what is kept for going back: the tag, the old database's volume.)
