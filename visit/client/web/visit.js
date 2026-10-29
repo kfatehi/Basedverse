@@ -3545,6 +3545,7 @@
     }
 
     get inside() { return this.in != null; }
+    get atHome() { return this.in != null && !!this.v.home && this.in === this.v.home.channel; }   // a user page, in its own room (engine/SPEC.md 4)
     // A user page's own room, as its host sends it (engine/SPEC.md 7): its scene's root, to read (a camera following
     // something in it), never to change (its host owns it; the next delta puts it back). Null until it has arrived.
     get room() { const s = this.v._homeScene(); return s ? s.root : null; }
