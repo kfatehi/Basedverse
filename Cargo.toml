@@ -1,7 +1,7 @@
 # Visit 2.0 (V2.md): one program, `visit`, from three crates. visit/client is the binary; auth/client (and, from
 # step 4, engine/) are libraries it is built with. Build and test through each crate's ./cargo (Docker).
 [workspace]
-members = ["visit/client", "auth/client"]
+members = ["visit/client", "auth/client", "engine"]
 resolver = "2"
 
 [profile.release]

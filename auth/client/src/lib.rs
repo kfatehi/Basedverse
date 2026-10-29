@@ -120,6 +120,17 @@ pub async fn main_with<I: IntoIterator<Item = String>>(args: I, database: &str) 
     }
 }
 
+/// The engine's key (V2.md 5): made new at each start of `visit`, the one before it gone; the room's server takes it
+/// from the engine's page as it takes any API key (labelled `engine`).
+pub async fn engine_key(database: &str) -> anyhow::Result<String> {
+    let c = db::connect(database).await?;
+    let key = secret::api_key();
+    c.execute("DELETE FROM auth.api_keys WHERE label = 'engine'", &[]).await?;
+    c.execute("INSERT INTO auth.api_keys (label, key_hash) VALUES ('engine', $1)", &[&secret::digest(&key)]).await?;
+    db::changed(&c).await?;
+    Ok(key)
+}
+
 /// The sign-in API inside a running `visit` (V2.md 2.1): its settings, and visit-client's port and token file for
 /// `/v1/visit` (the same process: nothing to probe).
 pub struct Serve {

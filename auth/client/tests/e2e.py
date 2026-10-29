@@ -234,6 +234,18 @@ def main():
             time.sleep(1.0)
         check("used every second: alive until its 5 s are up, then over", (alive[:4], alive[-1]), ([200] * 4, 401))
 
+        print("\na workroom moved over from another database: visit import")
+        imported = os.path.join(TMP, "imported")
+        old = urls(short_data)["superuser"]   # the short-lived workroom's, running: as a 1.x Visit's database would be
+        r = subprocess.run([VISIT, "import", "--data-dir", imported, old], capture_output=True, text=True, timeout=120)
+        check("visit import <the old database>: done, saying what came", (r.returncode, "accounts: 1" in r.stdout, "imported" in r.stdout), (0, True, True))
+        code, out, err = run("user", "list", data=imported)
+        check("its account here now", (code, "aldo" in out), (0, True))
+        r = subprocess.run([VISIT, "import", "--data-dir", imported, old], capture_output=True, text=True, timeout=120)
+        check("again, into a workroom with data: refused", (r.returncode, "has data already" in r.stderr), (1, True))
+        r = subprocess.run([VISIT, "import", "--data-dir", os.path.join(TMP, "imported2"), "postgres://nobody:x@127.0.0.1:1/visit"], capture_output=True, text=True, timeout=120)
+        check("from a database it cannot read: said, nothing changed", (r.returncode, "reading the old database" in r.stderr), (1, True))
+
         s6 = api("/v1/login", {"user": "aldo", "password": NEW_PASSWORD})[1]["session"]
         code, out, err = run("user", "remove", "aldo")
         check("user remove aldo: signed out everywhere", (code, until(lambda: api("/v1/check", {"session": s6})[0] == 401, 3), sql(u["auth"], "SELECT count(*) FROM auth.sessions")), (0, True, [(0,)]))

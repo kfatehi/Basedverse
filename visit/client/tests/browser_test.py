@@ -127,8 +127,8 @@ class Tab:
 
 
 class Engine:
-    """The engine (engine/SPEC.md 5) hosting a room, asked through its test aid (--debug: POST /debug/eval), as a Tab
-    is asked: the page's values. run-browser.sh started it on this machine's network, with the tokens it gave us."""
+    """The engine (engine/SPEC.md 5) hosting a room, asked through its test aid (ENGINE_DEBUG: POST /debug/eval), as a
+    Tab is asked: the page's values. It runs inside C's visit (V2.md 5), in the headless Chrome visit carries."""
 
     def __init__(self, port):
         self.port, self.name, self.errors = port, "C-engine", []
@@ -164,9 +164,9 @@ class Engine:
         pass
 
 
-async def start_client(name, port, url, user_token=False, tokens=None):
+async def start_client(name, port, url, user_token=False, tokens=None, extra_args=()):
     """`user_token`: with a user token too (engine/SPEC.md 6.2): then (process, token, user token); `tokens`: (token,
-    user token) given (run-browser.sh made them for the engine), instead of new ones."""
+    user token) given, instead of new ones; `extra_args`: more of visit's flags (the engine's)."""
     token = tokens[0] if tokens else secrets.token_hex(32)
     path = os.path.join(TMP, name + ".token")
     with open(path, "w") as f:
@@ -178,6 +178,7 @@ async def start_client(name, port, url, user_token=False, tokens=None):
         with open(upath, "w") as f:
             f.write(utoken)
         extra = ["--user-token-file", upath]
+    extra += list(extra_args)
     # Its database: the Postgres inside visit, in a data directory of its own (unpacked once, under TMP/xdg).
     p = await asyncio.create_subprocess_exec(BIN, "--lobby", url, "--name", name, "--sim", "test-room/1", "--port", str(port),
                                              "--token-file", path, "--relays", "none", "--data-dir", os.path.join(TMP, name + ".data"), *extra,
@@ -1126,7 +1127,9 @@ async def main():
 
         engine_port = int(os.environ.get("ENGINE_PORT") or 0)
         print("\nthe room and the person apart (engine/SPEC.md 3, 4, 7): C's room %s, C's person on a page of its own" % ("in the engine" if engine_port else "on a page of its own"))
-        pc, tc, tuc = await start_client("C", PORT_C, url, user_token=True, tokens=(os.environ["VISIT_C_TOKEN"], os.environ["VISIT_C_USER_TOKEN"]) if engine_port else None)
+        engine_flags = ("--engine-room-url", "http://127.0.0.1:%d/room.html?role=host&three=160&world=1" % WEB_PORT, "--engine-port", str(engine_port),
+                        "--engine-debug") if engine_port else ()
+        pc, tc, tuc = await start_client("C", PORT_C, url, user_token=True, extra_args=engine_flags)
         open(os.path.join(OUT, "host-go"), "w").close()   # the engine may have the room's page now (its next try: within its backoff, 30 s at most)
         room_c = "http://127.0.0.1:%d/room.html?role=%%s&three=160&world=1#port=%d&token=%%s" % (WEB_PORT, PORT_C)
         hc = Engine(engine_port) if engine_port else await Tab.spawn(CDP_B, "C-host", room_c % ("host", tc))

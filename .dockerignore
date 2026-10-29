@@ -1,8 +1,6 @@
 # The build context of visit/client's Dockerfiles is the repository (the workspace): only what they COPY matters.
+# deps/dist stays in: what deps/<…>/build made, built into visit when it is what deps/pinned.json pins.
 .git
 **/target
 **/bin
-deps/dist
 deps/.work
-postgres/dist
-postgres/.work

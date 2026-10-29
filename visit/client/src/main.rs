@@ -102,6 +102,39 @@ struct Args {
     /// ...and after this long in all.
     #[arg(long, env = "AUTH_MAX_AGE", default_value = "30d", value_parser = auth::secret::duration)]
     auth_max_age: Duration,
+    /// The room's server page (engine/SPEC.md 8.1): given, the engine hosts it in the headless Chrome inside visit
+    /// (V2.md 5), always, its own API key made at each start; none, no engine (a room not split runs in its tab).
+    #[arg(long, env = "ENGINE_ROOM_URL")]
+    engine_room_url: Option<String>,
+    /// The engine's /health (and ENGINE_DEBUG's test aid), on --listen's address.
+    #[arg(long, env = "ENGINE_PORT", default_value_t = 7405)]
+    engine_port: u16,
+    /// Frames a second the room gets with nobody there (1 to 60).
+    #[arg(long, env = "ENGINE_TICK_IDLE", default_value_t = 10, value_parser = clap::value_parser!(u32).range(1..=60))]
+    engine_tick_idle: u32,
+    /// MiB the engine's browser may hold before it is started again.
+    #[arg(long, env = "ENGINE_MEMORY_MAX", default_value_t = 1024)]
+    engine_memory_max: u64,
+    /// The room page's window: what its camera and canvas are told (nothing is drawn).
+    #[arg(long, env = "ENGINE_WINDOW", default_value = "1280x720", value_parser = window)]
+    engine_window: (u32, u32),
+    /// The engine's log: error, warn, info or debug (its page's console among it).
+    #[arg(long, env = "ENGINE_LOG")]
+    engine_log: Option<String>,
+    /// A test aid, never for a workroom: POST /debug/eval and /debug/crash on the engine's port.
+    #[arg(long, env = "ENGINE_DEBUG")]
+    engine_debug: bool,
+}
+
+/// WIDTHxHEIGHT, like 1280x720.
+fn window(s: &str) -> Result<(u32, u32), String> {
+    let bad = || format!("WIDTHxHEIGHT, like 1280x720, not {s:?}");
+    let (w, h) = s.split_once('x').ok_or_else(bad)?;
+    let (w, h): (u32, u32) = (w.parse().map_err(|_| bad())?, h.parse().map_err(|_| bad())?);
+    if !(10..=99999).contains(&w) || !(10..=99999).contains(&h) {
+        return Err(bad());
+    }
+    Ok((w, h))
 }
 
 /// Which workroom a command is for: VISIT_DATA_DIR, or the default made from VISIT_NAME (as a run finds it).
@@ -137,6 +170,14 @@ enum Command {
         #[command(flatten)]
         which: Which,
     },
+    /// Moves a 1.x workroom's database in (V2.md 6.3): what is in its visit and auth schemas (chat, pictures, held
+    /// whispers, bans, accounts, sessions, keys), copied once into this workroom's, which must have none yet.
+    Import {
+        #[command(flatten)]
+        which: Which,
+        /// The old database, as its superuser (VISIT_DATABASE_ADMIN_URL in a 1.x .env): postgres://user:password@host:port/database.
+        url: String,
+    },
 }
 
 /// A workroom's data directory: the one given, or basedverse/<name> in the user's data folder.
@@ -150,7 +191,7 @@ fn data_dir(given: Option<PathBuf>, name: Option<&str>) -> anyhow::Result<PathBu
 
 /// What this visit is, for --version: its own version, and what is inside it.
 fn long_version() -> &'static str {
-    Box::leak(format!("{VERSION} (Postgres {})", runtime::POSTGRES.version).into_boxed_str())
+    Box::leak(format!("{VERSION} (Postgres {}, Chrome {})", runtime::POSTGRES.version, runtime::CHROME.version).into_boxed_str())
 }
 
 /// Compares two secrets in time that does not depend on where they differ.
@@ -184,7 +225,7 @@ fn main() -> ExitCode {
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("the tokio runtime");
     match std::env::args().nth(1).as_deref() {
         Some("auth") => return rt.block_on(auth_command()),
-        Some("psql" | "status") => return rt.block_on(command(Command::parse())),
+        Some("psql" | "status" | "import") => return rt.block_on(command(Command::parse())),
         _ => {}
     }
     rt.block_on(run())
@@ -257,13 +298,43 @@ async fn command(c: Command) -> ExitCode {
                 }
             }
         }).await,
+        Command::Import { which, url } => {
+            tracing_subscriber::fmt().with_writer(std::io::stderr)
+                .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "visit=info,auth=warn".into())).init();
+            let dir = match which.dir() {
+                Ok(d) => d,
+                Err(e) => return bad_flags(&format!("{e:#}")),
+            };
+            let pg = match pg::open(&dir, true).await {
+                Ok((pg, _)) => pg,
+                Err(e) => {
+                    eprintln!("visit import: {e:#} (stop it first: a workroom is imported into before it runs)");
+                    return ExitCode::from(5);
+                }
+            };
+            let done = pg::import(&pg, &url).await;
+            pg.stop().await;
+            match done {
+                Ok(lines) => {
+                    for l in lines {
+                        println!("{l}");
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("visit import: {e:#}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
         Command::Status { which } => {
             let dir = match which.dir() {
                 Ok(d) => d,
                 Err(e) => return bad_flags(&format!("{e:#}")),
             };
             println!("visit {VERSION}");
-            println!("inside it: Postgres {} ({})", runtime::POSTGRES.version, runtime::POSTGRES.name);
+            println!("inside it: Postgres {} ({}), Chrome {} ({})", runtime::POSTGRES.version, runtime::POSTGRES.name,
+                     runtime::CHROME.version, runtime::CHROME.name);
             println!("data: {}", dir.display());
             match runtime::basedverse_dir() {
                 Ok(b) => println!("runtime: {}", b.join("runtime").display()),
@@ -278,11 +349,12 @@ async fn command(c: Command) -> ExitCode {
 }
 
 async fn run() -> ExitCode {
+    let a = Args::parse();
+    let filter = format!("visit=info,auth=info,engine={},iroh=warn", a.engine_log.as_deref().unwrap_or("info"));
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "visit=info,auth=info,iroh=warn".into()))
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| filter.into()))
         .init();
-    let a = Args::parse();
     let token = match (&a.token, &a.token_file) {
         (_, Some(f)) => match std::fs::read_to_string(f) {
             Ok(t) => t.trim().to_string(),
@@ -377,7 +449,7 @@ async fn run() -> ExitCode {
     let hello = lobby::Hello { name: a.name.clone(), sim, status: "available".into(), max_visitors: a.max_visitors };
     tokio::spawn(lobby::run(a.lobby.clone(), hello, lobby_rx, core_tx.clone(), away));
     let origins: Vec<String> = a.origins.split(',').map(|o| o.trim().trim_end_matches('/').to_string()).filter(|o| !o.is_empty()).collect();
-    let state = page::PageState::new(token, user_token, origins, core_tx.clone());
+    let state = page::PageState::new(token.clone(), user_token, origins, core_tx.clone());
     tokio::spawn(async move {
         if let Err(e) = page::serve(listener, state).await {
             error!("the page server stopped: {e}");
@@ -404,6 +476,30 @@ async fn run() -> ExitCode {
             }
         }
     }
+    // The engine, in this process: its port taken and its Chrome unpacked before this says it is ready; then it
+    // loads the room's server page and keeps it hosting (engine/SPEC.md 5).
+    let (engine_stop, engine_stopped) = tokio::sync::watch::channel(false);
+    let mut engine_task = None;
+    if let Some(room_url) = a.engine_room_url.clone() {
+        let prepared = async {
+            let chrome = runtime::unpacked(&runtime::CHROME)?;
+            let key = auth::engine_key(&pg.auth_url()).await?;
+            let cfg = engine::Config {
+                room_url, chrome, profile: data.join("engine").join("profile"), visit_url: format!("ws://127.0.0.1:{}/ws", a.port),
+                token: token.clone(), key, listen: a.listen, port: a.engine_port, tick_idle: a.engine_tick_idle,
+                memory_max_mib: a.engine_memory_max, window: a.engine_window, debug: a.engine_debug, version: VERSION,
+            };
+            engine::start(cfg, engine_stopped).await
+        };
+        match prepared.await {
+            Ok(run) => engine_task = Some(tokio::spawn(run)),
+            Err(e) => {
+                eprintln!("visit: the engine: {e:#}");
+                pg.stop().await;
+                return ExitCode::from(5);
+            }
+        }
+    }
     let ticker = core_tx.clone();
     tokio::spawn(async move {
         loop {
@@ -422,6 +518,10 @@ async fn run() -> ExitCode {
     println!("{}", json!({ "ready": true, "port": a.port, "version": VERSION, "proto": page::PROTO }));
     let lands = land::Lands::open(Some(cache));
     let code = core::Core::new(lobby_tx, core_tx, relays, a.max_visitors, a.idle_exit, saved, fresh, Some(state_file), lands, db_tx, loaded).run(core_rx).await;
+    let _ = engine_stop.send(true);
+    if let Some(t) = engine_task {
+        let _ = t.await;
+    }
     auth::STOPPING.store(true, std::sync::atomic::Ordering::Relaxed);
     pg.stop().await;
     ExitCode::from(code as u8)

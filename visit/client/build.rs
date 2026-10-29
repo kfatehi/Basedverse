@@ -1,4 +1,4 @@
-//! Builds the pinned Postgres (and, from V2.md step 4, Chrome) into visit (../../V2.md 6.2). For the platform being
+//! Builds the pinned Postgres and Chrome into visit (../../V2.md 6.2). For the platform being
 //! built, the archive ../../deps/pinned.json names is taken from ../../deps/dist/ when a file of that name there has
 //! the pinned sha256 (what deps/<…>/build made, pinned with `deps/pin --local`), else downloaded from its URL once
 //! into this build's output directory; checked against the sha256 either way. src/runtime.rs includes it.
@@ -22,7 +22,7 @@ fn main() {
         .unwrap_or_else(|e| panic!("{}: {e} (deps/pin writes it)", pinned_path.display())))
         .expect("deps/pinned.json is JSON");
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
-    for (dep, var) in [("postgres", "POSTGRES")] {
+    for (dep, var) in [("postgres", "POSTGRES"), ("chrome", "CHROME")] {
         let d = &pinned[dep];
         let f = &d["files"][platform];
         let (name, url, sha) = (f["name"].as_str(), f["url"].as_str(), f["sha256"].as_str());

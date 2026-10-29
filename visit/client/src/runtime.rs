@@ -23,6 +23,13 @@ pub static POSTGRES: Inside = Inside {
     bytes: include_bytes!(env!("VISIT_POSTGRES_ARCHIVE")),
 };
 
+pub static CHROME: Inside = Inside {
+    name: env!("VISIT_CHROME_NAME"),
+    sha256: env!("VISIT_CHROME_SHA256"),
+    version: env!("VISIT_CHROME_VERSION"),
+    bytes: include_bytes!(env!("VISIT_CHROME_ARCHIVE")),
+};
+
 /// The user's data folder: `$XDG_DATA_HOME` or `~/.local/share` on Linux, `~/Library/Application Support` on
 /// macOS, `%LOCALAPPDATA%` on Windows; then `basedverse` in it.
 pub fn basedverse_dir() -> Result<PathBuf> {
@@ -142,7 +149,8 @@ mod tests {
     }
 
     #[test]
-    fn the_postgres_inside_is_the_pinned_one() {
+    fn what_is_inside_is_what_was_pinned() {
         assert_eq!(hex(&Sha256::digest(POSTGRES.bytes)), POSTGRES.sha256);
+        assert_eq!(hex(&Sha256::digest(CHROME.bytes)), CHROME.sha256);
     }
 }

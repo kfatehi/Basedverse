@@ -6,6 +6,9 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY visit/client visit/client
 COPY auth/client auth/client
+COPY engine engine
+# What build.rs builds in (deps/pinned.json): the archives in deps/dist/ when they are the pinned ones, else fetched.
+COPY deps deps
 RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/src/target \
     cargo build --release --locked -p visit && cp target/release/visit /visit
 

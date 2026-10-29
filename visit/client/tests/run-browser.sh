@@ -24,24 +24,15 @@ for p in 9351 9352; do
   pids+=($!)
 done
 trap 'kill "${pids[@]}" 2>/dev/null || true' EXIT
-# visit-engine (../../../engine), for the third office's room (engine/SPEC.md 11, step 2): its image built, the
-# container on this machine's network (so it reaches the test's web server and visit-client C on 127.0.0.1), its
-# tokens made here and given to the test; it retries until both are there. ENGINE=0 skips it: the test then hosts
-# C's room in a window of its own instead.
+# The engine (V2.md 5) hosts the third office's room inside C's own visit, in the headless Chrome visit carries:
+# ENGINE_PORT tells the test to start C with it (its /health and test aid there). ENGINE=0 skips it: the test then
+# hosts C's room in a window of its own instead.
 engine=""
-if [ "${ENGINE:-1}" != 0 ]; then
-  docker build -q -t visit-engine "$repo/engine" >/dev/null
-  (umask 077; printf 'test-key' > "$out/c.key"; od -An -tx1 -N32 /dev/urandom | tr -d ' \n' > "$out/c.token"; od -An -tx1 -N32 /dev/urandom | tr -d ' \n' > "$out/c.user-token")
-  engine="visit-engine-$$"
-  docker run -d --rm --name "$engine" --network host -u "$(id -u):$(id -g)" -v "$out":/out:ro \
-    -e ENGINE_ROOM_URL="http://127.0.0.1:18771/room.html?role=host&three=160&world=1" -e ENGINE_KEY_FILE=/out/c.key \
-    -e VISIT_HOST=127.0.0.1 -e VISIT_PORT=7423 -e VISIT_TOKEN_FILE=/out/c.token -e ENGINE_PORT=7425 -e ENGINE_DEBUG=1 visit-engine >/dev/null
-  trap 'kill "${pids[@]}" 2>/dev/null || true; docker logs "'"$engine"'" > "'"$out"'/engine.log" 2>&1 || true; docker rm -f "'"$engine"'" >/dev/null 2>&1 || true' EXIT
-fi
+[ "${ENGINE:-1}" != 0 ] && engine=7425
 # Each visit's database is the Postgres inside it (V2.md 4), run as this machine's user: its /etc/passwd lent, so
 # initdb knows the user.
 docker run --rm --network host -u "$(id -u):$(id -g)" -e HOME=/tmp -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro \
-  ${engine:+-e ENGINE_PORT=7425 -e VISIT_C_TOKEN="$(cat "$out/c.token")" -e VISIT_C_USER_TOKEN="$(cat "$out/c.user-token")"} \
+  ${engine:+-e ENGINE_PORT=$engine} \
   -v visit-target:/target:ro -v "$repo":/repo:ro -v "$out":/out -w /repo \
   python:3.13-slim-bookworm sh -c 'pip install -q --user websockets==15.0.1 2>/dev/null && python3 -u visit/client/tests/browser_test.py /target/debug/visit 9351 9352 /out'
 echo "screenshots and logs: $out"

@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""The checks on a running engine (run by run-engine.sh in a container on the test's network, with the engine as
-`engine`, the test server as `room`, the host token in TOKEN): the room hosting, what the page measured
-(page.html, read through the driver's --debug eval route), frames a second busy and idle, and a crash reloaded."""
+"""The checks on the engine inside a running visit (run by run-engine.sh beside it: the engine's /health on
+ENGINE_PORT, the test server on 3001/3002, visit's page port and host token in VISIT_PORT and TOKEN): the room
+hosting, what the page measured (page.html, read through ENGINE_DEBUG's eval route), frames a second busy and
+idle, a crash reloaded, and the browser's memory."""
 import json
 import os
 import sys
 import time
 import urllib.request
 
-ENGINE, ROOM, TOKEN = "http://engine:7405", "http://room", os.environ.get("TOKEN", "")
+ENGINE, ROOM, TOKEN = "http://127.0.0.1:%s" % os.environ["ENGINE_PORT"], "http://127.0.0.1", os.environ.get("TOKEN", "")
+VISIT_PORT = int(os.environ["VISIT_PORT"])
 fails = 0
 
 
@@ -63,7 +65,7 @@ check("/health: ok, a version, no reload yet", (h.get("ok"), isinstance(h.get("v
 r = until(lambda: (lambda r: r if "mic" in r and "subresource" in r and "other" in r and len(r["raf"]["history"]) >= 3 else None)(results()), 15)
 check("the page's results are complete", bool(r), True)
 r = r or {"webgl": {}, "visibility": {}, "engine": {}, "raf": {"history": []}, "window": {}}
-check("VISIT_ENGINE: visit-client's url, the host token, role host, ENGINE_TICK_IDLE", r["engine"], {"url": "ws://visit:7401/ws", "token": TOKEN, "role": "host", "tickIdle": 10, "idle": False})
+check("VISIT_ENGINE: visit-client's url, the host token, role host, ENGINE_TICK_IDLE", r["engine"], {"url": "ws://127.0.0.1:%d/ws" % VISIT_PORT, "token": TOKEN, "role": "host", "tickIdle": 10, "idle": False})
 check("a WebGL context, its program linked, no GL error", (r["webgl"].get("context") in ("webgl", "webgl2"), r["webgl"].get("linked"), r["webgl"].get("error")), (True, True, 0))
 print("      (%s)" % r["webgl"].get("renderer"))
 check("nothing drawn: a cleared canvas with a triangle reads back all zero", r["webgl"].get("drawn"), False)
@@ -97,6 +99,22 @@ check("and hosting again", room_is("hosting", 15), True)
 h = health()
 check("one reload counted", h.get("reloads"), 1)
 check("the page is a new one", results()["loaded"] > before, True)
+
+# 5. Memory: the browser's processes, as the engine counts them (Pss, anonymous and shared), under its ceiling.
+def chrome_mib():
+    total = 0
+    for pid in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            if not open("/proc/%s/cmdline" % pid, "rb").read().split(b"\0")[0].endswith(b"chrome-headless-shell"):
+                continue
+            for line in open("/proc/%s/smaps_rollup" % pid):
+                if line.startswith(("Pss_Anon:", "Pss_Shmem:")):
+                    total += int(line.split()[1])
+        except OSError:
+            pass
+    return total // 1024
+mib = chrome_mib()
+check("the browser's memory within ENGINE_MEMORY_MAX, 1024 MiB (%d MiB)" % mib, 0 < mib < 1024, True)
 
 print("%d failed" % fails if fails else "all ok", flush=True)
 sys.exit(1 if fails else 0)

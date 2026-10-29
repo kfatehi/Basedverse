@@ -179,6 +179,45 @@ async fn ready(pg: &Pg, fresh: bool) -> Result<()> {
     Ok(())
 }
 
+/// `visit import`: the data in an old database's visit and auth schemas (a 1.x workroom's) copied into this one's,
+/// which must have none yet, with the pg_dump and pg_restore inside visit; each schema's bookkeeping of its
+/// migrations left as this one has it. What it did, a line each.
+pub async fn import(pg: &Pg, old: &str) -> Result<Vec<String>> {
+    let c = auth::db::connect(&pg.superuser_url(DATABASE)).await?;
+    let had: i64 = c.query_one("SELECT (SELECT count(*) FROM auth.users) + (SELECT count(*) FROM visit.messages) + (SELECT count(*) FROM visit.bans)", &[])
+        .await?.get(0);
+    if had > 0 {
+        bail!("this workroom has data already (accounts, chat or bans): import into a new one (another VISIT_DATA_DIR)");
+    }
+    let dump = pg.bin.parent().unwrap().join(format!(".import-{}.dump", std::process::id()));
+    let out = tokio::process::Command::new(pg.bin.join(exe("pg_dump")))
+        .args(["--data-only", "--format=custom", "--schema=visit", "--schema=auth",
+               "--exclude-table-data=visit.visit_migrations", "--exclude-table-data=auth.migrations"])
+        .arg(format!("--file={}", dump.display())).arg(format!("--dbname={old}"))
+        .output().await.context("pg_dump")?;
+    if !out.status.success() {
+        let _ = fs::remove_file(&dump);
+        bail!("reading the old database: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    let out = tokio::process::Command::new(pg.bin.join(exe("pg_restore")))
+        .args(["--data-only", "--disable-triggers", "--single-transaction", "--exit-on-error"])
+        .arg(format!("--dbname={}", pg.superuser_url(DATABASE))).arg(&dump)
+        .output().await.context("pg_restore")?;
+    let _ = fs::remove_file(&dump);
+    if !out.status.success() {
+        bail!("writing it here: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    let mut lines = vec![format!("from {}:", auth::db::redact(old))];
+    for (what, q) in [("accounts", "SELECT count(*) FROM auth.users"), ("API keys", "SELECT count(*) FROM auth.api_keys"),
+                      ("chat lines", "SELECT count(*) FROM visit.messages"), ("pictures and voice messages", "SELECT count(*) FROM visit.media"),
+                      ("whispers held", "SELECT count(*) FROM visit.held"), ("bans", "SELECT count(*) FROM visit.bans")] {
+        let n: i64 = c.query_one(q, &[]).await?.get(0);
+        lines.push(format!("  {what}: {n}"));
+    }
+    lines.push("imported: the old database can go once this workroom runs on it".into());
+    Ok(lines)
+}
+
 fn read_secrets(dir: &Path) -> Result<Secrets> {
     let f = dir.join("secrets");
     serde_json::from_slice(&fs::read(&f).with_context(|| format!("{} (the database's passwords)", f.display()))?)
