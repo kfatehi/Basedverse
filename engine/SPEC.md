@@ -1,9 +1,10 @@
-# visit-engine
+# The engine
 
-A room's server half, run headless beside visit-client. An office becomes a game server; a browser, wherever it
+A room's server half, run headless inside `visit`. An office becomes a game server; a browser, wherever it
 is, becomes a client to it. [INTEGRATING.md](INTEGRATING.md) says how to build a room on it; this is the
-contract behind it. **Experimental** (branch `engine`, [#17](https://github.com/sarmiena/Basedverse/issues/17)):
-nothing here is released, and it reaches `main` only after section 11.
+contract behind it. Released in 1.0.0 ([#17](https://github.com/sarmiena/Basedverse/issues/17)) as an image beside
+visit-client; from 2.0.0 ([#22](https://github.com/sarmiena/Basedverse/issues/22)) it is inside `visit`, the one
+program a workroom runs (5).
 
 [visit/SPEC.md](../visit/SPEC.md) is cited by section number throughout (8.1, 5.2, …); everything it says
 holds unless a section here says otherwise.
@@ -15,7 +16,7 @@ Today a room is a page, and the owner's tab is two things at once: the room (its
 exists only while that tab is open; why the tab must reach visit-client on `127.0.0.1`, so no other device can
 be the owner; and why a visitor's every step is answered from wherever the owner's laptop happens to be.
 
-With the engine, the room's page runs in a headless browser beside visit-client, always, and the owner's
+With the engine, the room's page runs in a headless browser inside `visit`, always, and the owner's
 browser is one more client of the office: it draws the room the way a visitor's page draws any room, from the
 scene the host sends, and holds everything that is the person's. At the desk the two talk over loopback and
 nothing is felt. From a coffee shop it feels like any online game played from a coffee shop. **There is no
@@ -24,7 +25,7 @@ mode**: an office with an engine runs this way whether or not anyone is looking,
 ```
  the office (a PC at home, or a server anywhere; no GPU)
  ┌───────────────────────────────────────────────────────────────────┐
- │  visit-engine: a headless browser                                 │
+ │  the engine, inside visit: a headless Chrome                      │
  │    the room's server page ── visit.js ───────┐                    │
  │        (scene, spawn, move, the room's logic)│ role "host"        │
  │                                              ▼                    │        the lobby, links
@@ -42,9 +43,9 @@ What it buys:
 - **A room that is up whenever the office is.** Visitors, watchers and plots (8.4) no longer depend on a tab.
 - **The owner from any device**, through the workroom's server, which it already signs in to. No browser ever
   reaches `127.0.0.1` again (6).
-- **An office anywhere.** Rendering is a no-op in the engine, so the whole office (visit-client, Postgres,
-  auth-client, the workroom's server, the engine) runs on a cheap machine with no GPU: a PC under a desk, or a
-  server with a public address, where links need no hole punching and office to office is datacenter to
+- **An office anywhere.** Rendering is a no-op in the engine, so the whole office (`visit`, with its Postgres,
+  its sign-in and its engine, and the workroom's server) runs on a cheap machine with no GPU: a PC under a desk,
+  or a server with a public address, where links need no hole punching and office to office is datacenter to
   datacenter.
 - **Shorter round trips for everyone remote.** A visitor's step is answered by the office, not by the owner's
   laptop; and the owner's own trip is one network leg to the office and back.
@@ -65,10 +66,10 @@ hosted in a tab, because they never saw anything but the bytes visit-client send
 | piece | what it is | who provides it |
 |---|---|---|
 | **visit-client** | as before (visit/SPEC.md 1): all networking, the checks, the memory. New: a page connection has a **role**, host or user (3); the owner is the host's visitor (4); it listens on a container's own network when told (6) | shared, identical for everyone |
-| **visit-engine** | a container image: a headless Chromium and a driver that loads the room's server page, keeps it running, and makes drawing free (5). Started by the workroom's launcher beside visit-client, on the same network | shared, identical for everyone |
+| **the engine** | inside `visit` (5): the headless Chrome it carries, and a driver that loads the room's server page, keeps it running, and makes drawing free. On when the launcher gives `visit` `ENGINE_ROOM_URL` | shared, identical for everyone |
 | **the room's server page** | the sim: its scene, its hooks (`spawn`, `move`, interactions: 8.1, 8.3) and its own logic. Runs only in the engine. Needs no screen, keyboard, mouse or microphone, and may have an empty DOM | each room |
 | **the room's client page** | what a person loads: visit.js's stage, panel, chat window, map and world, and whatever HUD the room wants, which talks to the workroom's server as it likes. Runs in any browser, anywhere | each room |
-| **the workroom's server** | serves both pages; signs the person in (auth-client); **relays** the person's connection to visit-client (6), so the browser never holds a Visit token; starts the engine and visit-client (its launcher) | each room |
+| **the workroom's server** | serves both pages; signs the person in (the sign-in, inside `visit`: ../auth/SPEC.md); **relays** the person's connection to visit-client (6), so the browser never holds a Visit token; starts `visit` (its launcher) | each room |
 
 The rule of visit/SPEC.md 1 still holds, in a new shape: **a page only ever talks to its own visit-client**.
 Now two pages do, the room and the person, and the person's talks through the workroom's server.
@@ -180,21 +181,23 @@ grants nothing itself.
 
 ## 5. The engine
 
-A container, `visit-engine`, built from `engine/`: a headless Chromium and a driver in Python's standard
-library, speaking the browser's devtools protocol over Chromium's pipe (`--remote-debugging-pipe`), as the
-browser test drives Chrome (visit/client/tests/browser_test.py).
+Inside `visit` (the `engine` library, built from `engine/`): a driver that runs the headless Chrome `visit` carries
+and speaks to it over the browser's devtools protocol (5.3), as the browser test drives Chrome
+(visit/client/tests/browser_test.py). It runs when `visit` is given `ENGINE_ROOM_URL` (5.2), and stops with it,
+before its database. Up to 1.x it was a container image of its own, `visit-engine` (Debian's Chromium and a driver
+in Python), beside visit-client.
 
 ### 5.1 What it does
 
 1. **Loads the room's server page** (`ENGINE_ROOM_URL`), with `Authorization: Bearer <key>` on every request
-   the page makes **to that URL's origin** (`ENGINE_KEY_FILE`: an API key of auth-client's, ../auth/SPEC.md 3;
-   the workroom's server takes a key as the owner, as it does for agents), so the room's code is served to the
-   engine and to nothing else without a session; a request elsewhere (a CDN's three.js, visit-client's
-   library) carries nothing. The page's own origin is the server's (`http://<server>:<port>`): list it in
-   `--origins` (6.4). The key and the token are read from their files at each load: one not there yet is a
-   failed load, tried again (a launcher's order of starting).
+   the page makes **to that URL's origin** (the engine's key: an API key `visit` makes at each start, labelled
+   `engine`, ../auth/SPEC.md 4; the workroom's server takes a key as the owner, as it does for agents), so the
+   room's code is served to the engine and to nothing else without a session; a request elsewhere (a CDN's
+   three.js, visit-client's library) carries nothing. The page's own origin is the server's
+   (`http://<server>:<port>`): list it in `--origins` (6.4). The key and the host token are handed to the engine
+   inside `visit`: there are no files to read. A server not answering yet is a failed load, tried again (point 6).
 2. **Gives the page its visit-client**, before any of the page's own scripts run: `window.VISIT_ENGINE = {
-   url: "ws://<VISIT_HOST>:<VISIT_PORT>/ws", token: "<the host token>", role: "host", idle, frames, tickIdle }`.
+   url: "ws://127.0.0.1:<VISIT_PORT>/ws", token: "<the host token>", role: "host", idle, frames, tickIdle }`.
    The page passes it to `Visit.connect` (7), and **keeps what that resolves to as `window.visit`**: it is how
    the engine sees the room is up (point 6) and who is in it (point 5). The token is in the engine's page and
    nowhere else.
@@ -221,10 +224,12 @@ browser test drives Chrome (visit/client/tests/browser_test.py).
    from its main thread, for 10 s), whose load failed (an HTTP error, no server yet), or whose `Visit.connect`
    has not reached `ready` (`window.visit`) within 60 s of loading, is loaded again: after 1 s, then 2, 4, … 30 s
    between tries, for ever; the wait starts over at 1 s once the room is hosting. A browser past
-   `ENGINE_MEMORY_MAX` (its processes' anonymous and shared memory, each page once: `Pss_Anon` + `Pss_Shmem`
-   from `/proc`, what the container's cgroup counts; a sum of resident sizes would count Chromium's binary once
-   a process) is stopped and started again. visit-client meanwhile does what it does on a reload (3.5).
-7. **Answers `/health`** on `ENGINE_PORT`, on its container's network only, never published:
+   `ENGINE_MEMORY_MAX` (on Linux, its processes' anonymous and shared memory, each page once: `Pss_Anon` +
+   `Pss_Shmem` from `/proc`, as a cgroup counts it, where a sum of resident sizes would count Chrome's binary once
+   a process; elsewhere, their resident sizes) is stopped and started again. visit-client meanwhile does what it
+   does on a reload (3.5).
+7. **Answers `/health`** on `ENGINE_PORT`, at `visit`'s `--listen` address (`127.0.0.1`; in a container, its own
+   network, never published):
    `{"ok": true, "version": "…", "room": "hosting" | "loading" | "failed", "since": <ms epoch>, "reloads":
    <count>}`. `loading` from the start until `ready`, and during a memory restart; `hosting` from `ready`;
    `failed` from a failed load, a crash, a stall or the browser's exit until it hosts again (a retry does not
@@ -233,38 +238,48 @@ browser test drives Chrome (visit/client/tests/browser_test.py).
 
 ### 5.2 Settings
 
-| variable | default | |
-|---|---|---|
-| `ENGINE_ROOM_URL` | (required) | the room's server page, on the workroom's server, by its name on the network (`http://board:3001/room/server`) |
-| `ENGINE_KEY_FILE` | (required) | an API key of auth-client's (`auth-client key add engine`), in a file readable by the engine only |
-| `VISIT_HOST`, `VISIT_PORT` | `visit`, 7401 | visit-client, by its name on the network (6.1) |
-| `VISIT_TOKEN_FILE` | (required) | the **host** token's file (6.2) |
-| `ENGINE_PORT` | 7405 | `/health` |
-| `ENGINE_TICK_IDLE` | 10 | frames a second with nobody there (1 to 60) |
-| `ENGINE_MEMORY_MAX` | 1024 | MiB, the browser's, past which it is restarted |
-| `ENGINE_WINDOW` | `1280x720` | the page's window size: what the room's camera and canvas are told, nothing drawn |
-| `ENGINE_LOG` | `info` | `error`, `warn`, `info`, `debug` |
+`visit`'s (../visit/SPEC.md 4.1): a variable and a flag for each, the flag winning.
 
-A flag for each, without the prefix (`--room-url`, `--key-file`, `--visit-host`, `--visit-port`, `--token-file`,
-`--port`, `--tick-idle`, `--memory-max`, `--window`, `--log`; `--version`); a flag wins over its variable. A missing
-or impossible setting is exit 2. `ENGINE_DEBUG=1` (`--debug`) turns on a test aid, `POST /debug/eval` (the body
-run in the page, its value as JSON) and `POST /debug/crash`, on `ENGINE_PORT`: for the tests, never part of the
-contract, 404 without it.
+| variable | flag | default | |
+|---|---|---|---|
+| `ENGINE_ROOM_URL` | `--engine-room-url` | none: no engine | the room's server page, on the workroom's server: `http://127.0.0.1:3001/room/server` on one machine; in containers, by the server's name on their network (`http://board:3001/room/server`) |
+| `ENGINE_PORT` | `--engine-port` | 7405 | `/health`, at `visit`'s `--listen` address |
+| `ENGINE_TICK_IDLE` | `--engine-tick-idle` | 10 | frames a second with nobody there (1 to 60) |
+| `ENGINE_MEMORY_MAX` | `--engine-memory-max` | 1024 | MiB, the browser's, past which it is restarted |
+| `ENGINE_WINDOW` | `--engine-window` | `1280x720` | the page's window size: what the room's camera and canvas are told, nothing drawn |
+| `ENGINE_LOG` | `--engine-log` | `info` | `error`, `warn`, `info`, `debug`: the engine's part of `visit`'s log (stderr) |
+
+An impossible setting is exit 2, and an `ENGINE_ROOM_URL` that is not `http://` or `https://`, or an
+`ENGINE_PORT` taken, exit 5, before `visit` is ready. The engine takes visit-client's port, the host token and its
+key from `visit` itself (5.1): gone with the image are `ENGINE_KEY_FILE`, `VISIT_HOST` and its `VISIT_TOKEN_FILE`,
+and its flags have the prefix now (`--room-url` is `--engine-room-url`). `ENGINE_DEBUG=1` (`--engine-debug`) turns
+on a test aid, `POST /debug/eval` (the body run in the page, its value as JSON) and `POST /debug/crash`, on
+`ENGINE_PORT`: for the tests, never part of the contract, 404 without it.
 
 ### 5.3 What it is made of, and holds
 
-Debian's Chromium, headless (`--headless=new --disable-gpu --enable-unsafe-swiftshader --disable-dev-shm-usage
---no-first-run --no-default-browser-check --window-size=<ENGINE_WINDOW>`, the page's metrics set to
-`ENGINE_WINDOW` through the devtools protocol, as the window's own size counts the browser's frame), a
-throwaway profile, and the driver (Python's standard library; the devtools protocol over
-`--remote-debugging-pipe`, no port). Chromium's own sandbox where the container allows it; where it does not
-(Docker's default seccomp and a host that keeps unprivileged user namespaces from it: the usual case), the
-driver sees Chromium die saying so and starts it again with `--no-sandbox`, logging a warning once: the
-container is the boundary then. It runs as an unprivileged user (the launcher's `user:`). It holds two files,
-the host token and the API key, and nothing of the person's: no session, no password, no microphone. It needs
-no GPU and asks for none: WebGL is SwiftShader's, which only uploads (point 3). Measured: an image of some
-600 MB; 185 MiB of memory and a third of a percent of a core idle; a few percent busy, plus what the room's own
-logic costs.
+**The browser** is Chrome for Testing's headless shell (`chrome-headless-shell`) at the version `visit` was built
+with (`visit --version` names it), carried inside `visit` and unpacked once into the user's runtime directory
+(../visit/SPEC.md 4.4): never the machine's own Chrome. How it is built, and started: ../deps/README.md. On Linux
+it brings its own libraries and fonts (DejaVu), set for its process alone (`LD_LIBRARY_PATH`, `FONTCONFIG_FILE`),
+so a bare machine draws the same text as any other; on macOS and Windows, the system's fonts. It is started with
+`--disable-gpu --enable-unsafe-swiftshader --disable-dev-shm-usage --no-first-run --no-default-browser-check
+--window-size=<ENGINE_WINDOW>` and a profile of its own (`engine/profile/` in the workroom's data directory, made
+new at each start of the browser), the page's metrics set to `ENGINE_WINDOW` through the devtools protocol.
+
+**The devtools protocol** goes over Chrome's pipe on Linux and macOS (`--remote-debugging-pipe`, its fds 3 and 4),
+which nothing else on the machine can reach; on Windows, over a port on `127.0.0.1` that Chrome picks itself
+(`--remote-debugging-port=0`, read back from its `DevToolsActivePort`). On Linux the browser dies with `visit`,
+however `visit` ends.
+
+**Its sandbox.** Chrome's own, where the machine allows one. Where it does not (a container; Ubuntu 23.10 and later,
+which keep unprivileged user namespaces from it), Chrome dies at start saying so, and the engine starts it again
+with `--no-sandbox`, logging a warning once, as it always has.
+
+**What it holds**: the host token and its key, in `visit`'s memory, and nothing of the person's: no session, no
+password, no microphone. It needs no GPU and asks for none: WebGL is SwiftShader's, which only uploads (point 3).
+What it costs is section 1's: 150 to 300 MB of memory, a few percent of a core while the room ticks, plus what the
+room's own logic costs (`ENGINE_LOG=debug` logs the browser's memory every 5 s).
 
 ### 5.4 A reload, as the room sees it
 
@@ -278,8 +293,9 @@ own server, as it would for a tab closed by mistake.
 ### 6.1 `--listen`
 
 `--listen` (`VISIT_LISTEN`): `127.0.0.1`, the default, or `0.0.0.0`: in a container, its container's own
-network, **its port never published**, as auth-client's `AUTH_LISTEN` (../auth/SPEC.md 8). Nothing else is
-accepted (exit 2). The engine and the workroom's server reach it by its service name. Point 1 of visit/SPEC.md
+network, **its port never published**, as the sign-in's `AUTH_LISTEN` (../auth/SPEC.md 8). Nothing else is
+accepted (exit 2). The workroom's server reaches it by its service name; the engine, inside `visit`, on 127.0.0.1
+either way. Point 1 of visit/SPEC.md
 3 reads, from this release: on `127.0.0.1`, or on a container's own network unpublished; a token on every
 page connection either way, and `/visit.js` and `/health` the only things without one.
 
@@ -289,8 +305,8 @@ New each run, at least 32 hex characters, each in a file only its reader can rea
 
 | token | flag | who holds it | which role it opens |
 |---|---|---|---|
-| host | `--token-file` (`VISIT_TOKEN_FILE`) | visit-client, the engine | `host`, and a page without a role |
-| user | `--user-token-file` (`VISIT_USER_TOKEN_FILE`; `--user-token`, `VISIT_USER_TOKEN`) | visit-client, the workroom's server | `user` |
+| host | `--token-file` (`VISIT_TOKEN_FILE`) | `visit` (its engine takes it there) | `host`, and a page without a role |
+| user | `--user-token-file` (`VISIT_USER_TOKEN_FILE`; `--user-token`, `VISIT_USER_TOKEN`) | `visit`, the workroom's server | `user` |
 
 Neither ever reaches a browser. A visit-client started without a user token takes no user connection (4401).
 
@@ -299,10 +315,11 @@ Neither ever reaches a browser. A visit-client started without a user token take
 The person's browser never connects to visit-client. The workroom's server has a WebSocket route of its own
 (`/visit/ws` in INTEGRATING.md; the name is the room's) which, for each connection:
 
-1. **checks the session** with auth-client (`/v1/check`, a session: every signed-in user is an owner), and
+1. **checks the session** with the sign-in (`/v1/check`, a session: every signed-in user is an owner), and
    refuses anything else (401; an API key is refused too: a script is not the person);
-2. **opens a WebSocket to visit-client** (`ws://<VISIT_HOST>:<VISIT_PORT>/ws`), sending the browser's own
-   `Origin` header on its upgrade request (6.4), `TCP_NODELAY` on both sockets (5);
+2. **opens a WebSocket to visit-client** (`ws://127.0.0.1:<VISIT_PORT>/ws`; in containers, by `visit`'s service
+   name), sending the browser's own `Origin` header on its upgrade request (6.4), `TCP_NODELAY` on both sockets
+   (5);
 3. **sends the relay preface** as the first message on that connection, a text frame of its own:
 
    ```json
@@ -325,7 +342,7 @@ The same route serves the desk (plain HTTP on `127.0.0.1`) and another device (t
 visit-client's `GET /visit.js` (4.3) on each request, so the library always matches the binary; both pages load
 it from there.
 
-This retires `/api/visit` and auth-client's `/v1/visit` for rooms on the engine (both stay for rooms not yet
+This retires `/api/visit` and the sign-in's `/v1/visit` for rooms on the engine (both stay for rooms not yet
 split), the token in a browser (visit/INTEGRATING.md step 3), and the plan of ../auth/INTEGRATING.md step 9
 for Visit ("visit-client connects out"): nothing connects out, because nothing in a browser needs to reach
 visit-client any more.
@@ -334,8 +351,9 @@ visit-client any more.
 
 `--origins` (visit/SPEC.md 3, point 4) sees the relay's upgrade request carrying the browser's `Origin`
 (6.3, point 2), and the engine page's own origin. The list names the workroom's server's origins: the local one
-(`http://localhost:3001`, `http://127.0.0.1:3001`), the HTTPS proxy's (`https://…`), and the server's name on
-the network (`http://board:3001`), which is what the engine's page has.
+(`http://localhost:3001`, `http://127.0.0.1:3001`), the HTTPS proxy's (`https://…`), and `ENGINE_ROOM_URL`'s,
+which is what the engine's page has: on one machine, the local one already; in containers, the server's name on
+their network (`http://board:3001`).
 
 ## 7. visit.js
 
@@ -429,10 +447,10 @@ The MUSTs of visit/SPEC.md 3 hold. These are added.
 
 | who | holds | may |
 |---|---|---|
-| the engine | the host token, an API key of the workroom's server | be the room: send the scene, answer for visitors; fetch the server page. Nothing of the person's |
+| the engine | the host token and its API key, in `visit`'s memory | be the room: send the scene, answer for visitors; fetch the server page. Nothing of the person's |
 | the workroom's server | the user token, the service token (auth) | relay a signed-in owner to visit-client as the user; nothing as the host |
 | the person's browser | a session cookie | through the relay: everything the person may do. No Visit token, ever |
-| visit-client | both tokens, the key, the database | as today |
+| `visit` | both tokens, the engine's key, the database | as today |
 
 1. **Roles are enforced by visit-client**, not by pages: a message from the wrong role is refused (`wrong_role`),
    a role's token opens that role alone (6.2), and the owner's visit is made by visit-client (4): a user cannot
@@ -446,7 +464,8 @@ The MUSTs of visit/SPEC.md 3 hold. These are added.
    whether its port is published, so the launcher checks (`ss -ltnp` on the host: nothing on 7401).
 5. **The server page is the room's code**: served to the engine's key, never to a session-less request, never
    with a token in it (the engine puts the token into the page itself, 5.1, point 2).
-6. **The engine holds no secret of the person's** (5.3) and answers nothing but `/health`, unpublished.
+6. **The engine holds no secret of the person's** (5.3) and answers nothing but `/health`, at `visit`'s `--listen`
+   address, unpublished.
 7. **Origins** still apply (6.4): a page on another site, with a stolen session, is refused by visit-client
    before `hello`.
 
@@ -473,22 +492,25 @@ In order, each before the next; the branch merges to `main` after step 4, and no
    passing every existing check unchanged. e2e adds: a host and a user on one visit-client; the owner walked
    by the host's `move`; a user replaced; a host away and back (`home.paused`); `wrong_role` each way; a
    `relay` preface, right and wrong.
-2. **The engine image**, hosting the test room's server half (visit/client/tests/room.html split: its scene and
-   hooks headless, its panel and stage in a client page); the browser test with the owner's tab as the user,
-   on the GPU as today, in about the same time; a reload of the engine's page mid-visit.
+2. **The engine** (an image in 1.0, inside `visit` from 2.0), hosting the test room's server half
+   (visit/client/tests/room.html split: its scene and hooks headless, its panel and stage in a client page); the
+   browser test with the owner's tab as the user, on the GPU as today, in about the same time; a reload of the
+   engine's page mid-visit.
 3. **The Sweatshop at the desk**, split (8), through the board's relay (6.3): nothing felt. Measured before and
    after by the ⏱ report (visit/SPEC.md 9): key to correction on the owner's moves, scan time, frame time; and
    the engine's memory and CPU over an hour, busy and idle.
 4. **From a laptop** through the board's HTTPS proxy on the LAN, then from outside it (Tailscale, or a café):
    signed in, at home, visiting a friend, talking, a whisper, a picture.
-5. **The office on a server** with no GPU (Postgres, visit-client, auth-client, the board, the engine), the home
+5. **The office on a server** with no GPU (`visit`, its Postgres and engine inside it, and the board), the home
    machine a plain client. The stretch, and the real test of section 1's third bullet.
 
 **Where it stands (2026-10-29, released as 1.0.0).** 1 and 2 hold (e2e, cargo, the browser test with the engine
 hosting an office). 3 took a day at the desk: everything felt is fixed and written down (INTEGRATING.md,
 "Upgrading: a room that hosts today"), and the owner called it good; the ⏱ reports show 60 frames, no stalls, Visit
 under 3 ms a second, the engine at a third of a core busy. 4 and 5 are the next things to do, not done by this
-release: a laptop through the proxy is the first.
+release: a laptop through the proxy is the first. From 2.0 the engine is inside `visit`, and the same proofs run
+there: `engine/tests/run-engine.sh` (the engine in a bare container, nothing of Chrome's installed) and the browser
+test (an office's room hosted by the engine inside its `visit`).
 
 ## 12. Open questions
 
@@ -502,12 +524,6 @@ release: a laptop through the proxy is the first.
 - **The owner's camera in the stage.** `Visit.stage` is first person. A vanilla third-person view of home
   (behind the person's own avatar) may be wanted for the client page; `v.world` with a camera of the room's
   does it today.
-- **The engine as a visit-client subcommand** (`visit-client engine`, driving a Chromium beside it) instead of
-  an image of its own. No: visit-client stays one thin binary that knows nothing of browsers.
-- **A host token changed under a running engine** (a launcher run again without restarting the engine): the page
-  keeps the old one, and the room stays down until something reloads it. The engine could read the file each
-  second and reload on a change; or the launcher restarts the engine with visit-client, which is what
-  INTEGRATING.md says to do.
 
 ## Not in v1
 
