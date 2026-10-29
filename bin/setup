@@ -345,13 +345,14 @@ def visit_env(data):
 
 
 def import_old(visit, data, env, ask):
-    """A 1.x .env names its database: its data moved into the workroom's own (visit import), once."""
+    """A 1.x .env names its database: its data moved into the workroom's own (visit import), once. Whether the old
+    database's settings may go from the .env (imported, or the workroom has its own already); not when declined."""
     old = env.get("VISIT_DATABASE_ADMIN_URL") or env.get("VISIT_DATABASE_URL")
     if not old:
-        return
+        return True
     if (Path(data) / "postgres" / "data").exists():
         say("  (the workroom's database is there already: nothing imported from %s)" % hide(old))
-        return
+        return True
     if not ask.on or ask.ask("\nYour .env names a 1.x database (%s). Move its chat, accounts and keys into the workroom's own now? (y/n)" % hide(old),
                              "y", lambda a: None if a.lower() in ("y", "n", "yes", "no") else "y or n").lower().startswith("y"):
         r = subprocess.run([str(visit), "import", old], env=visit_env(data), capture_output=True, text=True)
@@ -359,8 +360,9 @@ def import_old(visit, data, env, ask):
             say("  " + line)
         if r.returncode != 0:
             die("visit import failed (above): fix it and run setup again, or yourself: visit import <the old database's superuser URL>")
-    else:
-        say("  later, before the workroom first runs: visit import <the old database's superuser URL>")
+        return True
+    say("  later, before the workroom first runs: visit import <the old database's superuser URL> (kept in the .env until then)")
+    return False
 
 
 def hide(url):
@@ -450,9 +452,11 @@ def main():
 
     data = args.data_dir or env.get("VISIT_DATA_DIR") or default_data_dir(name)
     visit = get_visit(args, ask, env)
+    imported = True
     if visit:
-        import_old(visit, data, env, ask)
-        owner(visit, data, ask)
+        imported = import_old(visit, data, env, ask)
+        if imported:
+            owner(visit, data, ask)
     else:
         say("  ⚠ no visit yet: once there is, run setup again (it makes the owner's account)")
 
@@ -460,12 +464,13 @@ def main():
               "VISIT_PORT": port, "VISIT_MAX_VISITORS": mv, "VISIT_DATA_DIR": data}
     if visit:
         values["VISIT_PATH"] = visit
-    write_env(env_path, values, drop=GONE if visit else ())
+    gone = [k for k in GONE if imported or "DATABASE" not in k] if visit else []
+    write_env(env_path, values, drop=gone)
     say("\nWrote %s:" % env_path.resolve())
     for k, v in values.items():
         say("  %s=%s" % (k, quoted(v)))
-    if visit and any(k in env for k in GONE):
-        say("  (and took out what 2.0 has no use for: %s)" % ", ".join(k for k in GONE if k in env))
+    if any(k in env for k in gone):
+        say("  (and took out what 2.0 has no use for: %s)" % ", ".join(k for k in gone if k in env))
     gitignored(env_path.resolve(), ask)
     if deployed:
         say("\nYour lobby is %s: give that address to the workrooms you want to meet there." % lobby)

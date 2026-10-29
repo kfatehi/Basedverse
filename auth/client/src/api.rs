@@ -1,4 +1,4 @@
-//! auth-client's API (../SPEC.md 3): HTTP and JSON on 127.0.0.1 (or its container's network: --listen), for the
+//! auth's API (../SPEC.md 3), served by visit: HTTP and JSON on 127.0.0.1 (or its container's network: --auth-listen), for the
 //! workroom's server only (its service token on every call but /health); the browser never talks to it. Sessions
 //! and keys are checked from memory: a cache of
 //! the live ones, read from the database at the start, again whenever the terminal's commands change them (NOTIFY

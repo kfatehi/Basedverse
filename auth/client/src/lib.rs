@@ -82,7 +82,7 @@ enum KeyCmd {
     Revoke { label: String },
 }
 
-/// `visit auth <args>`: what auth-client was in a terminal (its first argument, the program's name, is skipped),
+/// `visit auth <args>`: the sign-in's terminal side (auth-client's, before 2.0) (its first argument, the program's name, is skipped),
 /// on `database`: the workroom's, as auth's own role (visit opens it, and gives it here).
 /// How it ends: 0 done; 1 it failed; 2 bad flags; 5 the database is not at the schema it needs.
 pub async fn main_with<I: IntoIterator<Item = String>>(args: I, database: &str) -> ExitCode {

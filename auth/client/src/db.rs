@@ -1,6 +1,6 @@
-//! auth-client's database (../SPEC.md 5): Visit's own Postgres, in a schema of its own (`auth`), as a role of its
-//! own (`auth`). Its schema is made by `auth-client migrate`, never by a run. `migrate --admin`, given a
-//! superuser, first makes the roles: visit-client's and auth-client's, each a plain role owning its own schema,
+//! auth's database (../SPEC.md 5): the workroom's Postgres, inside visit, in a schema of its own (`auth`), as a role
+//! of its own (`auth`). visit makes the roles ([`admin`], as the superuser) and brings the schema up to date
+//! ([`migrate`]) at every start: visit's and auth's, each a plain role owning its own schema,
 //! so neither can read the other's tables; a database whose visit-client still uses the superuser is moved over.
 use std::time::Duration;
 
@@ -21,7 +21,7 @@ const VISIT_TABLES: &[&str] = &["visit_migrations", "messages", "media", "messag
 /// they read them again.
 pub const CHANGED: &str = "auth_changed";
 
-/// The schema this auth-client needs: its newest migration's version.
+/// The schema this auth needs: its newest migration's version.
 pub fn latest() -> i32 {
     MIGRATIONS.last().map_or(0, |m| m.0)
 }
@@ -97,7 +97,7 @@ pub async fn version(c: &Client) -> Result<i32> {
     Ok(c.query_one("SELECT COALESCE(MAX(version), 0) FROM auth.migrations", &[]).await?.get::<_, i32>(0))
 }
 
-/// `auth-client migrate`: brings the database to the schema this auth-client needs, each migration in a
+/// Brings the database to the schema this auth needs (visit, at every start), each migration in a
 /// transaction of its own, one run at a time (an advisory lock); or, `status`, only says where it is. Refuses a
 /// database newer than it knows. What it did, a line each.
 pub async fn migrate(url: &str, status: bool) -> Result<Vec<String>> {
@@ -105,10 +105,10 @@ pub async fn migrate(url: &str, status: bool) -> Result<Vec<String>> {
     c.query("SELECT pg_advisory_lock(7403)", &[]).await?;
     let at = version(&c).await?;
     if at > latest() {
-        bail!("the database is at version {at}, newer than this auth-client knows ({}): use a newer auth-client", latest());
+        bail!("the database is at version {at}, newer than this visit knows ({}): use a newer visit", latest());
     }
     let pending: Vec<_> = MIGRATIONS.iter().filter(|m| m.0 > at).collect();
-    let mut out = vec![format!("{}: at version {at}; this auth-client needs {}", redact(url), latest())];
+    let mut out = vec![format!("{}: at version {at}; this visit needs {}", redact(url), latest())];
     if status {
         out.extend(pending.iter().map(|(v, name, _)| format!("pending: {v} {name}")));
         if pending.is_empty() {
@@ -117,10 +117,10 @@ pub async fn migrate(url: &str, status: bool) -> Result<Vec<String>> {
         return Ok(out);
     }
     // Its schema, if there is none yet (made only then: making one, even IF NOT EXISTS, needs rights to the database
-    // that auth-client's own role does not have, and need not).
+    // that auth's own role does not have, and need not).
     if c.query_opt("SELECT 1 FROM pg_namespace WHERE nspname = 'auth'", &[]).await?.is_none() {
         c.batch_execute("CREATE SCHEMA auth").await
-            .context("its schema (auth): without the rights to make it, run `auth-client migrate --admin <a superuser's URL>` once")?;
+            .context("its schema (auth): without the rights to make it, let visit make the roles (it does, at every start` once")?;
     }
     c.batch_execute("CREATE TABLE IF NOT EXISTS auth.migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT now())").await?;
     for (v, name, sql) in pending {
@@ -136,7 +136,7 @@ pub async fn migrate(url: &str, status: bool) -> Result<Vec<String>> {
     Ok(out)
 }
 
-/// The database for a run: reached (it may still be starting: tried for 30 s), and at the schema this auth-client
+/// The database for a run: reached (it may still be starting: tried for 30 s), and at the schema this auth
 /// needs (else what to run).
 pub async fn open(url: &str) -> Result<Client> {
     let mut tries = 0;
@@ -152,14 +152,14 @@ pub async fn open(url: &str) -> Result<Client> {
     };
     let at = version(&c).await?;
     if at != latest() {
-        bail!("the database {} is at version {at}; this auth-client needs {}: {}", redact(url), latest(),
-              if at < latest() { "run `auth-client migrate` first" } else { "use a newer auth-client" });
+        bail!("the database {} is at version {at}; this visit needs {}: {}", redact(url), latest(),
+              if at < latest() { "start visit (it brings it up to date)" } else { "use a newer visit" });
     }
     Ok(c)
 }
 
-/// `auth-client migrate --admin <superuser URL>`: the database's roles made right, then the schema brought up to
-/// date as auth-client's own role. visit-client's role (`visit_url`'s user) and auth-client's (`auth_url`'s) each
+/// The database's roles made right as its superuser (visit, at every start), then auth's schema brought up to date
+/// as auth's own role. visit's role (`visit_url`'s user) and auth's (`auth_url`'s) each
 /// become a plain role with that URL's password, owning a schema of its name, the database's to connect to and
 /// nobody else's. visit-client's tables in `public` (0.20's) move into its schema. A database made before has
 /// visit-client using the superuser itself (its bootstrap one, which Postgres keeps a superuser): that superuser
@@ -179,7 +179,7 @@ pub async fn admin(admin_url: &str, visit_url: &str, auth_url: &str, new_admin: 
         }
     }
     if visit == auth || auth == me {
-        bail!("visit-client's role ({visit}), auth-client's ({auth}) and the superuser ({me}) are three roles");
+        bail!("visit's role ({visit}), auth's ({auth}) and the superuser ({me}) are three roles");
     }
     let mut out = vec![format!("{}: as the superuser {me}", redact(admin_url))];
 

@@ -1,12 +1,12 @@
 <!doctype html>
 <!--
-  auth-client's sign-in page (../INTEGRATING.md): one page, nothing from elsewhere. Your workroom's server serves it
+  The workroom's sign-in page (../INTEGRATING.md): one page, nothing from elsewhere. Your workroom's server serves it
   at GET /login. Restyle it as you like, and keep:
   - the form: POST /login with `user`, `password` and a hidden `next`, the fields marked autocomplete="username" and
     autocomplete="current-password" (so password managers fill them);
   - its messages chosen by a code in the URL (?e=wrong, ?e=wait, ?e=expired), never text taken from the URL;
   - `next` only as a path on this site (it starts with / but not // or /\), else /. Your server checks it again.
-  There is no way to sign up here, ever: accounts are made in a terminal (auth-client user add <name>).
+  There is no way to sign up here, ever: accounts are made in a terminal (visit auth user add <name>).
   The world behind the form is drawn on a small canvas, scaled up to whole pixels as the logo's are; with reduced
   motion asked for, it holds still.
 -->
@@ -101,7 +101,7 @@ button[disabled] { cursor: progress; filter: saturate(.6); }
     <p class="press" aria-hidden="true">Press Enter</p>
     <p class="realm"><i></i>Workroom <b id="realm"></b></p>
   </form>
-  <p class="hint">No account? They are made on this machine, in a terminal: <code>auth-client user add &lt;name&gt;</code></p>
+  <p class="hint">No account? They are made on this machine, in a terminal: <code>visit auth user add &lt;name&gt;</code></p>
 </main>
 <script>
 "use strict";

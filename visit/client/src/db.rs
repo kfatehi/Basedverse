@@ -1,7 +1,7 @@
-//! The visit-client's database (../SPEC.md 8.12): Postgres beside it, required. It keeps the chat its user has had
+//! visit-client's database (../SPEC.md 8.12): the workroom's Postgres, inside visit (pg.rs). It keeps the chat its user has had
 //! (their own lines too, and which they have not seen yet), the pictures, voice messages and links shared in it,
 //! whispers left for someone away, and whom its room keeps out. Its schema is made by
-//! `visit-client migrate`, never by a run: a run checks the database is at the version it needs, and says how to
+//! visit at every start (pg.rs, before the run opens it): a run checks the database is at the version it needs, and says how to
 //! bring it there if not. A task of its own talks to it; the core asks it (DbCmd), and hears back (Ev).
 use std::{collections::BTreeMap, time::Duration};
 
@@ -77,7 +77,7 @@ pub async fn version(c: &Client) -> Result<i32> {
     Ok(c.query_one("SELECT COALESCE(MAX(version), 0) FROM visit_migrations", &[]).await?.get::<_, i32>(0))
 }
 
-/// `visit-client migrate`: brings the database to the schema this visit-client needs, each migration in a
+/// Brings the database to the schema this visit needs (pg.rs, at every start), each migration in a
 /// transaction of its own, one run at a time (an advisory lock); or, `status`, only says where it is. Refuses a
 /// database newer than it knows. What it did, a line each.
 pub async fn migrate(url: &str, status: bool) -> Result<Vec<String>> {
@@ -136,7 +136,7 @@ pub async fn open(url: &str, old_bans: &[Ban]) -> Result<(Client, Loaded)> {
     };
     let at = version(&c).await?;
     if at < latest() {
-        bail!("the database {} is at version {at}; this visit-client needs {}: run `visit-client migrate --database <url>` first (back it up before, if it holds anything)",
+        bail!("the database {} is at version {at}; this visit-client needs {}: start visit again (it brings it up to date at every start)",
               redact(url), latest());
     }
     if at > latest() {

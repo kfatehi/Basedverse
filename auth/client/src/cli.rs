@@ -1,6 +1,6 @@
 //! The terminal's commands (../SPEC.md 2): accounts, sessions and API keys, straight in the database. Having a
 //! terminal on the machine is the proof of ownership: there is no sign-up page, ever. What changes is told to the
-//! running auth-client (NOTIFY), which reads it again at once.
+//! running visit (NOTIFY), which reads it again at once.
 use std::io::{BufRead, IsTerminal};
 
 use anyhow::{bail, Context, Result};
@@ -50,7 +50,7 @@ pub async fn user_add(c: &Client, name: &str, stdin: bool) -> Result<()> {
         bail!("{name:?}: a name is 1 to 64 letters, digits, . _ @ or -, starting with a letter or digit");
     }
     if c.query_opt("SELECT 1 FROM auth.users WHERE lower(name) = lower($1)", &[&name]).await?.is_some() {
-        bail!("there is a user {name} already (a new password: auth-client passwd {name})");
+        bail!("there is a user {name} already (a new password: visit auth passwd {name})");
     }
     let hash = hashed(new_password(name, stdin)?).await?;
     c.execute("INSERT INTO auth.users (name, password_hash) VALUES ($1, $2)", &[&name, &hash]).await?;
@@ -75,7 +75,7 @@ pub async fn user_list(c: &Client) -> Result<()> {
                         (SELECT count(*) FROM auth.sessions s WHERE s.user_id = u.id AND s.expires_at > now())
                         FROM auth.users u ORDER BY u.created_at", &[]).await?;
     if rows.is_empty() {
-        println!("no users yet: auth-client user add <name>");
+        println!("no users yet: visit auth user add <name>");
         return Ok(());
     }
     table(&["USER", "MADE", "PASSWORD CHANGED", "SESSIONS"], rows.iter().map(|r| vec![r.get(0), r.get(1), r.get(2), r.get::<_, i64>(3).to_string()]).collect());
@@ -118,7 +118,7 @@ pub async fn revoke(c: &Client, session: Option<&str>, user: Option<&str>) -> Re
         (Some(p), None) => {
             let p = p.to_ascii_lowercase();
             if p.len() < 6 || !p.chars().all(|c| c.is_ascii_hexdigit()) {
-                bail!("a session, as auth-client sessions shows it (its first 6 hex characters at least)");
+                bail!("a session, as visit auth sessions shows it (its first 6 hex characters at least)");
             }
             let hits = c.query("SELECT id_hash FROM auth.sessions WHERE encode(id_hash, 'hex') LIKE $1 || '%'", &[&p]).await?;
             if hits.len() > 1 {
@@ -145,7 +145,7 @@ pub async fn key_add(c: &Client, label: &str) -> Result<()> {
     }
     let key = secret::api_key();
     c.execute("INSERT INTO auth.api_keys (label, key_hash) VALUES ($1, $2)", &[&label, &secret::digest(&key)]).await
-        .with_context(|| format!("a key labelled {label} is there already (auth-client key revoke {label}, first)"))?;
+        .with_context(|| format!("a key labelled {label} is there already (visit auth key revoke {label}, first)"))?;
     db::changed(c).await?;
     if std::io::stdout().is_terminal() {
         eprintln!("{label}'s key: it is shown this once. Send it as Authorization: Bearer <key>.");
@@ -159,7 +159,7 @@ pub async fn key_list(c: &Client) -> Result<()> {
     let rows = c.query("SELECT label, to_char(created_at, 'YYYY-MM-DD HH24:MI'), COALESCE(to_char(last_used_at, 'YYYY-MM-DD HH24:MI'), 'never'),
                         COALESCE('revoked ' || to_char(revoked_at, 'YYYY-MM-DD HH24:MI'), 'live') FROM auth.api_keys ORDER BY revoked_at IS NOT NULL, created_at", &[]).await?;
     if rows.is_empty() {
-        println!("no keys yet: auth-client key add <label>");
+        println!("no keys yet: visit auth key add <label>");
         return Ok(());
     }
     table(&["KEY", "MADE", "LAST USED", ""], rows.iter().map(|r| (0..4).map(|i| r.get::<_, String>(i)).collect()).collect());
