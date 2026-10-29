@@ -828,10 +828,13 @@ async def main():
         await a.until("v.voices.length === 1")
 
         print("\nchat: a line said, over its speaker's head, for everyone in the room")
+        # A view's lines said, not its 🔊 marks (keyed speak:): the microphones are still on, and the fake one's tone
+        # (a beep every 500 ms) can have its speaker marked as speaking at any moment.
+        said = lambda bubbles: f"[...{bubbles}.by].filter(([k]) => !k.startsWith('speak:')).map(([, x]) => x)"
         await a.js("v.say('hello from A')")
         check("A says a line in B's room: B has it, from A", await b.until("(c => c && c.text)(v.chats.find(c => c.name === 'A'))"), "hello from A")
         check("and B's world draws it over A's body, above its head", await b.until(
-            "!!room.world.bubbles && room.world.bubbles.by.size === 1 && [...room.world.bubbles.by.values()][0].sprite.position.y > 1.8"), True)
+            f"!!room.world.bubbles && (l => l.length === 1 && l[0].sprite.position.y > 1.8)({said('room.world.bubbles')})"), True)
         async def enter(pg):   # the Enter key, as a person presses it
             for t in ("keyDown", "keyUp"):
                 await pg.call("Input.dispatchKeyEvent", type=t, code="Enter", key="Enter", windowsVirtualKeyCode=13, **({"text": "\r"} if t == "keyDown" else {}))
@@ -850,8 +853,8 @@ async def main():
         wa, wb = await a.js(who), await b.js(who)
         check("B's name in it in B's own colour, the same in both windows (by B's key, as WoW colours a name by its class)", (wa, bool(wb and wb[1])), (wb, True))
         check("A's view of B's room draws it over B (B's mark), not A's own line (A's eyes are there)", await a.until(
-            "(b => !!b && b.by.size === 1 && [...b.by.values()][0].text === 'hi A, from my chat')(v._viewer && v._viewer.scene && v._viewer.scene.bubbles)"), True)
-        check("and B's world draws B's own over B's head too", await b.until("room.world.bubbles.by.size === 2"), True)
+            f"(b => !!b && (l => l.length === 1 && l[0].text === 'hi A, from my chat')({said('b')}))(v._viewer && v._viewer.scene && v._viewer.scene.bubbles)"), True)
+        check("and B's world draws B's own over B's head too", await b.until(f"{said('room.world.bubbles')}.length === 2"), True)
         await enter(b)
         await b.call("Input.insertText", text="/w A ")
         check("/w A and a space: the box whispers to A, the command gone", await b.until(
@@ -949,8 +952,9 @@ async def main():
         check("B's 🎧 (its box not on a room): into its own room's voice, a line over the box saying so", await b.until(
             f"!!v.roomVoice && v.roomVoice.key === v.key && {cw}.querySelector('.voice').textContent.startsWith('🎧 Your room: you')"), True)
         await a.js("v.joinVoice(v.visiting.host.key)")
-        check("A joins it: both lines say who is in it", (await a.until(f"(t => t.startsWith('🎧 B') && t.includes('B · you'))({cw}.querySelector('.voice').textContent)"),
-              await b.until(f"{cw}.querySelector('.voice').textContent.includes('you · A')")), (True, True))
+        voice = f"{cw}.querySelector('.voice').textContent.replace(/🔊 /g, '')"   # who is in it, not who is speaking (the fake tones)
+        check("A joins it: both lines say who is in it", (await a.until(f"(t => t.startsWith('🎧 B') && t.includes('B · you'))({voice})"),
+              await b.until(f"{voice}.includes('you · A')")), (True, True))
         await b.js("document.querySelector('.visit-panel .sub') || document.querySelector('.visit-panel button.who').click()")
         check("B opens A's row: ban voice, ban chat, Kick from voice", await b.until(
             "(s => !!s && [...s.querySelectorAll('button')].map(b => b.textContent).filter(t => /ban|voice/.test(t)).join())(document.querySelector('.visit-panel .sub'))"), "ban voice,ban chat,Kick from voice")

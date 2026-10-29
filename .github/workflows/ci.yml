@@ -1,0 +1,47 @@
+# The tests (the top README, "Tests"), on the self-hosted runner with a GPU (runner/ in basedverse-runner): the
+# browser test's Chromes draw on it, never in software. Each step is a script a person runs the same way.
+# A fork's pull request runs here too, once approved: the repo is public, and its code runs on that machine, so
+# Settings → Actions → General keeps a fork's runs waiting for a maintainer's approval.
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: [self-hosted, linux, gpu]
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lobby
+        run: |
+          docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v "$PWD":/repo:ro -w /repo/lobby/server python:3.13-slim-bookworm \
+            sh -c 'pip install -q --user -r requirements.txt 2>/dev/null && python3 -u test_lobby.py && python3 -u test_lobby2.py'
+      - name: visit-client unit tests
+        run: visit/client/cargo test --locked
+      - name: auth-client unit tests
+        run: auth/client/cargo test --locked
+      - name: visit-client end to end
+        run: visit/client/tests/run-e2e.sh
+      - name: auth-client end to end
+        run: auth/client/tests/run-e2e.sh
+      - name: visit.js in two Chromes, on the GPU
+        env:
+          OUT: ${{ runner.temp }}/browser-test   # screenshots and logs (under /work: a path dind sees too)
+        run: visit/client/tests/run-browser.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-test
+          path: ${{ runner.temp }}/browser-test
+          if-no-files-found: ignore
