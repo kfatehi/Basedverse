@@ -3521,14 +3521,17 @@
     // A host page's world: its scene (clipped to its plot) and its renderer, friends' plots round it. A user page's
     // (engine/SPEC.md 7): no scene of its own, its room comes from its host and is drawn as its own plot; `three` (any
     // release this visit.js knows) and `renderer` are the page's.
-    constructor(v, { scene, renderer, three, ground = 0x30363d, gap = WORLD_GAP, clipOwn = true, bubbles = true, speaking = true } = {}) {
+    // `self`: a user page's own body at home (engine/SPEC.md 4): "mine" (the default) hides the room's copy of it, as a
+    // visitor's page does (8.1), for the page's own; "room" shows the room's copy, with all the room does to it (a
+    // seat, a drink, a mount), for a page that draws none of its own there. Settable as the page goes (first person).
+    constructor(v, { scene, renderer, three, ground = 0x30363d, gap = WORLD_GAP, clipOwn = true, bubbles = true, speaking = true, self = "mine" } = {}) {
       const hk = v._hooks;
       if (!hk && !(v.role === "user" && three && three.REVISION && renderer)) throw new Error(v.role === "user" ? "visit.world needs { three, renderer }: the three.js this page draws with, and its renderer (its room comes from its host)" : "visit.world: v.host first (the world is drawn with your three.js, round your plot)");
       this.v = v; this.T = hk ? hk.scene.three : three;
       this.scene = hk ? scene || (hk.scene.root.isScene ? hk.scene.root : null) : null;
       this.renderer = renderer || (hk && hk.scene.renderer);
       if ((hk && !this.scene) || !this.renderer) throw new Error("visit.world needs { scene, renderer }: your whole scene, and the renderer that draws it");
-      Object.assign(this, { gap: Number(gap) >= 0 ? Number(gap) : WORLD_GAP, clipOwn: clipOwn !== false, in: null, home: null, bounce: null, yHome: null, me: null,
+      Object.assign(this, { gap: Number(gap) >= 0 ? Number(gap) : WORLD_GAP, clipOwn: clipOwn !== false, self: self === "room" ? "room" : "mine", in: null, home: null, bounce: null, yHome: null, me: null,
         bubbles: bubbles === false && speaking === false ? null : new Bubbles(this.T), showLines: bubbles !== false, showSpeaking: speaking !== false,
         refused: new Map(), holders: new Map(), sent: { at: 0, sig: "" }, look: { yaw: 0, pitch: 0 }, list: [], listAt: -1, plots: [], told: new Map() });
       const T = this.T;
@@ -3881,7 +3884,8 @@
           if (x.kept) { const h = this._holder(x); r.clippingPlanes = h.planes; r.render(h.holder, camera); continue; }   // a guest away: its kept plot
           const h = this._holder(x), s = x.w.scene;
           if (s.offset !== null) v._sceneInterp(s, now - s.offset - INTERP_MS);
-          for (const o of s.own) o.visible = false;
+          const shown = x.w.home && this.self === "room";   // at home, the room's copy of you is you (self)
+          for (const o of s.own) o.visible = shown;
           r.clippingPlanes = h.planes;
           r.render(h.holder, camera);
           if (now - s.gcAt > 30000) { s.gcAt = now; v._sceneGc(s); }   // what its room no longer uses, freed
