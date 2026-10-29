@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Tests a Postgres archive from postgres/build the way visit uses it: unpacked somewhere new, initdb, started on
+# 127.0.0.1, a role signed in with a SCRAM password, LISTEN/NOTIFY, an advisory lock, JSONB and BYTEA, stopped.
+#   postgres/test <archive>
+# A Linux archive is tested on Ubuntu 20.04 in Docker (an older C library than the one it was built on would
+# fail here); macOS and Windows ones on this machine.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=versions.env
+source "$here/versions.env"
+archive="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+case "$(basename "$archive")" in
+  *-linux-*)
+    if [ "${POSTGRES_TEST_INSIDE:-}" != 1 ]; then
+      echo "postgres/test: on $LINUX_TEST_IMAGE" >&2
+      exec docker run --rm -e POSTGRES_TEST_INSIDE=1 -e POSTGRES_TEST_NAME="$(basename "$archive")" -v "$here":/postgres:ro -v "$archive":/a.tar.gz:ro "$LINUX_TEST_IMAGE" \
+        sh -c 'useradd -m pgtest && su pgtest -s /bin/bash -w POSTGRES_TEST_INSIDE,POSTGRES_TEST_NAME -c "bash /postgres/test /a.tar.gz"'
+    fi ;;
+esac
+
+dir=$(mktemp -d "${TMPDIR:-/tmp}/pgtest.XXXXXX")
+trap '"$pg/bin/pg_ctl" -D "$dir/data" -m immediate stop >/dev/null 2>&1 || true; rm -rf "$dir"' EXIT
+tar -xzf "$archive" -C "$dir"
+pg=$(echo "$dir"/postgresql-*)
+port=54329
+echo "superuser-pw" >"$dir/pw"
+"$pg/bin/initdb" -D "$dir/data" -U postgres --pwfile="$dir/pw" -A scram-sha-256 -E UTF8 \
+  --locale-provider=builtin --builtin-locale=C.UTF-8 >"$dir/initdb.log" 2>&1 || { cat "$dir/initdb.log"; exit 1; }
+"$pg/bin/pg_ctl" -D "$dir/data" -o "-p $port -c listen_addresses=127.0.0.1" -l "$dir/server.log" -w start >/dev/null \
+  || { cat "$dir/server.log"; exit 1; }
+q() { PGPASSWORD="$2" "$pg/bin/psql" -X -q -A -t -v ON_ERROR_STOP=1 -h 127.0.0.1 -p $port -U "$1" -d postgres -c "$3"; }
+q postgres superuser-pw "CREATE ROLE visit LOGIN PASSWORD 'v'; CREATE SCHEMA visit AUTHORIZATION visit;" >/dev/null
+q visit v "SET search_path = visit; CREATE TABLE t (line JSONB, bytes BYTEA); INSERT INTO t VALUES ('{\"a\":1}', '\\xdeadbeef');" >/dev/null
+got=$(q visit v "SELECT pg_advisory_lock(7401); SELECT (line->>'a') || encode(bytes, 'hex') FROM visit.t;" | tr -d '\r' | tail -1)
+heard=$(q visit v "LISTEN x; NOTIFY x;" 2>&1)
+version=$(q postgres superuser-pw "SHOW server_version" | tr -d '\r')
+"$pg/bin/pg_ctl" -D "$dir/data" -w stop >/dev/null
+[ "$got" = "1deadbeef" ] || { echo "postgres/test: FAILED (read back '$got')"; exit 1; }
+case "$heard" in *'notification "x" received'*) ;; *) echo "postgres/test: FAILED (NOTIFY not heard: '$heard')"; exit 1 ;; esac
+echo "postgres/test: ok, Postgres $version from ${POSTGRES_TEST_NAME:-$(basename "$archive")}"

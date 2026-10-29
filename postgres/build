@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# The Postgres archive visit runs, for one platform (postgres/README.md):
+#   postgres/build <linux-x86_64 | linux-aarch64 | macos-aarch64 | macos-x86_64 | windows-x86_64> [--no-test]
+# Linux is compiled from source in a manylinux_2_28 container (Docker, on the machine that builds: never on the
+# one that runs visit); macOS and Windows are theseus-rs' builds of the same Postgres, checked. Either way it is
+# cut down to what visit needs and tested (postgres/test) unless --no-test (a platform this machine can't run).
+# Out: postgres/dist/postgresql-<version>-<build>-<platform>.tar.gz, one top directory of that name.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=versions.env
+source "$here/versions.env"
+platform="${1:?usage: postgres/build <platform> [--no-test]}"
+test=1; [ "${2:-}" = "--no-test" ] && test=0
+name="postgresql-$POSTGRES_VERSION-$BUILD-$platform"
+work="$here/.work/$platform"
+rm -rf "$work" && mkdir -p "$work" "$here/dist"
+say() { echo "postgres/build: $*" >&2; }
+sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
+
+case "$platform" in
+  linux-x86_64 | linux-aarch64)
+    src="$here/.work/postgresql-$POSTGRES_VERSION.tar.bz2"
+    if [ ! -f "$src" ] || [ "$(sha256 "$src")" != "$POSTGRES_SHA256" ]; then
+      say "fetching Postgres $POSTGRES_VERSION's source"
+      curl -fsSL -o "$src" "https://ftp.postgresql.org/pub/source/v$POSTGRES_VERSION/postgresql-$POSTGRES_VERSION.tar.bz2"
+    fi
+    [ "$(sha256 "$src")" = "$POSTGRES_SHA256" ] || { say "the source's sha256 is not POSTGRES_SHA256"; exit 1; }
+    image="$LINUX_IMAGE_X86_64"; [ "$platform" = linux-aarch64 ] && image="$LINUX_IMAGE_AARCH64"
+    say "compiling in $image"
+    docker run --rm -e OWNER="$(id -u):$(id -g)" -v "$here":/postgres:ro -v "$src":/src.tar.bz2:ro \
+      -v "$work":/out "$image" bash /postgres/linux-inside.sh /src.tar.bz2 "/out/$name"
+    ;;
+  macos-aarch64 | macos-x86_64 | windows-x86_64)
+    triple=$(case "$platform" in macos-aarch64) echo aarch64-apple-darwin ;; macos-x86_64) echo x86_64-apple-darwin ;;
+             windows-x86_64) echo x86_64-pc-windows-msvc ;; esac)
+    file="postgresql-$THESEUS_RELEASE-$triple.tar.gz"
+    url="https://github.com/theseus-rs/postgresql-binaries/releases/download/$THESEUS_RELEASE/$file"
+    say "fetching $file"
+    curl -fsSL -o "$work/$file" "$url"
+    want=$(curl -fsSL "$url.sha256" | cut -d' ' -f1)
+    [ "$(sha256 "$work/$file")" = "$want" ] || { say "$file is not the sha256 theseus-rs published"; exit 1; }
+    tar -xzf "$work/$file" -C "$work"
+    mv "$work/postgresql-$THESEUS_RELEASE-$triple" "$work/$name"
+    rm "$work/$file"
+    ;;
+  *) say "no platform $platform"; exit 2 ;;
+esac
+
+# What visit uses: the server, initdb and pg_ctl; psql and the dump/upgrade tools for the person (and for a
+# major upgrade later). Everything else of an installation (headers, static libraries, docs, PGXS) goes.
+say "cutting down to what visit needs"
+root="$work/$name"
+keep="postgres initdb pg_ctl psql pg_dump pg_dumpall pg_restore pg_upgrade pg_isready"
+for f in "$root"/bin/*; do
+  base=$(basename "$f"); base=${base%.exe}
+  case " $keep " in *" $base "*) continue ;; esac
+  case "$f" in *.dll) continue ;; esac   # Windows keeps its libraries beside the programs
+  rm -rf "$f"
+done
+rm -rf "$root"/include "$root"/doc "$root"/share/doc "$root"/share/man "$root"/lib/pkgconfig \
+  "$root"/lib/postgresql/pgxs "$root"/lib/pgxs "$root"/symbols "$root"/dependency-notices
+find "$root/lib" -name '*.a' -delete
+{
+  echo "Postgres $POSTGRES_VERSION for visit (basedverse), build $BUILD, $platform."
+  [ "${platform%%-*}" = linux ] && echo "Compiled from postgresql-$POSTGRES_VERSION.tar.bz2 (sha256 $POSTGRES_SHA256) in $image."
+  [ "${platform%%-*}" != linux ] && echo "theseus-rs/postgresql-binaries $THESEUS_RELEASE ($file), cut down; its licenses kept."
+  echo "Made by postgres/build in https://github.com/sarmiena/Basedverse."
+} >"$root/BUILD.txt"
+[ -f "$root/COPYRIGHT" ] || cp "$work"/COPYRIGHT "$root/" 2>/dev/null || true
+
+archive="$here/dist/$name.tar.gz"
+tar -czf "$archive" -C "$work" "$name"
+say "$archive ($(du -h "$archive" | cut -f1)), sha256 $(sha256 "$archive")"
+if [ "$test" = 1 ]; then "$here/test" "$archive"; else say "not tested here (--no-test)"; fi
