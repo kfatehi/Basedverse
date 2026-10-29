@@ -22,7 +22,7 @@ header. After this integration:
   service's token itself: the browser never holds it.
 
 You get one program you do not modify: **auth-client**. It runs beside your server and visit-client, listens on
-`127.0.0.1` only, and talks only to your server, which sends its service token with every call. **The browser
+`127.0.0.1` only (in a container, on its container's own network, unpublished: step 4), and talks only to your server, which sends its service token with every call. **The browser
 never talks to it.**
 
 You write: the launcher steps (start it with a token file), one check before every route, `/login` and `/logout`,
@@ -100,13 +100,34 @@ Beside visit-client, on every start:
    start.
 4. Stop it with the rest.
 
-In Docker, run it on the host's network (it listens on `127.0.0.1` only), or in your server's own network
-namespace (compose: `network_mode: "service:<your server>"`, recreated whenever your server is). There, with
-visit-client on the host's network, it cannot reach visit-client's port: set `AUTH_VISIT_PROBE=false`, and have
-your launcher remove visit-client's token file when visit-client stops (a file there then means it runs).
+In Docker, with your server in a container, give auth-client a service of its own on your server's network:
+`AUTH_LISTEN=0.0.0.0` (its container's own network: your server reaches it by the service's name, `AUTH_HOST`
+below) and **no published port**, so nothing outside that network reaches it. Either can then restart or be
+recreated alone. (Not `network_mode: "service:<your server>"`: auth-client would be left in a network that is gone
+each time your server restarts, and every route would refuse until it restarted too.) Your server on the host's
+network: run auth-client there too, on `127.0.0.1` as it is by default. In a container, with visit-client on the
+host's network, it cannot reach visit-client's port: set `AUTH_VISIT_PROBE=false`, and have your launcher remove
+visit-client's token file when visit-client stops (a file there then means it runs).
+
+```yaml
+services:
+  auth:
+    image: …                      # or build: <basedverse>/auth/client
+    environment:
+      AUTH_LISTEN: 0.0.0.0        # its own network only: no `ports:`
+      AUTH_DATABASE_URL: postgres://auth:…@visit-db:5432/visit
+      AUTH_TOKEN_FILE: /auth/token
+      AUTH_VISIT_PROBE: "false"
+  your-server:
+    environment:
+      AUTH_HOST: auth             # where your server asks auth-client
+      AUTH_TOKEN_FILE: /auth/token
+```
 
 **Check:** `curl -s http://127.0.0.1:7403/health` answers `{"ok":true,"version":"…"}`; a call without the token,
-`curl -s -X POST http://127.0.0.1:7403/v1/check -d '{}'`, answers 401.
+`curl -s -X POST http://127.0.0.1:7403/v1/check -d '{}'`, answers 401. In containers, the same from your server's
+(`http://auth:7403`), and nothing from this machine's own `curl` (no port published). Restart your server alone:
+it still signs you in.
 
 ## Step 5 — One check before every route
 
@@ -127,7 +148,7 @@ A sketch, in Python (adapt it to your framework's middleware):
 ```python
 import json, os, time, urllib.error, urllib.request
 
-AUTH = "http://127.0.0.1:%s" % os.environ.get("AUTH_PORT", "7403")
+AUTH = "http://%s:%s" % (os.environ.get("AUTH_HOST", "127.0.0.1"), os.environ.get("AUTH_PORT", "7403"))
 SERVICE = open(os.environ["AUTH_TOKEN_FILE"]).read().strip()
 PUBLIC = {("GET", "/login"), ("POST", "/login")}   # and only what the user names
 _seen = {}   # session or key -> (answer, until): 5 s at most
@@ -259,7 +280,7 @@ Its key refused on your page's routes, a session refused on its `/next`.
 ## Step 10 — Where it listens, and reaching it from another device
 
 Your server listens on `127.0.0.1` until this integration is done and checked, and auth-client and visit-client
-stay on `127.0.0.1` always. To reach your workroom from another device (a laptop or a phone on your network, or
+stay on `127.0.0.1` always (auth-client in a container: its own network, never published). To reach your workroom from another device (a laptop or a phone on your network, or
 your tailnet), put an **HTTPS proxy** in front of it, never plain HTTP: your password and session cookie would
 cross the network readable by anyone on it. Any proxy will do; the user picks one:
 
@@ -284,7 +305,8 @@ from a container), where every request is another device's. There, and only ther
 Your own listener (`127.0.0.1`, plain HTTP) stays as it is: the `session` cookie, your own origins, the connection's
 address. Nothing else changes.
 
-**Check:** `ss -ltnp` (or `netstat -an`): auth-client and visit-client on `127.0.0.1` only; your server's two
+**Check:** `ss -ltnp` (or `netstat -an`): auth-client and visit-client on `127.0.0.1` only (auth-client in a
+container: not listed, no port published); your server's two
 listeners too (or published only there). From another device, through the proxy: you sign in, your pages and their
 relayed services work, `/api/visit` is refused, and plain `http://` to this machine's address answers nothing.
 
@@ -350,7 +372,7 @@ for method, path in ROUTES:
       tokens in no page or response, their own ports gone.
 - [ ] The server on `127.0.0.1`; from another device only through an HTTPS proxy, on a listener of its own (the
       `__Host-` cookie, the origin from `Host`, the proxy's word for the address, no `/api/visit`); auth-client and
-      visit-client on `127.0.0.1`.
+      visit-client on `127.0.0.1` (auth-client in a container: its own network, by name, no published port).
 - [ ] The route test (step 12) in your tests, passing.
 - [ ] Nothing logs a password, a session, a key or a token.
 

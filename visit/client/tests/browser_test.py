@@ -89,8 +89,8 @@ class Tab:
     async def goto(self, url):
         await self.call("Page.navigate", url=url)
 
-    async def key(self, code, key, vk, down):
-        await self.call("Input.dispatchKeyEvent", type="keyDown" if down else "keyUp", code=code, key=key, windowsVirtualKeyCode=vk)
+    async def key(self, code, key, vk, down, shift=False):
+        await self.call("Input.dispatchKeyEvent", type="keyDown" if down else "keyUp", code=code, key=key, windowsVirtualKeyCode=vk, modifiers=8 if shift else 0)
 
     async def shot(self, name):
         r = await self.call("Page.captureScreenshot", format="png")
@@ -817,6 +817,21 @@ async def main():
         await enter(b)
         check("B, with A linked (visiting): its own room's chat among the choices", await b.js(f"[...{cw}.querySelector('select').options].map(o => o.textContent)"),
               ["Say:", "Tell A:", "To your room:", "To A's room:", "Lobby:"])
+        await b.call("Input.insertText", text="kept")
+        steps = []
+        for shift in [False] * 5 + [True] * 5:
+            await b.key("Tab", "Tab", 9, True, shift)
+            await b.key("Tab", "Tab", 9, False, shift)
+            steps.append(await b.js(f"{cw}.querySelector('select').selectedOptions[0].textContent"))
+        check("Tab: the box on to the next place, round again (Shift+Tab: back); one Tell, to whom B last whispered with; the line kept, the box still typed in",
+              (steps, await b.js(f"(c => [c.dataset.scope, c.querySelector('input').value, document.activeElement === c.querySelector('input')])({cw})")),
+              (["Say:", "Tell A:", "To your room:", "To A's room:", "Lobby:", "To A's room:", "To your room:", "Tell A:", "Say:", "Lobby:"], ["lobby", "kept", True]))
+        await b.js(f"{cw}.querySelector('input').value = ''")
+        await b.call("Input.insertText", text="/s")
+        await b.key("Tab", "Tab", 9, True)
+        await b.key("Tab", "Tab", 9, False)
+        check("not while a command is in the box: that says where", await b.js(f"(c => [c.dataset.scope, c.querySelector('input').value])({cw})"), ["lobby", "/s"])
+        await b.js(f"{cw}.querySelector('input').value = ''")
         await b.call("Input.insertText", text="/w ")
         check("/w and a space: the names it could be, over the box, to pick", await b.until(f"[...{cw}.querySelectorAll('.names button')].map(b => b.textContent).join()"), "A")
         await b.key("Tab", "Tab", 9, True)
@@ -894,11 +909,55 @@ async def main():
         await b.js(f"{cw}.querySelector('.shared button[data-k=close]').click()")
         await b.key("Escape", "Escape", 27, True)
         await b.key("Escape", "Escape", 27, False)
+
+        print("\nthe mailbox (0.22.0): what came for B while nobody looked at its chat")
+        await b.js("document.hasFocus = () => false; dispatchEvent(new Event('blur'))")
+        check("B's page loses the focus: nobody looking at its chat, its visit-client told", await b.until("!v._attention"), True)
+        await a.js("v.say('are you there?', { whisper: v.offices.find(o => o.name === 'B').id })")
+        check("A whispers B: B's 📬 says so, there even as the window fades", await b.until(f"(m => m.classList.contains('on') && m.textContent)({cw}.querySelector('button.mail'))"), "📬 1")
+        await b.js(f"{cw}.querySelector('button.mail').click()")
+        check("B clicks it: the line, when it came; and it is read (the 📬 goes)", (await b.until(
+            f"(m => m.classList.contains('on') && (l => !!l && /^\\d/.test(l.dataset.time) && l.textContent === '[A] whispers: are you there?')(m.querySelector('.line')))({cw}.querySelector('.mailbox'))"),
+            await b.until(f"v.unseen.count === 0 && !{cw}.querySelector('button.mail').classList.contains('on')")), (True, True))
+        await b.shot("b_mailbox.png")
+        await b.js(f"{cw}.querySelector('.mailbox .line').click()")
+        check("a click on the line: B's box open, answering there", await b.until(f"(c => c.classList.contains('typing') && !c.querySelector('.mailbox.on') && c.querySelector('select').selectedOptions[0].textContent)({cw})"), "Tell A:")
+        await b.js("delete document.hasFocus; dispatchEvent(new Event('focus'))")
+        check("focused again: looking", await b.until("v._attention"), True)
+
+        print("\nvoice messages (0.22.0): recorded by the box, played from the line")
+        await b.js(f"{cw}.querySelector('button.rec').click()")
+        check("B's 🎙: recording (the fake microphone), how long so far", await b.until(f"(r => r.classList.contains('on') && r.textContent.startsWith('⏺'))({cw}.querySelector('button.rec'))"), True)
+        await asyncio.sleep(1.7)
+        await b.js(f"{cw}.querySelector('button.rec').click()")
+        check("🎙 again: done; it waits over the box, kept by B's visit-client", await b.until(
+            f"(c => (ch => !!ch && !ch.classList.contains('busy') && /^🎙 0:0[12]/.test(ch.textContent) && c.querySelector('button.rec').textContent === '🎙')(c.querySelector('.attach .chip')))({cw})"), True)
+        await b.shot("b_voice.png")
+        await enter(b)
+        check("Enter: whispered to A with it (over their link); A's window shows ▶ and how long", await a.until(
+            f"(l => !!l && l.textContent.startsWith('[B] whispers:') && (p => !!p && /^▶ 0:0[12]$/.test(p.textContent))(l.querySelector('button.play')))({cw}.querySelector('.log').lastChild)"), True)
+        await a.js(f"{cw}.querySelector('.log').lastChild.querySelector('button.play').click()")
+        check("A clicks ▶: it plays, from A's own visit-client (which had it from B's)", await a.until(
+            f"/^■ 0:0\\d \\/ 0:0[12]$/.test({cw}.querySelector('.log').lastChild.querySelector('button.play').textContent)"), True)
+        await b.js(f"{cw}.querySelector('button.gallery').click()")
+        await b.js(f"{cw}.querySelector('.shared button[data-k=voice]').click()")
+        check("B's 🖼, Voice: the voice message in its whispers with A", await b.until(f"(s => s.classList.contains('on') && s.querySelectorAll('.items button.play').length === 1 && s.querySelector('.items').textContent)({cw}.querySelector('.shared'))"), "you: ▶")
+        await b.js(f"{cw}.querySelector('.shared button[data-k=close]').click()")
+        await b.key("Escape", "Escape", 27, True)
+        await b.key("Escape", "Escape", 27, False)
         await a.js("window.cw2 = Visit.chat(v, { fade: 300 })")
         check("a window idle a while fades away", await a.until("cw2.element.classList.contains('idle')"), True)
         await b.js("v.say('wake up')")
         check("and comes back with the next line", await a.until("!cw2.element.classList.contains('idle') && cw2.element.querySelector('.log').lastChild.textContent"), "[B] says: wake up")
         await a.js("cw2.release()")
+        check("each line: when it came, dim before it (the time as this browser writes one)", await a.js(
+            f"(l => l.dataset.time === new Date(Number(l.dataset.at)).toLocaleTimeString([], {{ hour: 'numeric', minute: '2-digit' }}) && getComputedStyle(l, '::before').content !== 'none')({cw}.querySelector('.log').lastChild)"), True)
+        await b.js("v._chatMsg({ type: 'chat', scope: 'lobby', id: 'o-old', key: 'k-old', name: 'Old', text: 'from two days ago', at: Date.now() - 2 * 86400000 }, true)")
+        check("a line from another day: its day over it, and today's over the next", await b.until(
+            f"(c => (d => !!d && [d.previousElementSibling.className, d.previousElementSibling.textContent === new Date(Number(d.dataset.at)).toLocaleDateString([], {{ weekday: 'short', month: 'short', day: 'numeric' }}),"
+            f" (n => !!n && n.previousElementSibling.className === 'day' && n.previousElementSibling.textContent === new Date().toLocaleDateString([], {{ weekday: 'short', month: 'short', day: 'numeric' }}))"
+            f"([...c.querySelectorAll('.log .line[data-at]')].find(x => Number(x.dataset.at) > Number(d.dataset.at)))])"
+            f"([...c.querySelectorAll('.log .line')].find(x => x.textContent.endsWith('from two days ago'))))({cw})"), ["day", True, True])
         await a.shot("a_chat.png")
         await b.shot("b_chat.png")
         check("six lines at once: the sixth not said (5 every 10 s)", await a.js("(r => r[5])(Array.from({ length: 6 }, (_, i) => v.say('n' + i)))"), False)

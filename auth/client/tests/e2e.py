@@ -216,6 +216,19 @@ def main():
             noprobe.terminate()
             noprobe.wait(5)
 
+        # In a container, beside a workroom's server in another: its container's own network (--listen 0.0.0.0).
+        here = socket.gethostbyname(socket.gethostname())   # this container's address on its network
+        check("by default on 127.0.0.1 only: nothing answers on this container's network", call(7403, "/health", None, None, host=here)[0], 0)
+        wide = subprocess.Popen([AUTH, "--listen", "0.0.0.0", "--port", "7406", "--token-file", tfile],
+                                env={**os.environ, "AUTH_DATABASE_URL": AUTH_URL, "AUTH_LOG": "warn"})
+        try:
+            check("--listen 0.0.0.0: on this container's network too, where another container reaches it",
+                  until(lambda: call(7406, "/health", None, None, host=here)[0] == 200), True)
+            check("...its service token still asked there", call(7406, "/v1/check", {"session": "x"}, None, host=here), (401, {"error": "service_token"}))
+        finally:
+            wide.terminate()
+            wide.wait(5)
+
         print("\na session's two ends: unused, and in all")
         short = subprocess.Popen([AUTH, "--port", "7404", "--token-file", tfile, "--idle", "2s", "--max-age", "5s"],
                                  env={**os.environ, "AUTH_DATABASE_URL": AUTH_URL, "AUTH_LOG": "warn"})
@@ -242,10 +255,10 @@ def main():
     sys.exit(1 if failures else 0)
 
 
-def call(port, path, body, token):
-    """(status, JSON) from auth-client on 127.0.0.1, as a workroom's server asks it."""
+def call(port, path, body, token, host="127.0.0.1"):
+    """(status, JSON) from auth-client, as a workroom's server asks it; 0 when nothing answers there."""
     data = body if isinstance(body, bytes) else (json.dumps(body).encode() if body is not None else None)
-    req = urllib.request.Request("http://127.0.0.1:%d%s" % (port, path), data=data, method="POST" if data is not None else "GET")
+    req = urllib.request.Request("http://%s:%d%s" % (host, port, path), data=data, method="POST" if data is not None else "GET")
     if data is not None:
         req.add_header("Content-Type", "application/json")
     if token:

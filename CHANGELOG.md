@@ -9,6 +9,51 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v0.22.0 — 2026-10-28
+
+**auth-client in a container of its own** ([auth/INTEGRATING.md](auth/INTEGRATING.md), step 4). auth-client
+answered on `127.0.0.1` only, so a server in a container could reach it only by sharing its network namespace
+(compose's `network_mode: "service:<your server>"`), and each restart of the server left auth-client in a network
+that was gone: every route refused until auth-client restarted too, and restarting both at once can leave it down.
+Now `AUTH_LISTEN=0.0.0.0` (`--listen`) has it answer on its container's own network, where your server reaches it by
+the service's name, with no port published: either restarts on its own. The default is still `127.0.0.1`.
+
+**The mailbox, voice messages, and whispers left for someone away** (visit/SPEC.md 8.9, 8.12).
+
+- **📬 The mailbox.** A line meant for you (a whisper, a line in your room's chat, an @mention) that comes while
+  nobody is looking at your chat stays unseen until you read it. Your visit-client keeps the mark in its database, so
+  a reload or a restart keeps it. The chat window shows 📬 and how many, even when it has faded; a click lists them,
+  and a click on one answers there. Looking means the page is shown and focused, with a key, a click or the pointer
+  used in the last 2 minutes (`v.attention`, said by the chat window). For a room's own UI: `v.unseen`, `v.read()`,
+  the `unseen` event.
+- **🎙 Voice messages.** Recorded by the box (a minute at most), kept and passed on as a picture is: in a room, a
+  room's chat, or a whisper to someone you are linked with; never through the lobby. A line plays it from ▶. 🖼 has a
+  Voice tab. `v.share(blob)` takes a recording (WebM, Ogg or MP4, at most 2 MB), and the line gives its `secs`.
+- **⏳ Whispers left for someone away.** `/w <name>` for someone not in the lobby (whom you have whispered with, or a
+  guest) is kept by your own visit-client and passed on through the lobby once you are both in it. The lobby still
+  keeps nothing. Text only. The 📬 list shows them, each to take back. `v.awayTargets`, `v.held`, `v.unhold()`.
+
+**When a line came.** Each line in the chat window has its time before it, dim, as WoW's chat timestamps do (the
+time as your browser writes one), and when the log holds more than today, each day's first line has its day over
+it: the chat now keeps lines across reloads and days, and the mailbox brings back old ones.
+
+**Tab in the chat window** ([#15](https://github.com/sarmiena/Basedverse/issues/15); visit/SPEC.md 8.9). With no
+name to finish, Tab moves the box on to the next place a line can go (Say, Tell whoever you last whispered with,
+your room, each linked room, Lobby, and round again; Shift+Tab: back), keeping what is typed. Before, it took the
+focus out of the box. A name over the box still comes first, and a command in the box (`/w …`) says where itself.
+
+### What an integration does
+
+1. Nothing, if auth-client runs on the host's network beside your server, or you keep `network_mode`.
+2. With your server in a container: auth-client as a service of its own on that network, `AUTH_LISTEN=0.0.0.0`,
+   no `ports:`, no `network_mode`; your server asks it at the service's name (`AUTH_HOST` in step 5's sketch).
+3. **visit-client's database: `visit-client migrate`** before starting it (schema 2: the mailbox's marks, whispers
+   left for someone away). A visit-client of this release refuses a database at schema 1 and says so.
+4. Nothing for the chat window: `Visit.chat` does the mailbox, voice messages, whispers left, times and Tab. A page that
+   draws its own chat: `v.unseen` and the `unseen` event, `v.read()`, and `v.attention(on)` while someone looks at it
+   (else every line meant for its user counts as unseen); a voice message is a line's `media` item with `secs`. A page
+   that relied on Tab leaving the chat box gets the box's own Tab.
+
 ## v0.21.1 — 2026-10-28
 
 **Your workroom from another device, and local services relayed** ([auth/INTEGRATING.md](auth/INTEGRATING.md),

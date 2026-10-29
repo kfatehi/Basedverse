@@ -655,8 +655,8 @@ async fn write_media(conn: Connection, id: String, mime: String, bytes: Bytes, v
     }
 }
 
-/// A picture from the other side (8.12): its bytes must be what its id says (their hash) and a picture, at most
-/// MAX_MEDIA.
+/// A picture or a voice message from the other side (8.12): its bytes must be what its id says (their hash), and one
+/// of them, at most its most (media::shared).
 async fn read_media(mut stream: RecvStream, visit: String, core: mpsc::UnboundedSender<Ev>) {
     let read = async {
         let mut n = [0u8];
@@ -674,7 +674,7 @@ async fn read_media(mut stream: RecvStream, visit: String, core: mpsc::Unbounded
         Ok(Err(e)) => return warn!(%visit, "a picture that is not what it should be: {e:#}"),
         Err(_) => return,
     };
-    match crate::media::picture(&bytes, crate::media::MAX_MEDIA) {
+    match crate::media::shared(&bytes) {
         Some((hash, mime)) if hash == id => { let _ = core.send(Ev::LinkMedia { visit, id, mime: mime.to_string(), bytes }); }
         _ => warn!(%visit, "a picture that is not what it was said to be: dropped"),
     }

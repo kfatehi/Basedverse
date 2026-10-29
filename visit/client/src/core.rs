@@ -13,7 +13,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info, trace, warn};
 
 use crate::{
-    db::{self, DbCmd, MediaTo, CHAT_KEPT},
+    db::{self, DbCmd, Held, Loaded, MediaTo, CHAT_KEPT, UNSEEN_KEPT},
     frames::{self, Frame},
     land::{self, Kept, Lands},
     link::{self, LinkCmd, Links, Relays, Role},
@@ -194,6 +194,11 @@ const NEAR_EVERY: Duration = Duration::from_secs(1);
 const SAY_LEN: usize = 200;
 const SAYS: u32 = 5;
 const SAY_WINDOW: Duration = Duration::from_secs(10);
+/// Whispers left for someone away (8.9): at most this many in all, and for one person; passed on one at a time, at
+/// most one every HELD_EVERY.
+const HELD_MAX: usize = 100;
+const HELD_EACH: usize = 20;
+const HELD_EVERY: Duration = Duration::from_millis(2500);
 /// Pictures (8.12) kept in memory too, the last few, while the database takes them.
 const MEDIA_RECENT: usize = 8;
 /// The most points a second taken from a visitor (a click at the middle of its view: 8.3); more are dropped.
@@ -264,6 +269,17 @@ pub struct Core {
     chat: VecDeque<Value>,
     /// The database (8.12): what this office keeps, asked of its task.
     db: mpsc::UnboundedSender<DbCmd>,
+    /// The lines this office's user has not seen yet (8.9: the mailbox): the newest UNSEEN_KEPT, and how many there are
+    /// in each conversation (all of them are marked in the database); and whether someone is looking at its page's chat
+    /// now (its page says: `attention`), when a line meant for them is seen as it comes.
+    unseen: VecDeque<Value>,
+    unseen_by: BTreeMap<String, u64>,
+    attention: bool,
+    /// Whispers left for someone away (8.9), oldest first, kept in the database too: each passed on through the lobby
+    /// once they and this office are both in it, one at a time (not before `held_next`).
+    held: Vec<Held>,
+    held_next: Instant,
+    held_seq: u64,
     /// Pictures a line named that this office does not have (or had not, when asked): when, from which visit, and
     /// whether that visit was asked for it yet; and who waits for each (the page, a link).
     media_asked: HashMap<String, (Instant, String, bool)>,
@@ -298,7 +314,7 @@ pub struct Core {
 
 impl Core {
     pub fn new(lobby: mpsc::UnboundedSender<LobbyOut>, me: mpsc::UnboundedSender<Ev>, relays: Option<Relays>, max_visitors: u8, idle_exit: u64,
-               saved: Saved, fresh: bool, state_file: Option<PathBuf>, lands: Lands, db: mpsc::UnboundedSender<DbCmd>, chat: Vec<Value>) -> Core {
+               saved: Saved, fresh: bool, state_file: Option<PathBuf>, lands: Lands, db: mpsc::UnboundedSender<DbCmd>, loaded: Loaded) -> Core {
         let key = saved.key.public().to_string();
         let core = Core {
             lobby,
@@ -330,8 +346,14 @@ impl Core {
             phone: false,
             voice: VoiceRoom::default(),
             says: (Instant::now(), 0),
-            chat: chat.into_iter().collect(),
+            chat: loaded.chat.into_iter().collect(),
             db,
+            unseen: loaded.unseen.into_iter().collect(),
+            unseen_by: loaded.unseen_by,
+            attention: false,
+            held: loaded.held,
+            held_next: Instant::now(),
+            held_seq: 0,
             media_asked: HashMap::new(),
             media_waiting: HashMap::new(),
             media_recent: VecDeque::new(),
@@ -377,6 +399,7 @@ impl Core {
                         self.set_world(false);
                     }
                     self.watch_guests();
+                    self.deliver_held();
                     if self.idle_exit > 0 && self.page.is_none() && self.page_gone.elapsed() >= Duration::from_secs(self.idle_exit) {
                         info!("no page for {} s: exiting", self.idle_exit);
                         break;
@@ -407,6 +430,7 @@ impl Core {
                 if self.page.as_ref().map(|p| p.id) == Some(id) {
                     self.page = None;
                     self.page_gone = Instant::now();
+                    self.attention = false;   // nobody looking: what comes is in the mailbox
                     self.tell_hosted(json!({ "paused": true }));
                     self.set_hosting(None);   // no page, no room to show: not to be visited until one hosts again
                     self.set_phone(false);    // nor a phone to answer: the other side's calls end
@@ -512,6 +536,7 @@ impl Core {
             let _ = old.text.send(PageOut::Close(4409, "replaced"));
         }
         self.page = Some(Page { id, text, frames });
+        self.attention = false;   // until it says someone is looking
         self.world_ask = self.world.then(Instant::now);   // the world goes on only if this page asks for it too
         let visits: Vec<Value> = self.visits.values().filter(|v| v.up).map(started).collect();
         self.to_page(json!({
@@ -527,6 +552,12 @@ impl Core {
         }
         if !self.chat.is_empty() {   // the chat this office's user had (8.9), lines that came while no page was here too
             self.to_page(json!({ "type": "chat_log", "lines": self.chat }));
+        }
+        if !self.unseen_by.is_empty() {   // and those of them meant for them that they have not seen (the mailbox)
+            self.tell_unseen();
+        }
+        if !self.held.is_empty() {   // whispers they left for someone away, still here
+            self.tell_held();
         }
         if let Some(k) = self.room_voice.clone().filter(|k| *k != self.key) {   // a room voice its user is in: who is in it, again
             self.to_peer(&k, json!({ "voice_join": true }));
@@ -803,12 +834,20 @@ impl Core {
                 let lobby = to.and_then(Value::as_str) == Some("lobby");
                 let room = to.and_then(Value::as_str) == Some("room");
                 let key = to.and_then(|t| t.get("key")).and_then(Value::as_str).filter(|k| state::key_ok(k)).map(str::to_string);
-                let whisper = to.and_then(|t| t.get("whisper")).and_then(Value::as_str).filter(|id| !id.is_empty() && id.len() <= 40).map(str::to_string);
+                // { whisper }: an office's id, or its key (0.22.0): by it, one in the lobby that takes whispers, else
+                // someone away, for whom this office keeps it (text only) until they and it are both in the lobby.
+                let w = to.and_then(|t| t.get("whisper")).and_then(Value::as_str);
+                let away = w.filter(|k| state::key_ok(k) && self.whisper_id(k).is_none()).map(str::to_string);
+                let whisper = w.and_then(|w| if state::key_ok(w) { self.whisper_id(w) } else { Some(w.to_string()) }).filter(|id| !id.is_empty() && id.len() <= 40);
                 if key.as_ref().is_some_and(|k| self.banned_by.get(k).is_some_and(|b| b.2)) {
                     return self.page_error("banned", "that room keeps you out of its chat", Some("say"));
                 }
-                if to.is_some() && !lobby && !room && key.is_none() && whisper.is_none() {
-                    return self.page_error("bad_message", "to is \"here\", \"room\", \"lobby\", { key } of an office linked with this one, or { whisper } an office's id", Some("say"));
+                if to.is_some() && !lobby && !room && key.is_none() && whisper.is_none() && away.is_none() {
+                    return self.page_error("bad_message", "to is \"here\", \"room\", \"lobby\", { key } of an office linked with this one, or { whisper } an office's id or key", Some("say"));
+                }
+                if let Some(k) = away {
+                    let name = to.and_then(|t| t.get("name")).and_then(Value::as_str).map(state::clip_name).map(|n| n.trim().to_string()).unwrap_or_default();
+                    return self.hold(k, name, text, shares);
                 }
                 if lobby && shares {
                     return self.page_error("not_supported", "the lobby carries text only: pictures and links go to rooms, and to those you are linked with", Some("say"));
@@ -873,6 +912,43 @@ impl Core {
                 }
                 self.keep_chat(mine);
             }
+            // Whether someone is looking at this page's chat now (8.9): a line meant for its user that comes meanwhile is
+            // seen as it comes; else it waits in the mailbox until they have read it (`read`).
+            "attention" => self.attention = m.get("on") == Some(&json!(true)),
+            // This office's user has read what the mailbox has of a conversation (none: of every one).
+            "read" => {
+                let conversation = match m.get("conversation") {
+                    None | Some(Value::Null) => None,
+                    Some(c) => match c.as_str().filter(|c| conversation_ok(c)) {
+                        Some(c) => Some(c.to_string()),
+                        None => return self.page_error("bad_message", "conversation is room:<key>, person:<key> or lobby (or none: all of them)", Some("read")),
+                    },
+                };
+                let had = self.unseen_by.len();
+                match &conversation {
+                    Some(c) => {
+                        self.unseen_by.remove(c);
+                        self.unseen.retain(|l| l.get("conversation").and_then(Value::as_str) != Some(c.as_str()));
+                    }
+                    None => {
+                        self.unseen_by.clear();
+                        self.unseen.clear();
+                    }
+                }
+                if self.unseen_by.len() != had {
+                    let _ = self.db.send(DbCmd::Seen { conversation });
+                }
+                self.tell_unseen();   // (the mailbox as it is now, read or not)
+            }
+            // A whisper left for someone away, taken back before it went.
+            "unhold" => {
+                let id = m.get("id").and_then(Value::as_str).unwrap_or("");
+                if let Some(i) = self.held.iter().position(|h| h.id == id) {
+                    let h = self.held.remove(i);
+                    let _ = self.db.send(DbCmd::Unhold(h.id));
+                    self.tell_held();
+                }
+            }
             // The name this office's user goes by (8.9; null: none, this office's own): told to every office linked
             // with it, and to each that links.
             "user" => {
@@ -915,13 +991,17 @@ impl Core {
             // The pictures, or the links, shared in a conversation (8.12), newest first.
             "shared" => {
                 let req = m.get("req").cloned().unwrap_or(Value::Null);
-                let Some(conversation) = m.get("conversation").and_then(Value::as_str).filter(|c| c.len() <= 120 && (c.starts_with("room:") || c.starts_with("person:") || *c == "lobby")) else {
+                let Some(conversation) = m.get("conversation").and_then(Value::as_str).filter(|c| conversation_ok(c)) else {
                     return self.page_error("bad_message", "conversation is room:<key>, person:<key> or lobby", Some("shared"));
                 };
-                let links = m.get("kind").and_then(Value::as_str) == Some("links");
+                let kind = match m.get("kind").and_then(Value::as_str) {
+                    Some("links") => "links",
+                    Some("voice") => "voice",
+                    _ => "media",
+                };
                 let before = m.get("before").and_then(Value::as_i64).unwrap_or(i64::MAX);
                 let limit = m.get("limit").and_then(Value::as_i64).unwrap_or(60).clamp(1, 200);
-                let _ = self.db.send(DbCmd::Shared { req, conversation: conversation.to_string(), links, before, limit });
+                let _ = self.db.send(DbCmd::Shared { req, conversation: conversation.to_string(), kind, before, limit });
             }
             // Where everyone in this office's room is (8.7), in metres, as its page has them: its own user (null:
             // elsewhere), its phone, and each visitor in it ([channel, x, y, z]). Who hears whom here goes by it.
@@ -1115,14 +1195,15 @@ impl Core {
 
     /// A delta of this office's scene for one of its visitors, or an edit of it.
     fn page_frame(&mut self, data: &[u8]) {
-        if let Some((slot, bytes)) = frames::media_from_page(data) {   // a picture to share (8.12): kept, and its id told
-            return match media::picture(&bytes, media::MAX_MEDIA) {
+        if let Some((slot, bytes)) = frames::media_from_page(data) {   // a picture or a voice message to share (8.12): kept, and its id told
+            return match media::shared(&bytes) {
                 Some((id, mime)) => {
                     self.media_keep(&id, mime, &bytes);
                     self.to_page(json!({ "type": "media_ready", "slot": slot, "id": id, "mime": mime, "size": bytes.len() }));
                 }
                 None => self.to_page(json!({ "type": "error", "code": "bad_media", "ref": "media_put", "slot": slot,
-                                              "message": format!("a picture is a PNG, JPEG, WebP or GIF of at most {} MB", media::MAX_MEDIA >> 20) })),
+                                              "message": format!("a picture is a PNG, JPEG, WebP or GIF of at most {} MB; a voice message, WebM, Ogg or MP4 of at most {} MB",
+                                                                 media::MAX_MEDIA >> 20, media::MAX_VOICE >> 20) })),
             };
         }
         if let Some(gz) = frames::land_from_page(data) {   // this room's landscape: kept, and offered by its hash to every visitor
@@ -1181,7 +1262,8 @@ impl Core {
     }
 
     /// A line of chat this office's user had, or said, with when (ms since 1970): kept in the database (8.12), and
-    /// the last CHAT_KEPT here, for a page that comes back (8.9).
+    /// the last CHAT_KEPT here, for a page that comes back (8.9). One meant for them that comes while nobody is looking
+    /// at its page's chat is in the mailbox until they have seen it.
     fn keep_chat(&mut self, mut line: Value) {
         line["at"] = json!(db::now());
         if line.get("conversation").is_none() {
@@ -1191,7 +1273,96 @@ impl Core {
             self.chat.pop_front();
         }
         self.chat.push_back(line.clone());
-        let _ = self.db.send(DbCmd::Line(line));
+        let unseen = !(self.page.is_some() && self.attention) && self.for_me(&line);
+        if unseen {
+            if self.unseen.len() >= UNSEEN_KEPT {
+                self.unseen.pop_front();
+            }
+            self.unseen.push_back(line.clone());
+            *self.unseen_by.entry(line["conversation"].as_str().unwrap_or("").to_string()).or_default() += 1;
+        }
+        let _ = self.db.send(DbCmd::Line { line, unseen });
+        if unseen {
+            self.tell_unseen();
+        }
+    }
+
+    /// Whether a line is meant for this office's user (8.9: what the mailbox counts): whispered to them, said in their
+    /// room's chat, or one that mentions them; never their own.
+    fn for_me(&self, l: &Value) -> bool {
+        let scope = l.get("scope").and_then(Value::as_str);
+        if l.get("mine") == Some(&json!(true)) || (scope == Some("lobby") && l.get("id").is_some_and(|id| !id.is_null() && *id == self.office["id"])) {
+            return false;
+        }
+        scope == Some("whisper")
+            || (scope == Some("sim") && l.get("conversation").and_then(Value::as_str) == Some(format!("room:{}", self.key).as_str()))
+            || l.get("text").and_then(Value::as_str).is_some_and(|t| mentions(t, &[self.user_name.as_deref(), self.office.get("name").and_then(Value::as_str)]))
+    }
+
+    /// The mailbox (8.9), to the page: how many lines its user has not seen, in all and in each conversation, and the
+    /// newest of them.
+    fn tell_unseen(&mut self) {
+        let count: u64 = self.unseen_by.values().sum();
+        let by: Vec<Value> = self.unseen_by.iter().map(|(c, n)| json!({ "conversation": c, "count": n })).collect();
+        let lines: Vec<Value> = self.unseen.iter().cloned().collect();
+        self.to_page(json!({ "type": "unseen", "count": count, "conversations": by, "lines": lines }));
+    }
+
+    // ---------- whispers left for someone away (8.9) ----------
+
+    /// The id of the office in the lobby with this key, if it takes whispers.
+    fn whisper_id(&self, key: &str) -> Option<String> {
+        self.lobby_view.as_ref()?.get("offices")?.as_array()?.iter()
+            .find(|o| o.get("key").and_then(Value::as_str) == Some(key) && o.get("whisper") == Some(&json!(true)))
+            .and_then(|o| o.get("id")).and_then(Value::as_str).map(str::to_string)
+    }
+
+    /// A whisper for someone not in the lobby (their key), kept here, and in the database, until they and this office
+    /// are both in it: text only (pictures, voice messages and links go over a link).
+    fn hold(&mut self, key: String, name: String, text: String, shares: bool) {
+        if shares {
+            return self.page_error("no_link", "pictures, voice messages and links go only to someone you are linked with: a whisper kept for someone away is text only", Some("say"));
+        }
+        if self.held.len() >= HELD_MAX || self.held.iter().filter(|h| h.key == key).count() >= HELD_EACH {
+            return self.page_error("too_many", &format!("at most {HELD_EACH} whispers kept for one person, {HELD_MAX} in all: they go once you are both in the lobby"), Some("say"));
+        }
+        if !counted(&mut self.says) {
+            return self.page_error("rate_limited", &format!("at most {SAYS} lines every {} s", SAY_WINDOW.as_secs()), Some("say"));
+        }
+        let at = db::now();
+        self.held_seq += 1;
+        let h = Held { id: format!("{at}-{}", self.held_seq), key: key.clone(), name: name.clone(), text: text.clone(), at };
+        let _ = self.db.send(DbCmd::Hold(h.clone()));
+        self.held.push(h);
+        let mine = json!({ "type": "chat", "scope": "whisper", "mine": true, "held": true, "key": self.key, "name": self.my_name(), "text": text,
+                           "to": { "id": null, "key": key, "name": name }, "conversation": format!("person:{key}") });
+        self.keep_chat(mine);
+        self.tell_held();
+    }
+
+    /// The oldest whisper left for someone now in the lobby, passed on through it, if this office may say a line now
+    /// (they count with its user's own): one at a time, every HELD_EVERY at most. Its page hears it went.
+    fn deliver_held(&mut self) {
+        if self.held.is_empty() || !(self.online && self.lobby_chat) || Instant::now() < self.held_next {
+            return;
+        }
+        let Some((i, id)) = self.held.iter().enumerate().find_map(|(i, h)| self.whisper_id(&h.key).map(|id| (i, id))) else { return };
+        if self.says.0.elapsed() < SAY_WINDOW && self.says.1 >= SAYS {
+            return;   // its user's own lines first: this one in a moment
+        }
+        counted(&mut self.says);
+        let h = self.held.remove(i);
+        self.to_lobby(json!({ "type": "whisper", "to": id, "text": h.text }));
+        let _ = self.db.send(DbCmd::Unhold(h.id.clone()));
+        self.held_next = Instant::now() + HELD_EVERY;
+        self.to_page(json!({ "type": "held_sent", "id": h.id, "key": h.key, "name": h.name, "text": h.text, "at": h.at }));
+        self.tell_held();
+    }
+
+    /// The whispers left for someone away, to the page.
+    fn tell_held(&mut self) {
+        let held: Vec<Value> = self.held.iter().map(Held::json).collect();
+        self.to_page(json!({ "type": "held", "held": held }));
     }
 
     /// The conversation a line is in (8.12): a room's ("room:<its owner's key>": said in it, or in its chat), a
@@ -1903,6 +2074,7 @@ impl Core {
                 self.lobby_view = Some(m.clone());
                 self.to_page(m);
                 self.watch_guests();
+                self.deliver_held();   // someone a whisper was left for, in it now
             }
             // This office's own knocks to watch, and what became of them: never the page's.
             "knock_sent" if m.get("watch").and_then(Value::as_bool) == Some(true) => {
@@ -2731,6 +2903,27 @@ fn said_from(v: &Value) -> Option<Value> {
 }
 
 /// One more in a window of SAYS a SAY_WINDOW: true if it may go.
+/// Whether a line's text mentions one of these names (8.9, as visit.js has it): @ and the name, as a word of its own
+/// (after the start, a space, or an opening bracket or quote; before anything but a letter, a digit or _), in any case.
+fn mentions(text: &str, names: &[Option<&str>]) -> bool {
+    if !text.contains('@') {
+        return false;
+    }
+    let t: Vec<char> = text.to_lowercase().chars().collect();
+    names.iter().flatten().filter(|n| !n.is_empty()).any(|n| {
+        let n: Vec<char> = n.to_lowercase().chars().collect();
+        (0..t.len()).any(|i| {
+            t[i] == '@' && (i == 0 || t[i - 1].is_whitespace() || "([{\"'".contains(t[i - 1])) && t[i + 1..].starts_with(&n)
+                && t.get(i + 1 + n.len()).is_none_or(|c| !(c.is_alphanumeric() || *c == '_'))
+        })
+    })
+}
+
+/// A conversation's name (8.12): a room's (room:<its owner's key>), a person's (person:<their key>), or the lobby's.
+fn conversation_ok(c: &str) -> bool {
+    c.len() <= 120 && (c.starts_with("room:") || c.starts_with("person:") || c == "lobby")
+}
+
 fn counted(w: &mut (Instant, u32)) -> bool {
     if w.0.elapsed() >= SAY_WINDOW {
         *w = (Instant::now(), 0);
@@ -2835,6 +3028,14 @@ mod tests {
     fn revisions_are_digits() {
         assert!(revision("128") && revision("186"));
         assert!(!revision("r128") && !revision("") && !revision("12345") && !revision("1.2"));
+    }
+
+    #[test]
+    fn mentions_as_visit_js_has_them() {
+        let me = [Some("Ann"), Some("Gooshy's room")];
+        assert!(mentions("hey @ann!", &me) && mentions("@Ann", &me) && mentions("(@ANN) look", &me) && mentions("for @gooshy's room, all", &me));
+        assert!(!mentions("hey @Anna", &me) && !mentions("mail@ann.test", &me) && !mentions("@ann_x", &me) && !mentions("Ann, hi", &me));
+        assert!(!mentions("@ann", &[None, Some("")]));
     }
 
     #[test]

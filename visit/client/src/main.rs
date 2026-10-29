@@ -189,14 +189,14 @@ async fn run() -> ExitCode {
     let (mut saved, fresh) = state::Saved::load(a.state_file.as_deref());
     // The database, at the schema this visit-client needs (else it says what to run); bans an older state file
     // kept, moved into it.
-    let (client, loaded) = match db::open(&database, &saved.bans).await {
+    let (client, mut loaded) = match db::open(&database, &saved.bans).await {
         Ok(x) => x,
         Err(e) => {
             eprintln!("visit-client: {e:#}");
             return ExitCode::from(5);   // (4: the lobby refused it)
         }
     };
-    saved.bans = loaded.bans;
+    saved.bans = std::mem::take(&mut loaded.bans);
     let (db_tx, db_rx) = mpsc::unbounded_channel();
     tokio::spawn(db::run(database, client, db_rx, core_tx.clone()));
     let away = saved.away;
@@ -227,7 +227,7 @@ async fn run() -> ExitCode {
     println!("{}", json!({ "ready": true, "port": a.port, "version": VERSION, "proto": page::PROTO }));
     let cache = a.cache_dir.clone().or_else(|| a.state_file.as_deref().map(|f| f.parent().unwrap_or(std::path::Path::new(".")).join("landscapes")));
     let lands = land::Lands::open(cache);
-    let code = core::Core::new(lobby_tx, core_tx, relays, a.max_visitors, a.idle_exit, saved, fresh, a.state_file.clone(), lands, db_tx, loaded.chat).run(core_rx).await;
+    let code = core::Core::new(lobby_tx, core_tx, relays, a.max_visitors, a.idle_exit, saved, fresh, a.state_file.clone(), lands, db_tx, loaded).run(core_rx).await;
     ExitCode::from(code as u8)
 }
 

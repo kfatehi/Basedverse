@@ -1,7 +1,8 @@
 //! auth-client (../SPEC.md): a workroom's sign-in. It keeps the owner's account (made in a terminal, never in a
 //! browser), checks passwords, makes and checks sessions and API keys, and hands visit-client's port and token to a
-//! signed-in session. It listens on 127.0.0.1 only, and only the workroom's server talks to it, with its service
-//! token. Its data is in Visit's own Postgres, in a schema and as a role of its own.
+//! signed-in session. It listens on 127.0.0.1 (in a container, on its container's own network: --listen), and only
+//! the workroom's server talks to it, with its service token. Its data is in Visit's own Postgres, in a schema and
+//! as a role of its own.
 mod api;
 mod cli;
 mod db;
@@ -17,7 +18,7 @@ use tracing::error;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Parser)]
-#[command(version, about = "A workroom's sign-in: the owner's account, sessions and API keys, for its server on 127.0.0.1 (auth/SPEC.md)",
+#[command(version, about = "A workroom's sign-in: the owner's account, sessions and API keys, for its server (auth/SPEC.md)",
           args_conflicts_with_subcommands = true)]
 struct Args {
     #[command(subcommand)]
@@ -25,9 +26,13 @@ struct Args {
     /// Its database: Visit's own, as auth-client's role: postgres://auth:password@host:port/database.
     #[arg(long, env = "AUTH_DATABASE_URL", hide_env_values = true, global = true)]
     database: Option<String>,
-    /// The port on 127.0.0.1 it answers on.
+    /// The port it answers on.
     #[arg(long, env = "AUTH_PORT", default_value_t = 7403)]
     port: u16,
+    /// The address it answers on: 127.0.0.1, or, in a container, 0.0.0.0: its container's own network, where a
+    /// workroom's server in another container reaches it by name (its port never published).
+    #[arg(long, env = "AUTH_LISTEN", default_value = "127.0.0.1")]
+    listen: std::net::IpAddr,
     /// A file holding the service token the workroom's server sends (at least 32 characters, new each run; the
     /// launcher writes it, readable by the user only).
     #[arg(long, env = "AUTH_TOKEN_FILE")]
@@ -191,8 +196,8 @@ async fn serve(a: Args, url: String) -> ExitCode {
             return ExitCode::from(5);
         }
     };
-    let cfg = api::Config { database: url, port: a.port, token, idle: a.idle, max_age: a.max_age, visit: a.visit_token_file.map(|f| (a.visit_port, f)),
-                            visit_probe: a.visit_probe };
+    let cfg = api::Config { database: url, listen: a.listen, port: a.port, token, idle: a.idle, max_age: a.max_age,
+                            visit: a.visit_token_file.map(|f| (a.visit_port, f)), visit_probe: a.visit_probe };
     match api::serve(cfg, client).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

@@ -13,7 +13,7 @@
 // visitor's page walks at once and the host corrects it), and a host renders and encodes nothing for anyone.
 "use strict";
 (function () {
-  const VERSION = "0.21.1", PROTO = "basedverse-visit-local/2";
+  const VERSION = "0.22.0", PROTO = "basedverse-visit-local/2";
   const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, LOOK = 0.0025;
   const POINT_MS = 200, AIM_MS = 125;   // a visitor's points, at most one this often; what it aims at, looked for this often
   // A visitor's up and down (SPEC 8.2: its input's `up`), as WoW flies: what they do is the room's (its move).
@@ -50,6 +50,7 @@
   // data (cleanScene). The visitor walks at once, predicted here, and the host's answer corrects it.
   const KEY = 1, EDIT = 2, AVATAR = 4, AUDIO = 8, RELAY = 16, LAND = 32, POSSESSION = 64, MEDIA = 128;   // frames' flags: bit 0 a key delta; bit 1 a scene edit, bit 2 this office's avatar (page to visit-client); bit 3 voice; bit 5 this room's landscape (page to visit-client); bit 6 one of its possessions, its slot the channel (8.11); bit 7 a picture shared in chat (8.12) (SPEC 5.4)
   const MEDIA_MAX = 8 << 20, MEDIA_KINDS = ["image/png", "image/jpeg", "image/webp", "image/gif"];   // a picture shared (8.12): at most 8 MB, of these kinds
+  const VOICE_MAX = 2 << 20, VOICE_SECS = 60, VOICE_KINDS = ["audio/webm", "audio/ogg", "audio/mp4"];   // a voice message (0.22.0): at most 2 MB, a minute, of these kinds
   // A landscape (SPEC 8.10) goes to visit-client this long after what is static last changed: once, for a room still
   // loading.
   const LAND_QUIET = 1000;
@@ -70,6 +71,9 @@
   const CHAT_LEN = 200, CHATS = 5, CHAT_WINDOW = 10000, chatShows = text => Math.min(12000, 4000 + 70 * text.length);
   // The chat window (Visit.chat) keeps the last CHAT_LOG lines, and fades CHAT_FADE ms after the last one.
   const CHAT_LOG = 100, CHAT_FADE = 20000;
+  // Someone is looking at the chat window while its page is shown and focused, and they used a key, a click or the
+  // pointer this recently (ms): what comes meanwhile is seen, not in the mailbox (8.9).
+  const LOOKING = 120000, STIRS = ["pointerdown", "pointermove", "keydown", "wheel", "touchstart"];
   // The microphone's side: 20 ms at a time, to the page (an AudioWorklet, from a blob: as the ticker's Worker is).
   const MIC_WORKLET = `registerProcessor("visit-mic", class extends AudioWorkletProcessor {
     constructor() { super(); this.b = new Float32Array(${VOICE_FRAME}); this.n = 0; }
@@ -234,7 +238,10 @@
   const bansFrom = l => (Array.isArray(l) ? l : []).filter(b => isObj(b) && typeof b.key === "string").map(b => ({ key: b.key, name: String(b.name || ""), voice: b.voice === true, chat: b.chat === true }));
   // A line's pictures and links (8.12), as the visit-client gives them: [{ id, mime, size }], [{ url, title, description,
   // site, image }].
-  const picturesFrom = l => (Array.isArray(l) ? l : []).filter(p => isObj(p) && /^[0-9a-f]{64}$/.test(p.id)).slice(0, 4).map(p => ({ id: p.id, mime: String(p.mime || ""), size: Number(p.size) || 0 }));
+  // A line's pictures, and its voice message (`secs`: how long, as its sender says).
+  const picturesFrom = l => (Array.isArray(l) ? l : []).filter(p => isObj(p) && /^[0-9a-f]{64}$/.test(p.id)).slice(0, 4).map(p => ({ id: p.id, mime: String(p.mime || ""), size: Number(p.size) || 0,
+    ...(VOICE_KINDS.includes(String(p.mime)) ? { secs: Math.round(Math.min(VOICE_SECS, Math.max(0, Number(p.secs) || 0)) * 10) / 10 } : {}) }));
+  const isVoice = p => VOICE_KINDS.includes(p.mime);
   const linksFrom = l => (Array.isArray(l) ? l : []).filter(x => isObj(x) && /^https?:\/\/\S+$/.test(String(x.url || ""))).slice(0, 2).map(x => ({ url: String(x.url),
     title: String(x.title || ""), description: String(x.description || ""), site: String(x.site || ""), image: picturesFrom(isObj(x.image) ? [x.image] : [])[0] || null }));
   // A picture made small enough to share (8.12): at most 4096 px a side and MEDIA_MAX, as WebP (else JPEG).
@@ -697,6 +704,9 @@
       this.chatLog = [];       // the last CHAT_LOG lines of chat, of every scope (8.9), as "chat" gave them, with `at` (ms);
                                //   `old`, from before this page (kept by the visit-client: a reload keeps the chat)
       this.lobbyChat = false;  // the lobby relays chat (8.9): say(text, "lobby") goes to everyone in it
+      this.unseen = { count: 0, conversations: [], lines: [] };   // the mailbox (8.9): lines meant for you, not read yet
+      this.held = [];          // whispers you left for someone away, still with your visit-client: [{ id, key, name, text, at }]
+      this._attention = false; // someone looking at this page's chat (Visit.chat says), as last told
       this._kept = new Map();     // guests' plots kept while they are away (8.10): key -> { key, name, plot, unit, json, asked, built }
       this._landText = null;      // this room's landscape, as last given to visit-client
       this._said = [];            // when you last said lines (CHATS every CHAT_WINDOW)
@@ -791,6 +801,8 @@
       this.status = m.status; this.maxVisitors = m.max_visitors;
       this.key = typeof m.key === "string" ? m.key : null;
       this.lobbyChat = m.lobby_chat === true;
+      this.unseen = { count: 0, conversations: [], lines: [] }; this.held = [];   // (said again after, if any)
+      if (this._attention) this._send({ type: "attention", on: true });
       this._guests(m);
       this.layout = Array.isArray(m.layout) ? m.layout : [];
       this.voiceRange = Number(m.voice_range) > 0 ? Number(m.voice_range) : VOICE_RANGE;
@@ -868,6 +880,16 @@
         case "call": this._callIn(m); break;
         case "layout": this.layout = Array.isArray(m.layout) ? m.layout : []; break;
         case "chat": this._chatMsg(m, false); break;
+        case "unseen": {   // the mailbox (8.9): lines meant for you that came while nobody looked, until read
+          const lines = [];
+          for (const l of Array.isArray(m.lines) ? m.lines : []) { const c = isObj(l) && this._chatFrom(l, true); if (c) lines.push(this._lineOf(c, true)); }
+          this.unseen = { count: Number(m.count) || 0, lines,
+            conversations: (Array.isArray(m.conversations) ? m.conversations : []).filter(c => isObj(c) && typeof c.conversation === "string").map(c => ({ conversation: c.conversation, count: Number(c.count) || 0 })) };
+          this._emit("unseen", this.unseen); this._changed(); break;
+        }
+        case "held": this.held = (Array.isArray(m.held) ? m.held : []).filter(h => isObj(h) && typeof h.id === "string")
+          .map(h => ({ id: h.id, key: String(h.key || ""), name: String(h.name || ""), text: String(h.text || ""), at: Number(h.at) || 0 })); this._emit("held", this.held); this._changed(); break;
+        case "held_sent": this._emit("held_sent", { id: String(m.id || ""), key: String(m.key || ""), name: String(m.name || ""), text: String(m.text || ""), at: Number(m.at) || 0 }); break;
         case "media_ready": {   // a picture shared, kept by the visit-client (8.12): its id
           const put = this._puts.get(m.slot);
           if (put) { this._puts.delete(m.slot); clearTimeout(put.t); put.resolve({ id: String(m.id), mime: String(m.mime), size: Number(m.size) || 0 }); }
@@ -1679,7 +1701,18 @@
       const target = to === "room" ? { key: this.key || "", name: this.office ? this.office.name : "" }
         : scope === "sim" ? this.chatTargets.find(o => o.key === String(isObj(to) ? to.key : to))
         : scope === "whisper" ? this.whisperTargets.find(o => o.id === String(to.whisper) || (o.key && o.key === String(to.whisper))) : null;
+      // Someone away (not in the lobby), by their key: your visit-client keeps it for them (text only).
+      const away = scope === "whisper" && !target && /^[0-9a-f]{64}$/.test(String(to.whisper)) ? { key: String(to.whisper), name: String(to.name || this._nameOf(String(to.whisper)) || "") } : null;
       const pics = picturesFrom(media), cards = linksFrom(links), shares = pics.length + cards.length > 0;
+      if (away) {
+        this._said = this._said.filter(at => now - at < CHAT_WINDOW);
+        if (!t || shares || this._said.length >= CHATS || !this._ws || this._ws.readyState !== 1) return false;
+        this._said.push(now);
+        this._send({ type: "say", text: t, to: { whisper: away.key, name: away.name } });
+        this._chatIn({ key: this.key || "", name: this._userName || (this.office ? this.office.name : ""), text: t, mine: true, owner: false, id: null, scope, held: true,
+          to: { key: away.key, name: away.name }, conversation: "person:" + away.key });
+        return true;
+      }
       const att = { ...(pics.length ? { media: pics } : {}), ...(cards.length ? { links: cards } : {}) };
       this._said = this._said.filter(at => now - at < CHAT_WINDOW);
       if ((!t && !shares) || this._said.length >= CHATS || !this._ws || this._ws.readyState !== 1) return false;
@@ -1715,11 +1748,14 @@
 
     // ---------- pictures and links in chat (8.12) ----------
     // Share a picture (a Blob or File, as pasted or dropped: PNG, JPEG, WebP or GIF; a bigger one, or another kind, is
-    // made smaller as WebP first): kept by your visit-client, in its database. Resolves to { id, mime, size }, for
-    // say(text, to, { media: [it] }).
+    // made smaller as WebP first), or a voice message (0.22.0: a recording, WebM, Ogg or MP4, at most a minute and
+    // 2 MB): kept by your visit-client, in its database. Resolves to { id, mime, size }, for say(text, to, { media: [it] })
+    // (a voice message's with `secs`, how long it is: at most one a line).
     async share(blob) {
-      if (!blob || typeof blob.arrayBuffer !== "function") throw new Error("visit.share: a picture (a Blob or a File)");
-      const b = blob.size <= MEDIA_MAX && MEDIA_KINDS.includes(blob.type) ? blob : await smaller(blob);
+      if (!blob || typeof blob.arrayBuffer !== "function") throw new Error("visit.share: a picture or a recording (a Blob or a File)");
+      const voice = /^audio\//.test(blob.type);
+      if (voice && blob.size > VOICE_MAX) throw new Error("visit.share: a voice message is at most a minute (2 MB)");
+      const b = voice || (blob.size <= MEDIA_MAX && MEDIA_KINDS.includes(blob.type)) ? blob : await smaller(blob);
       const bytes = new Uint8Array(await b.arrayBuffer());
       if (!this._ws || this._ws.readyState !== 1) throw new Error("visit.share: not connected to visit-client");
       const slot = this._slot = (this._slot % 65535) + 1;
@@ -1771,11 +1807,11 @@
       for (const l of Array.isArray(m.lines) ? m.lines : []) { const c = isObj(l) && this._chatFrom(l, true); if (c && this._hasContent(c)) lines.push(this._lineOf(c, true)); }
       return { lines, more: !!m.more };
     }
-    // The pictures (kind "media") or the links ("links") shared in a conversation ("room:<key>", "person:<key>",
-    // "lobby"; a line's `conversation`), newest first: { items, more }: a picture's { id, mime, size, at, key, name,
-    // mine }, a link's { url, title, description, site, image, at, key, name, mine }.
+    // The pictures (kind "media"), voice messages ("voice") or links ("links") shared in a conversation ("room:<key>",
+    // "person:<key>", "lobby"; a line's `conversation`), newest first: { items, more }: a picture's or a voice
+    // message's { id, mime, size, at, key, name, mine }, a link's { url, title, description, site, image, at, key, name, mine }.
     async shared(conversation, kind = "media", { before, limit } = {}) {
-      const m = await this._ask("shared", { conversation: String(conversation), kind: kind === "links" ? "links" : "media", ...(Number(before) > 0 ? { before: Number(before) } : {}), ...(limit ? { limit: Number(limit) } : {}) });
+      const m = await this._ask("shared", { conversation: String(conversation), kind: ["links", "voice"].includes(kind) ? kind : "media", ...(Number(before) > 0 ? { before: Number(before) } : {}), ...(limit ? { limit: Number(limit) } : {}) });
       return { items: Array.isArray(m.items) ? m.items.filter(isObj) : [], more: !!m.more };
     }
     _ask(type, body, ms = 15000) {
@@ -1792,6 +1828,29 @@
       if (this.state !== "online") return [];
       return this.offices.filter(o => o.whisper && !(this.office && o.id === this.office.id)).map(o => ({ id: o.id, key: o.key, name: o.name }));
     }
+    // Whom you may leave a whisper for (say(text, { whisper: key, name })), not in the lobby now (0.22.0): those you
+    // have whispered with, and your guests, by their keys. Your visit-client keeps it, text only, and passes it on once
+    // they and you are both in the lobby (v.held until then; "held_sent" as it goes).
+    get awayTargets() {
+      const here = new Set(this.whisperTargets.map(o => o.key)), by = new Map();
+      const put = (key, name) => { if (key && /^[0-9a-f]{64}$/.test(key) && key !== this.key && !here.has(key) && name) by.set(key, name); };
+      for (const g of this.guests) put(g.key, g.name);
+      for (const l of this.chatLog) if (l.scope === "whisper") { if (l.mine && l.to) put(l.to.key, l.to.name); else put(l.key, l.name); }
+      return [...by].map(([key, name]) => ({ key, name })).sort((a, b) => a.name.localeCompare(b.name));
+    }
+    // The mailbox (8.9): you have read its lines of a conversation ("person:<key>", "room:<key>", "lobby"), or all of
+    // them (none). v.unseen: { count, conversations: [{ conversation, count }], lines (the newest, as "chat" gives
+    // them) }, and "unseen" as it changes. A line meant for you (whispered, said in your room's chat, or mentioning you)
+    // that comes while nobody looks at your chat (attention) is in it, kept by your visit-client.
+    read(conversation) { this._send({ type: "read", ...(conversation ? { conversation: String(conversation) } : {}) }); }
+    // Whether someone is looking at this page's chat now (Visit.chat says, by itself): what comes meanwhile is seen.
+    attention(on) {
+      if (!!on === this._attention) return;
+      this._attention = !!on;
+      this._send({ type: "attention", on: this._attention });
+    }
+    // A whisper left for someone away, taken back before it went (its id, from v.held).
+    unhold(id) { this._send({ type: "unhold", id: String(id) }); }
     // Whom you may say a line to (say(text, { key })): the offices linked with yours, either way, now.
     get chatTargets() {
       const by = new Map();
@@ -1816,7 +1875,7 @@
       if (m.mine === true) {
         if (!old) return null;
         const to = isObj(m.to) ? { key: String(m.to.key || ""), name: String(m.to.name || ""), ...(m.to.id ? { id: String(m.to.id) } : {}) } : null;
-        return { ...line, scope: ["sim", "whisper"].includes(m.scope) ? m.scope : "say", mine: true, to };
+        return { ...line, scope: ["sim", "whisper"].includes(m.scope) ? m.scope : "say", mine: true, to, ...(m.held === true ? { held: true } : {}) };
       }
       if (m.scope === "lobby") return { ...line, scope: "lobby", mine: !!this.office && m.id === this.office.id };
       if (m.scope === "whisper") return { ...line, scope: "whisper", id: typeof m.id === "string" ? m.id : null };
@@ -1836,7 +1895,7 @@
     _hasContent(c) { return !!c.text || (c.media && c.media.length > 0) || (c.links && c.links.length > 0); }
     _lineOf(c, old) {
       return { scope: c.scope || "say", key: c.key, name: c.name, text: c.text, mine: !!c.mine, owner: !!c.owner, id: c.id || null, channel: c.channel, to: c.to || null,
-        media: c.media || [], links: c.links || [], conversation: c.conversation || null, mention: !c.mine && this._mentions(c.text),
+        media: c.media || [], links: c.links || [], conversation: c.conversation || null, mention: !c.mine && this._mentions(c.text), ...(c.held ? { held: true } : {}),
         at: old ? c.at : Date.now(), ...(old ? { old: true } : {}) };
     }
     // Whether a line mentions your user (8.9): @ and the name they go by, or your office's, as a word of its own.
@@ -4073,7 +4132,9 @@
   // your room / To <name>'s room (a room's chat: everyone in it, and linked with it), Lobby (everyone in it). Pick it
   // there, or start the line with /s, /w <name> (/t, /tell), /r (back to whoever last whispered to you, else whom
   // you last whispered), /room (yours) or /room <name>, /1 (/l) and a space; it stays for the next line. Tab
-  // finishes a name (again: the next one), from those it could be, shown over the box. 🎧 by the box (or /voice)
+  // finishes a name, from those it could be, shown over the box; else it moves the box on to the next place (Shift:
+  // back), in the choices' order: only where a line can go now, and one Tell, to whoever you last whispered with
+  // (0.22.0); not while a command is in the box (that says where). 🎧 by the box (or /voice)
   // joins the voice of the room the box talks to (else your own room's), or leaves it: while you are in one, a line
   // over the box says whose and who is in it (🔊: speaking), and stays. The rest fades `fade` ms after the last line,
   // and comes back with the next one, or Enter.
@@ -4090,7 +4151,7 @@
 .visit-chat { position: fixed; left: var(--visit-chat-left, 16px); bottom: var(--visit-chat-bottom, 16px); z-index: 19; width: min(660px, calc(100vw - 32px)); font: 19.5px/1.35 system-ui, -apple-system, "Segoe UI", sans-serif; color: #fff; transition: opacity .8s; }
 .visit-chat.idle { pointer-events: none; }
 .visit-chat > * { transition: opacity .8s; }
-.visit-chat.idle > :not(.voice) { opacity: 0; }
+.visit-chat.idle > :not(.voice):not(.mail) { opacity: 0; }
 .visit-chat .voice { margin-top: 4px; padding: 2px 8px; width: fit-content; max-width: 100%; font-size: 85%; color: #7ee787; background: rgba(0,0,0,.45); border-radius: 6px; pointer-events: auto; }
 .visit-chat .voice:empty { display: none; }
 .visit-chat .voice .muted { color: #c9d1d9; opacity: .8; }
@@ -4131,6 +4192,9 @@
 .visit-chat .line.sim, .visit-chat[data-scope=sim] form { color: #aaaaff; }
 .visit-chat .line.lobby, .visit-chat[data-scope=lobby] form { color: #ffc864; }
 .visit-chat .line.note { color: #ffff00; }
+.visit-chat .line[data-time]::before { content: attr(data-time); margin-right: .45em; font-size: 78%; opacity: .6; font-variant-numeric: tabular-nums; }
+.visit-chat .day { display: flex; align-items: center; gap: 8px; margin: 6px 0 3px; font-size: 72%; opacity: .7; }
+.visit-chat .day::before, .visit-chat .day::after { content: ""; flex: 1; border-top: 1px solid rgba(255,255,255,.35); }
 .visit-chat .names { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; padding: 0 8px; font-size: 85%; }
 .visit-chat .names:empty { display: none; }
 .visit-chat .names button { font: inherit; color: #c9d1d9; background: rgba(22,27,34,.92); border: 1px solid #30363d; border-radius: 4px; padding: 0 6px; cursor: pointer; }
@@ -4141,7 +4205,25 @@
 .visit-chat select { font: inherit; color: inherit; background: none; border: 0; padding: 0; max-width: 45%; cursor: pointer; }
 .visit-chat option { color: #e6edf3; background: #161b22; }
 .visit-chat input { flex: 1; min-width: 0; font: inherit; color: inherit; background: none; border: 0; outline: none; }
-.visit-chat button.sound { font: inherit; color: inherit; background: none; border: 0; padding: 0 2px; cursor: pointer; opacity: .8; }`;
+.visit-chat button.sound { font: inherit; color: inherit; background: none; border: 0; padding: 0 2px; cursor: pointer; opacity: .8; }
+.visit-chat button.mail { display: none; margin-top: 4px; padding: 1px 8px; font: inherit; font-size: 85%; color: #ffc864; background: rgba(0,0,0,.55); border: 1px solid #ffc864; border-radius: 6px; cursor: pointer; pointer-events: auto; }
+.visit-chat button.mail.on { display: inline-block; }
+.visit-chat .mailbox { display: none; max-height: 16em; overflow-y: auto; margin-bottom: 4px; padding: 6px 8px; font-size: 80%; background: rgba(13,17,23,.94); border: 1px solid #30363d; border-radius: 6px; }
+.visit-chat .mailbox.on { display: block; }
+.visit-chat .mailbox .tabs { display: flex; gap: 6px; align-items: center; margin-bottom: 6px; }
+.visit-chat .mailbox .tabs b { flex: 1; font-weight: 600; }
+.visit-chat .mailbox button { font: inherit; color: #c9d1d9; background: none; border: 1px solid #30363d; border-radius: 4px; padding: 0 6px; cursor: pointer; }
+.visit-chat .mailbox .line { cursor: pointer; border-radius: 3px; }
+.visit-chat .mailbox .line:hover { background: rgba(255,255,255,.08); }
+.visit-chat .mailbox .when { opacity: .6; font-size: 85%; }
+.visit-chat .mailbox .held { display: flex; gap: 6px; align-items: baseline; color: #ff80ff; }
+.visit-chat .mailbox .held span { flex: 1; }
+.visit-chat .line.held { opacity: .75; font-style: italic; }
+.visit-chat button.play { font: inherit; font-size: 90%; color: inherit; background: rgba(255,255,255,.08); border: 1px solid currentColor; border-radius: 12px; padding: 0 8px; margin: 2px 0 0 4px; text-indent: 0; cursor: pointer; }
+.visit-chat button.rec { font: inherit; color: inherit; background: none; border: 0; padding: 0 2px; cursor: pointer; opacity: .8; }
+.visit-chat button.rec.on { opacity: 1; color: #ff6b6b; }
+.visit-chat .chip .clip { display: block; padding: 4px 8px; border: 1px solid #6e7681; border-radius: 12px; }
+.visit-chat .chip.busy > .clip { opacity: .45; }`;
 
   // A picture full size, over everything, until a click or Esc.
   function lightbox(url) {
@@ -4178,26 +4260,27 @@
     const root = document.createElement("div");
     root.className = "visit-chat";
     root.dataset.scope = "say";
-    root.innerHTML = `<div class="shared"></div><div class="log" aria-live="polite"></div><div class="names"></div><div class="voice"></div><div class="attach"></div><form><select title="where your line goes"></select><input maxlength="${CHAT_LEN}" autocomplete="off" spellcheck="false"><button type="button" class="gallery" title="pictures and links shared here">🖼</button><button type="button" class="headset">🎧</button><button type="button" class="sound"></button></form>`;
+    root.innerHTML = `<div class="shared"></div><div class="mailbox"></div><div class="log" aria-live="polite"></div><div class="names"></div><div class="voice"></div><button type="button" class="mail"></button><div class="attach"></div><form><select title="where your line goes"></select><input maxlength="${CHAT_LEN}" autocomplete="off" spellcheck="false"><button type="button" class="rec" title="a voice message (click again: done; at most a minute)">🎙</button><button type="button" class="gallery" title="pictures, voice messages and links shared here">🖼</button><button type="button" class="headset">🎧</button><button type="button" class="sound"></button></form>`;
     element.appendChild(root);
     const shared = root.querySelector(".shared"), attach = root.querySelector(".attach"), gallery = root.querySelector("button.gallery");
-    const log = root.querySelector(".log"), names = root.querySelector(".names"), voice = root.querySelector(".voice"), headset = root.querySelector("button.headset"), form = root.querySelector("form"), pick = form.querySelector("select"), input = form.querySelector("input"), bell = form.querySelector("button.sound");
+    const mailbox = root.querySelector(".mailbox"), mail = root.querySelector("button.mail");
+    const log = root.querySelector(".log"), names = root.querySelector(".names"), voice = root.querySelector(".voice"), headset = root.querySelector("button.headset"), form = root.querySelector("form"), pick = form.querySelector("select"), input = form.querySelector("input"), bell = form.querySelector("button.sound"), recBtn = form.querySelector("button.rec");
     // A sound with each line that comes, unless this browser was told not to (the 🔔 by the box).
     let quiet = !sound;
     try { if (localStorage.getItem("visit:chat-quiet") === "1") quiet = true; } catch (e) { /* not kept */ }
     const bellSay = () => { bell.textContent = quiet ? "🔕" : "🔔"; bell.title = quiet ? "no sound with a line (click: a sound)" : "a sound with each line (click: none)"; };
     bellSay();
     bell.addEventListener("click", () => { quiet = !quiet; try { localStorage.setItem("visit:chat-quiet", quiet ? "1" : "0"); } catch (e) { /* not kept */ } bellSay(); input.focus(); });
-    let to = { scope: "say" }, choices = [], typing = false, last = null, told = null, fadeTimer = null, intro = null;
+    let to = { scope: "say" }, choices = [], typing = false, last = null, told = null, tell = null, fadeTimer = null, intro = null;
     try {   // where lines went before a reload (this tab)
       const t = JSON.parse(sessionStorage.getItem("visit:chat-to") || "null");
       if (isObj(t) && ["say", "whisper", "sim", "lobby"].includes(t.scope)) to = { scope: t.scope, ...["key", "id", "name"].reduce((o, k) => (typeof t[k] === "string" ? { ...o, [k]: t[k] } : o), {}) };
     } catch (e) { /* not kept */ }
     const yours = () => ({ scope: "sim", key: v.key || "", name: v.office ? v.office.name : "" });   // your room's chat
     const room = t => t.key === v.key ? "your room" : `${t.name || "a"}'s room`;
-    const label = t => t.scope === "lobby" ? "Lobby" : t.scope === "whisper" ? `Tell ${t.name}` : t.scope === "sim" ? `To ${room(t)}` : "Say";
-    const same = (a, b) => a.scope === b.scope && (a.key || a.id || null) === (b.key || b.id || null);
     const whom = t => v.whisperTargets.find(o => (t.key && o.key === t.key) || o.id === t.id);   // a whisper's person, now
+    const label = t => t.scope === "lobby" ? "Lobby" : t.scope === "whisper" ? `Tell ${t.name}${whom(t) ? "" : " (away)"}` : t.scope === "sim" ? `To ${room(t)}` : "Say";
+    const same = (a, b) => a.scope === b.scope && (a.key || a.id || null) === (b.key || b.id || null);
     // A line's text, in parts: a name ({ name, key }), in its own colour, among the rest.
     const parts = l => {
       const who = { name: `[${l.name || "someone"}]`, key: l.key || l.name };
@@ -4210,7 +4293,7 @@
     const wake = () => {
       root.classList.remove("idle");
       clearTimeout(fadeTimer);
-      if (fade > 0) fadeTimer = setTimeout(function sleep() { if (typing || root.matches(":hover") || shared.classList.contains("on")) fadeTimer = setTimeout(sleep, 1000); else root.classList.add("idle"); }, fade);
+      if (fade > 0) fadeTimer = setTimeout(function sleep() { if (typing || root.matches(":hover") || shared.classList.contains("on") || mailbox.classList.contains("on")) fadeTimer = setTimeout(sleep, 1000); else root.classList.add("idle"); }, fade);
     };
     // A picture by its id, shown once the visit-client has it (a click: full size); a link, as its sender's
     // preview has it (a click: the link, in a new tab).
@@ -4237,17 +4320,58 @@
       a.appendChild(t);
       return a;
     };
-    const lineEl = l => {   // a line: its text, then its pictures and its links' previews
+    // A voice message: ▶ and how long it is; a click plays it (again: stops it).
+    const clock = secs => { const n = Math.round(secs || 0); return `${Math.floor(n / 60)}:${String(n % 60).padStart(2, "0")}`; };
+    const voiceEl = p => {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "play"; b.title = "a voice message";
+      const idle = () => { b.textContent = p.secs ? `▶ ${clock(p.secs)}` : "▶"; };
+      idle();
+      let audio = null;
+      b.addEventListener("click", async e => {
+        e.preventDefault(); e.stopPropagation();
+        if (audio && !audio.paused) { audio.pause(); audio.currentTime = 0; return idle(); }
+        if (!audio) {
+          const url = await v.media(p.id);
+          if (!url) { b.textContent = "(a voice message that cannot be had)"; b.disabled = true; return; }
+          audio = new Audio(url);
+          audio.addEventListener("ended", idle);
+          audio.addEventListener("timeupdate", () => { if (!audio.paused) b.textContent = `■ ${clock(audio.currentTime)}${p.secs ? " / " + clock(p.secs) : ""}`; });
+        }
+        audio.play().catch(() => idle());
+        b.textContent = "■";
+      });
+      return b;
+    };
+    // When a line came, as WoW's chat timestamps have it: its time (this browser's clock and way of writing one), dim,
+    // before it; and over a day's first line, its day, when the log holds more than today.
+    const hhmm = at => new Date(at).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    const dayOf = at => new Date(at).toDateString();
+    const dayName = at => { const d = new Date(at); return d.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric", ...(d.getFullYear() !== new Date().getFullYear() ? { year: "numeric" } : {}) }); };
+    const days = () => {   // the log's days: one over each line whose day is not the one before it's (today, for the first)
+      let prev = dayOf(Date.now());
+      for (const d of log.querySelectorAll(".line[data-at]")) {
+        const at = Number(d.dataset.at), k = dayOf(at), was = d.previousElementSibling, has = was && was.classList.contains("day") ? was : null;
+        if (k === prev) { if (has) has.remove(); continue; }
+        prev = k;
+        if (has) { if (has.textContent !== dayName(at)) has.textContent = dayName(at); continue; }
+        const x = document.createElement("div");
+        x.className = "day"; x.textContent = dayName(at);
+        d.before(x);
+      }
+    };
+    const lineEl = l => {   // a line: its text, then its pictures (or voice message) and its links' previews
       const d = document.createElement("div");
-      d.className = "line " + l.scope + (l.mention ? " mention" : "");
+      d.className = "line " + l.scope + (l.mention ? " mention" : "") + (l.held ? " held" : "");
+      if (l.held) d.title = "kept by your visit-client: it goes once they and you are both in the lobby";
       for (const p of parts(l)) {
         if (typeof p === "string") { d.appendChild(document.createTextNode(p)); continue; }
         const n = document.createElement("span");
         n.className = "who"; n.textContent = p.name; n.style.color = nameColor(p.key || "");
         d.appendChild(n);
       }
-      if (l.at) d.dataset.at = String(l.at);
-      for (const p of l.media || []) d.appendChild(picture(p.id, "pic"));
+      if (l.at) { d.dataset.at = String(l.at); d.dataset.time = hhmm(l.at); }
+      for (const p of l.media || []) d.appendChild(isVoice(p) ? voiceEl(p) : picture(p.id, "pic"));
       for (const c of l.links || []) d.appendChild(card(c));
       return d;
     };
@@ -4255,6 +4379,7 @@
       const end = log.scrollTop + log.clientHeight >= log.scrollHeight - 4, d = lineEl(l);
       if (l.old && intro && intro.parentNode === log) log.insertBefore(d, intro); else log.appendChild(d);
       while (log.childElementCount > CHAT_LOG * 4) { log.firstChild.remove(); older = true; }
+      days();
       if (end) log.scrollTop = log.scrollHeight;
       wake();
       return d;
@@ -4270,6 +4395,7 @@
         older = r.more;
         const top = log.firstChild;
         for (const l of r.lines) log.insertBefore(lineEl(l), top);
+        days();
         log.scrollTop += log.scrollHeight - h;
       }, () => { older = false; }).finally(() => { loadingOlder = false; });
     });
@@ -4282,15 +4408,29 @@
       pick.innerHTML = choices.map((c, i) => `<option value="${i}">${esc(label(c))}:</option>`).join("");
       pick.value = String(choices.findIndex(c => same(c, to)));
       root.dataset.scope = to.scope;
+      if (to.scope === "whisper") tell = to;
       headsetSay();
       try { sessionStorage.setItem("visit:chat-to", JSON.stringify(to)); } catch (e) { /* not kept */ }
+    };
+    // Tab: the box on to the next place a line can go now (back: the one before), in the choices' order, with one Tell:
+    // whoever you last whispered with (the box's, else either way), else none. From a place gone: on from its kind's.
+    const KINDS = ["say", "whisper", "sim", "lobby"];
+    const step = back => {
+      const p = [to.scope === "whisper" && to, tell, last, told].map(t => t && whom(t)).find(Boolean), linked = v.chatTargets;
+      const stops = [{ scope: "say" }, ...(p && v.lobbyChat ? [{ scope: "whisper", id: p.id, key: p.key, name: p.name }] : []),
+        ...(linked.length ? [yours()] : []), ...linked.map(o => ({ scope: "sim", key: o.key, name: o.name })), ...(v.lobbyChat ? [{ scope: "lobby" }] : [])];
+      const n = stops.length, i = stops.findIndex(c => same(c, to)), k = KINDS.indexOf(to.scope);
+      let j = i >= 0 ? (i + (back ? n - 1 : 1)) % n : -1;
+      if (i < 0) for (let x = 0; x < n; x++) if (back ? KINDS.indexOf(stops[x].scope) < k : KINDS.indexOf(stops[x].scope) > k) { j = x; if (!back) break; }
+      to = stops[j >= 0 ? j : back ? n - 1 : 0];
+      fill();
     };
     const open = (start = "") => {
       if (document.pointerLockElement) document.exitPointerLock();
       typing = true; root.classList.add("typing"); fill(); wake();
       input.value = start; input.focus();
     };
-    const close = () => { typing = false; root.classList.remove("typing"); input.value = ""; picker = null; picked = null; drawPicker(); pending = []; linkCard = null; linkSkip.clear(); drawAttach(); if (root.contains(document.activeElement)) document.activeElement.blur(); wake(); };
+    const close = () => { recStop(false); typing = false; root.classList.remove("typing"); input.value = ""; picker = null; picked = null; drawPicker(); pending = []; linkCard = null; linkSkip.clear(); drawAttach(); if (root.contains(document.activeElement)) document.activeElement.blur(); wake(); };
     // The one of `list` whose name starts `rest`, then a space (the longest), or, on Enter (`done`), is all of it or
     // the one name it starts.
     const named = (list, rest, done) => {
@@ -4305,7 +4445,7 @@
       const m = /^\/(w|t|whisper|tell|room|sim)\s([\s\S]*)$/i.exec(input.value);
       if (!m) return null;
       const stem = m[2].toLowerCase(), rooms = /^(room|sim)$/i.test(m[1]);
-      return { cmd: m[1], stem, names: (rooms ? v.chatTargets : v.whisperTargets).map(o => o.name).filter(n => n && n.toLowerCase().startsWith(stem)) };
+      return { cmd: m[1], stem, names: (rooms ? v.chatTargets : [...v.whisperTargets, ...v.awayTargets]).map(o => o.name).filter(n => n && n.toLowerCase().startsWith(stem)) };
     };
     // Whom a line may mention (@): those linked with you, your visitors, those in the lobby; by the names they go by.
     const people = () => {
@@ -4362,9 +4502,9 @@
     const drawAttach = () => {
       attach.textContent = "";
       for (const p of pending) {
-        const img = document.createElement("img");
-        img.src = p.url;
-        const c = chip(img, () => { pending = pending.filter(q => q !== p); });
+        const el = document.createElement(p.voice ? "span" : "img");
+        if (p.voice) { el.className = "clip"; el.textContent = `🎙 ${clock(p.secs)}`; } else el.src = p.url;
+        const c = chip(el, () => { pending = pending.filter(q => q !== p); });
         if (!p.media) c.classList.add("busy");
         attach.appendChild(c);
       }
@@ -4411,7 +4551,7 @@
     const sharedDraw = async more => {
       const c = conversation(), title = c === "lobby" ? "the lobby" : c.startsWith("person:") ? `you and ${to.name || "them"}`
         : c === "room:" + v.key ? "your room" : `${v._nameOf(c.slice(5)) || "their"}'s room`;
-      if (!more) shared.innerHTML = `<div class="tabs"><b>Shared in ${esc(title)}</b><button data-k="media" class="${sharedKind === "media" ? "on" : ""}">Pictures</button><button data-k="links" class="${sharedKind === "links" ? "on" : ""}">Links</button><button data-k="close" title="close">✕</button></div><div class="items"></div>`;
+      if (!more) shared.innerHTML = `<div class="tabs"><b>Shared in ${esc(title)}</b><button data-k="media" class="${sharedKind === "media" ? "on" : ""}">Pictures</button><button data-k="voice" class="${sharedKind === "voice" ? "on" : ""}">Voice</button><button data-k="links" class="${sharedKind === "links" ? "on" : ""}">Links</button><button data-k="close" title="close">✕</button></div><div class="items"></div>`;
       const items = shared.querySelector(".items");
       const moreButton = items.querySelector("button.more");
       if (moreButton) moreButton.remove();
@@ -4419,8 +4559,9 @@
         const r = await v.shared(c, sharedKind, { before: more ? Number(items.dataset.before) : undefined });
         let box = items.querySelector(".grid");
         if (sharedKind === "media" && !box && r.items.length) { box = document.createElement("div"); box.className = "grid"; items.appendChild(box); }
-        for (const i of r.items) (sharedKind === "media" ? box : items).appendChild(sharedKind === "media" ? picture(i.id, "") : card(linksFrom([i])[0] || { url: i.url }));
-        if (!r.items.length && !more) items.textContent = sharedKind === "media" ? "No pictures shared here yet" : "No links shared here yet";
+        const voiceRow = i => { const d = document.createElement("div"); d.textContent = `${i.mine ? "you" : i.name || "someone"}: `; d.appendChild(voiceEl({ id: i.id, secs: 0 })); return d; };
+        for (const i of r.items) (sharedKind === "media" ? box : items).appendChild(sharedKind === "media" ? picture(i.id, "") : sharedKind === "voice" ? voiceRow(i) : card(linksFrom([i])[0] || { url: i.url }));
+        if (!r.items.length && !more) items.textContent = sharedKind === "media" ? "No pictures shared here yet" : sharedKind === "voice" ? "No voice messages here yet" : "No links shared here yet";
         if (r.items.length) items.dataset.before = String(r.items[r.items.length - 1].at);
         if (r.more) { const b = document.createElement("button"); b.className = "more"; b.textContent = "More"; b.dataset.k = "more"; items.appendChild(b); }
       } catch (e) { items.textContent = `Not available: ${e.message || e}`; }
@@ -4468,7 +4609,7 @@
       else if (cmd === "1" || cmd === "l" || cmd === "lobby") next = v.lobbyChat ? { scope: "lobby" } : (done && note("No lobby chat: this lobby does not carry it, or you are not in it"), null);
       else if (cmd === "r" || cmd === "reply") next = last || told || (done && note("Nobody has whispered to you yet"), null);
       else if (["w", "t", "whisper", "tell", "room", "sim"].includes(cmd)) {
-        const rooms = cmd === "room" || cmd === "sim", o = named(rooms ? v.chatTargets : v.whisperTargets, rest, done);
+        const rooms = cmd === "room" || cmd === "sim", o = named(rooms ? v.chatTargets : v.whisperTargets, rest, done) || (!rooms && named(v.awayTargets, rest, done));
         if (o) { next = rooms ? { scope: "sim", key: o.key, name: o.name } : { scope: "whisper", id: o.id, key: o.key, name: o.name }; rest = rest.slice(o.name.length + 1); }
         else if (!done) return false;   // a name still being typed
         else if (rooms && !rest.trim()) next = yours();
@@ -4483,19 +4624,28 @@
     input.addEventListener("keyup", e => { if (/^(ArrowLeft|ArrowRight|Home|End)$/.test(e.key)) hint(); });
     input.addEventListener("keydown", e => {
       e.stopPropagation();   // the page's own keys (walking) are not for this box
-      if (e.key === "Escape") { e.preventDefault(); if (picker) { picked = input.value; picker = null; drawPicker(); } else close(); }
+      if (e.key === "Escape" && recording) { e.preventDefault(); recStop(false); }
+      else if (e.key === "Escape") { e.preventDefault(); if (picker) { picked = input.value; picker = null; drawPicker(); } else close(); }
       else if (picker && (e.key === "ArrowDown" || e.key === "ArrowUp")) {
         e.preventDefault();
         picker.at = (picker.at + (e.key === "ArrowDown" ? 1 : picker.items.length - 1)) % picker.items.length;
         drawPicker();
       } else if (picker && (e.key === "Tab" || e.key === "Enter") && !e.shiftKey) { e.preventDefault(); take(picker.at); }
+      else if (e.key === "Tab" && !e.ctrlKey && !e.altKey && !e.metaKey && !e.isComposing) { e.preventDefault(); if (!input.value.startsWith("/")) step(e.shiftKey); }
     });
     pick.addEventListener("change", () => { to = choices[Number(pick.value)] || { scope: "say" }; fill(); input.focus(); });
     // A line said where the box talks to: false (and why, said) if it could not be.
     const send = (t, media, links) => {
-      const p = to.scope === "whisper" && whom(to);
-      if (v.say(t, to.scope === "say" ? undefined : to.scope === "lobby" ? "lobby" : to.scope === "whisper" ? { whisper: p ? p.id : "" } : to.key === v.key ? "room" : { key: to.key }, { media, links })) return true;
-      if ((media.length || links.length) && (to.scope === "lobby" || (to.scope === "whisper" && p && !v.chatTargets.some(o => o.key === p.key)))) note("Pictures and links go to rooms, and to those you are linked with: not through the lobby");
+      const p = to.scope === "whisper" && whom(to), away = to.scope === "whisper" && !p && /^[0-9a-f]{64}$/.test(to.key || "");   // (away: kept for them)
+      if (v.say(t, to.scope === "say" ? undefined : to.scope === "lobby" ? "lobby" : to.scope === "whisper" ? (away ? { whisper: to.key, name: to.name } : { whisper: p ? p.id : "" })
+        : to.key === v.key ? "room" : { key: to.key }, { media, links })) {
+        if (away) note(`${to.name || "They"}: not in the lobby now. Your visit-client keeps it, and passes it on once you are both in it`);
+        if (v.unseen.conversations.some(c => c.conversation === conversation())) v.read(conversation());   // answered: what came there, read
+        return true;
+      }
+      if (away) note(media.length || links.length ? `${to.name} is away: a whisper kept for them is text only (pictures and voice messages go to those you are linked with)`
+        : `Too fast: at most ${CHATS} lines every ${CHAT_WINDOW / 1000} s`);
+      else if ((media.length || links.length) && (to.scope === "lobby" || (to.scope === "whisper" && p && !v.chatTargets.some(o => o.key === p.key)))) note("Pictures, voice messages and links go to rooms, and to those you are linked with: not through the lobby");
       else if (to.scope === "whisper" && !p) { note(`${to.name} is not in the lobby now`); to = { scope: "say" }; fill(); }
       else if (to.scope === "sim" && to.key !== v.key && !v.chatTargets.some(o => o.key === to.key)) { note(`${to.name}'s room: you are not linked with them now`); to = { scope: "say" }; fill(); }
       else if ((to.scope === "lobby" || to.scope === "whisper") && !v.lobbyChat) { note("No lobby chat: this lobby does not carry it, or you are not in it"); to = { scope: "say" }; fill(); }
@@ -4504,6 +4654,7 @@
     };
     form.addEventListener("submit", e => {
       e.preventDefault();
+      if (recording) { recording.send = true; return recStop(true); }   // the voice message first: then the line, with it
       const cmd = input.value.startsWith("/");
       if (cmd && !command(true)) return;   // not a line (said why)
       const t = input.value.trim(), pics = pending.slice(), links = linkCard && !linkCard.loading && t.includes(linkCard.url) ? [linkCard] : [];
@@ -4513,6 +4664,107 @@
       Promise.all(pics.map(p => p.ready)).then(ms => { const media = ms.filter(Boolean); if (media.length || t) send(t, media, links); });
     });
     root.addEventListener("focusout", () => setTimeout(() => { if (typing && !root.contains(document.activeElement)) { typing = false; root.classList.remove("typing"); wake(); } }, 0));
+    // The mailbox (8.9): 📬 and how many lines meant for you came while nobody looked (whispered, said in your room's
+    // chat, mentioning you), shown even when the window has faded; ⏳, whispers you left for someone away, still kept.
+    // A click: those lines (they are read then; a click on one: the box talks there) and those whispers (✕: taken
+    // back).
+    let mailLines = [], mailMore = 0;
+    const when = at => dayOf(at) === dayOf(Date.now()) ? hhmm(at) : new Date(at).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+    const replyTo = l => l.scope === "whisper" ? { scope: "whisper", id: l.id, key: l.key, name: l.name }
+      : l.scope === "sim" ? (l.to && l.to.key && l.to.key !== v.key ? { scope: "sim", key: l.to.key, name: l.to.name } : yours()) : l.scope === "lobby" ? { scope: "lobby" } : { scope: "say" };
+    const mailDraw = () => {
+      mailbox.innerHTML = `<div class="tabs"><b>📬 For you</b><button type="button" data-m="close" title="close">✕</button></div>`;
+      if (!mailLines.length && !v.held.length) mailbox.insertAdjacentHTML("beforeend", `<div class="when">Nothing new</div>`);
+      mailLines.forEach((l, i) => {
+        const d = lineEl(l);
+        d.dataset.i = String(i); d.title = "click: answer there";
+        if (l.at) d.dataset.time = when(l.at);   // (its day too, when not today)
+        mailbox.appendChild(d);
+      });
+      if (mailMore > 0) mailbox.insertAdjacentHTML("beforeend", `<div class="when">and ${mailMore} more, older: up the chat</div>`);
+      if (v.held.length) mailbox.insertAdjacentHTML("beforeend", `<div class="tabs" style="margin-top:6px"><b>⏳ Kept for someone away: it goes once you are both in the lobby</b></div>`
+        + v.held.map(h => `<div class="held"><span>To [${esc(h.name || "them")}]: ${esc(h.text)}</span><button type="button" data-h="${esc(h.id)}" title="take it back">✕</button></div>`).join(""));
+    };
+    const mailSay = () => {
+      const n = v.unseen.count, h = v.held.length;
+      mail.classList.toggle("on", n > 0 || h > 0);
+      mail.textContent = [n ? `📬 ${n}` : "", h ? `⏳ ${h}` : ""].filter(Boolean).join(" · ");
+      mail.title = [n ? `${n} line${n === 1 ? "" : "s"} for you, not read yet` : "", h ? `${h} whisper${h === 1 ? "" : "s"} kept for someone away` : ""].filter(Boolean).join("; ") + " (click: see)";
+      if (mailbox.classList.contains("on")) mailDraw();
+    };
+    mail.addEventListener("click", () => {
+      if (mailbox.classList.toggle("on")) {
+        mailLines = v.unseen.lines.slice(); mailMore = Math.max(0, v.unseen.count - mailLines.length);
+        shared.classList.remove("on");
+        mailDraw();
+        if (v.unseen.count) v.read();
+      }
+      wake();
+    });
+    mailbox.addEventListener("click", e => {
+      const b = e.target.closest("button[data-m], button[data-h]");
+      if (b) { if (b.dataset.h) v.unhold(b.dataset.h); else mailbox.classList.remove("on"); return; }
+      const d = e.target.closest(".line[data-i]");
+      if (!d || e.target.closest("button.play, img, a")) return;   // (its voice message, a picture, a link: as in the chat)
+      mailbox.classList.remove("on");
+      to = replyTo(mailLines[Number(d.dataset.i)]);
+      open();
+    });
+    const onHeldSent = h => note(`Passed on to ${h.name || "them"}, now in the lobby: ${h.text}`);
+    // Whether someone is looking at this chat: the page shown and focused, and a key, a click or the pointer within
+    // LOOKING. Your visit-client is told: a line meant for you that comes meanwhile is seen, else it is in the mailbox.
+    let stirred = Date.now();
+    const look = () => v.attention(document.visibilityState === "visible" && document.hasFocus() && Date.now() - stirred < LOOKING);
+    const stir = () => { const was = Date.now() - stirred >= LOOKING; stirred = Date.now(); if (was) look(); };
+    const lookTimer = setInterval(look, 10000);
+    addEventListener("focus", look); addEventListener("blur", look); document.addEventListener("visibilitychange", look);
+    for (const t of STIRS) addEventListener(t, stir, { capture: true, passive: true });
+    // A voice message (🎙): recorded here, at most VOICE_SECS (🎙 again, or Enter: done; Esc: none), then by the box as a
+    // picture is, and said with the line.
+    let recording = null;
+    const recSay = () => { recBtn.classList.toggle("on", !!recording); recBtn.textContent = recording ? `⏺ ${clock((Date.now() - recording.at) / 1000)}` : "🎙"; };
+    const recStop = keep => {
+      const r = recording;
+      if (!r) return;
+      recording = null; clearInterval(r.timer);
+      Object.assign(r, { keep, secs: Math.min(VOICE_SECS, (Date.now() - r.at) / 1000) });
+      if (r.rec.state !== "inactive") r.rec.stop(); else r.done();
+      recSay();
+    };
+    const addVoice = (blob, secs) => {
+      if (!typing) open();
+      pending = pending.filter(p => !p.voice);   // one a line
+      if (pending.length >= 4) return note("At most 4 pictures in a line");
+      const p = { voice: true, secs, url: null, media: null };
+      p.ready = v.share(blob).then(m => { p.media = { ...m, secs }; drawAttach(); return p.media; },
+        e => { pending = pending.filter(q => q !== p); drawAttach(); note(`That voice message cannot be shared: ${e.message || e}`); return null; });
+      pending.push(p);
+      drawAttach();
+    };
+    const recStart = async () => {
+      if (!window.MediaRecorder || !navigator.mediaDevices) return note("This browser cannot record a voice message");
+      const kind = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4"].find(k => MediaRecorder.isTypeSupported(k));
+      let stream;
+      try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } }); }
+      catch (e) { return note(`No microphone for a voice message: ${e.message || e}`); }
+      if (recording) { for (const t of stream.getTracks()) t.stop(); return; }
+      const rec = new MediaRecorder(stream, { ...(kind ? { mimeType: kind } : {}), audioBitsPerSecond: 32000 }), chunks = [];
+      const r = recording = { rec, at: Date.now(), keep: false, secs: 0, send: false, over: false };
+      r.timer = setInterval(() => { recSay(); if (Date.now() - r.at >= VOICE_SECS * 1000) recStop(true); }, 250);
+      r.done = () => {
+        if (r.over) return;
+        r.over = true;
+        for (const t of stream.getTracks()) t.stop();
+        if (!r.keep || !chunks.length) return;
+        addVoice(new Blob(chunks, { type: (rec.mimeType || kind || "audio/webm").split(";")[0] }), r.secs);
+        if (r.send) form.requestSubmit();
+      };
+      rec.addEventListener("dataavailable", e => { if (e.data && e.data.size) chunks.push(e.data); });
+      rec.addEventListener("stop", () => r.done());
+      rec.start(1000);
+      recSay();
+    };
+    recBtn.addEventListener("click", () => { if (recording) recStop(true); else recStart(); input.focus(); });
     const key = e => {   // Enter (or /), anywhere but a box of the page's own: type a line
       if (e.defaultPrevented || e.repeat || e.ctrlKey || e.metaKey || e.altKey || e.isComposing || typing) return;
       const t = e.target;
@@ -4525,10 +4777,10 @@
       if (!quiet && !l.mine && !l.old && l.scope !== "note") chatSound(l.mention ? "whisper" : l.scope);   // a mention chimes as a whisper does
       heard(l);
     };
-    const heard = l => {   // whom /r answers: who last whispered to you, else whom you last whispered
+    const heard = l => {   // whom /r answers: who last whispered to you, else whom you last whispered; Tab's Tell: either
       if (l.scope !== "whisper") return;
-      if (!l.mine && l.id) last = { scope: "whisper", id: l.id, key: l.key || null, name: l.name };
-      else if (l.mine && l.to && l.to.id) told = { scope: "whisper", id: l.to.id, key: l.to.key || null, name: l.to.name };
+      if (!l.mine && l.id) tell = last = { scope: "whisper", id: l.id, key: l.key || null, name: l.name };
+      else if (l.mine && l.to && l.to.id) tell = told = { scope: "whisper", id: l.to.id, key: l.to.key || null, name: l.to.name };
     };
     const onError = e => { if (e && ["say", "whisper", "chat", "voice_join"].includes(e.ref)) note(String(e.message || e.code)); };
     const onVoice = rv => {   // into a room voice (said once), or out of one (and why)
@@ -4541,15 +4793,21 @@
     const onBanned = b => note(b.voice || b.chat ? `${b.name}'s room keeps you out of its ${b.voice && b.chat ? "voice and chat" : b.voice ? "voice" : "chat"}` : `${b.name}'s room lets you back into its voice and chat`);
     addEventListener("keydown", key);
     v.on("chat", onChat); v.on("error", onError); v.on("room_voice", onVoice); v.on("banned", onBanned); v.on("change", voiceLine); v.on("voice", voiceLine);
+    v.on("unseen", mailSay); v.on("held", mailSay); v.on("held_sent", onHeldSent);
+    mailSay(); look();
     voiceIn = v.roomVoice && !v.roomVoice.joining ? v.roomVoice.key : null;
     voiceLine();
     for (const l of v.chatLog) { add(l); heard(l); }
-    intro = note("Enter to chat · @ mention · paste a picture · 🖼 shared · 🎧 voice · /s say · /w whisper · /r reply · /room yours, /room name · /1 lobby");
+    intro = note("Enter to chat · Tab where it goes · @ mention · paste a picture · 🎙 voice message · 🖼 shared · 🎧 voice · /s say · /w whisper · /r reply · /room yours, /room name · /1 lobby");
     return {
       element: root, open, close,
       release() {
         removeEventListener("keydown", key);
         v.off("chat", onChat); v.off("error", onError); v.off("room_voice", onVoice); v.off("banned", onBanned); v.off("change", voiceLine); v.off("voice", voiceLine);
+        v.off("unseen", mailSay); v.off("held", mailSay); v.off("held_sent", onHeldSent);
+        recStop(false); clearInterval(lookTimer); v.attention(false);
+        removeEventListener("focus", look); removeEventListener("blur", look); document.removeEventListener("visibilitychange", look);
+        for (const t of STIRS) removeEventListener(t, stir, { capture: true });
         clearTimeout(fadeTimer); root.remove();
       },
     };
