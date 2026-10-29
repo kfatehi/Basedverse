@@ -115,7 +115,7 @@ with `ref: "frame"` said at most once a second. A page without a role may send t
 | `host`; its scene, edits and landscape as binary frames (5.4, bits 0, 1, 5); `pose` (its state for a visitor) | `input`, `point`, `keyframe`, `scene_resync` (for the rooms the person is in: home included, 4) | `max_visitors`, `door`, `guest_add`, `guest_remove` |
 | `avatar_want`, `possession_want` (asking visitors for their models) | the avatar and possessions (5.4, bits 2, 6), `avatar_clear`, `possessions` | `avatars`, `avatar_use` |
 | `voice_where` with `me`, `phone`, `visitors` (where the room has everyone in it, its owner among them) | `voice_where` with `world` (where the person's world has friends) | `ban`, `voice_kick` |
-| `phone` (the room has one, or no longer) | the microphone (5.4, bit 3), `voice_join`, `call`, `speaker` | `end` (a visit ended by either: a kick, or leaving); `bye` (the page going, kept by the browser) |
+| `phone` (the room has one, or no longer); `say_as` (a line one of the room's own figures says: a receptionist, a guide; visit/SPEC.md 8.9) | the microphone (5.4, bit 3), `voice_join`, `call`, `speaker` | `end` (a visit ended by either: a kick, or leaving); `bye` (the page going, kept by the browser) |
 | | `user` (the name), `say`, `attention`, `read`, `unhold`, `media_get`, pictures and voice messages (5.4, bit 7), `preview`, `history`, `shared` | `status`, `rename` |
 | | `world`, `enter`, `exit`, `place`, `unplace`, `seen`, `plot_keep`, `plot_load`, `plot_forget`, `link_where` | |
 | | `knock`, `answer`, `leave_lobby`, `join_lobby` | |
@@ -352,7 +352,7 @@ const v = await Visit.connect({ port, token, sim: { name, version } });
   by the page's scheme). With `url`, `port` is not read, and `token` is optional (the engine gives one; a user
   gives none). The library is loaded from `/visit/visit.js` (6.3), or from visit-client as today.
 - `v.role`: `"host"`, `"user"`, or `null` (a page without one).
-- **As the host**: `v.host(...)` and its hooks as today; `v.visitors[i].owner` true for the owner's visit (4);
+- **As the host**: `v.host(...)` and its hooks as today; `v.sayAs(id, name, text)` for the room's own figures; `v.visitors[i].owner` true for the owner's visit (4);
   `v.owner` (`{ id, channel }` or null) and `"change"` as the person comes and goes; `voice_where.me` from where
   the room has the owner (nothing for the page to do). What is the user's refuses with `wrong_role`: `v.say`,
   `v.setMic`, `v.avatar`, `v.possessions`, `v.world`, `v.knock`, `v.link`, … The stage, panel, map and chat

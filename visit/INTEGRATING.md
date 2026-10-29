@@ -382,7 +382,9 @@ visit.host({
   (the default), everyone who can see them has it over their head for a few seconds, and in their chat; `/w name`
   whispers it to one person, `/room` says it in your room's chat (everyone in your room and linked with it, as a
   game's party), `/room name` in a linked friend's, `/1` to the whole lobby
-  (`visit.say(text, to)` from code). With a world (step
+  (`visit.say(text, to)` from code). Something of your room's own that talks (a receptionist, a guide; not a
+  person): name its object `visit:npc:<id>` and say its lines with `visit.sayAs(id, name, text)`: in your room, over
+  it, in everyone's chat under its own name, never as your user (on the engine, from the server page). With a world (step
   9) Visit draws the bubbles in your room too; without one, draw them yourself from `visit.chats`
   (`Visit.bubble(THREE, text, unit)` makes one). Make sure your room's keys ignore a text box (WASD there is typing,
   not walking), and leave Enter and `/` to the chat window. Something of yours bottom left: move the window

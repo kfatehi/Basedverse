@@ -1054,12 +1054,26 @@ async def main():
             f"(l => l.indexOf('from two days ago') >= 0 && l.indexOf('from two days ago') < l.indexOf('from a moment ago'))([...{cw}.querySelectorAll('.log .line')].map(x => x.textContent.endsWith('from two days ago') ? 'from two days ago' : x.textContent.endsWith('from a moment ago') ? 'from a moment ago' : ''))"), True)
         await a.shot("a_chat.png")
         await b.shot("b_chat.png")
+        # one of B's room's own figures (a receptionist, a guide): its line over its object, in everyone's chat, kept, never as B's user
+        await b.js("room.add('visit:npc:guide')")
+        await a.until("!!(v._viewer && v._viewer.scene && v._viewer.scene.root.getObjectByName('visit:npc:guide'))")
+        check("a bad figure id is refused at once", await b.js("v.sayAs('../x', 'Guide', 'no')"), False)
+        check("B's room's guide says a line (sayAs)", await b.js("v.sayAs('guide', 'Guide', 'welcome to my room')"), True)
+        check("A, in B's room, has it from the guide, by its name, not from B", await a.until(
+            "(c => c && c.npc === 'guide' && !c.owner && !c.id && c.text)(v.chats.find(c => c.name === 'Guide'))"), "welcome to my room")
+        check("A's view draws it over the guide's object", await a.until(
+            "(s => (o => !!o && [...s.bubbles.by.values()].some(x => x.text === 'welcome to my room' && Math.abs(x.sprite.position.x - o.position.x) < 0.5 && x.sprite.position.y > o.position.y))"
+            "(s.root.getObjectByName('visit:npc:guide')))(v._viewer.scene)"), True)
+        check("and A's window says it under the guide's name", await a.until(f"(t => t.includes('welcome') && t)({cw}.querySelector('.log').lastChild.textContent)"), "[Guide] says: welcome to my room")
+        check("B has it too, its own room's figure's, not B's own line", await b.until("(l => l && l.npc === 'guide' && !l.mine && l.name === 'Guide' && l.text)(v.chatLog.at(-1))"), "welcome to my room")
+        check("and B's world draws it over the guide", await b.until("[...room.world.bubbles.by.values()].some(x => x.text === 'welcome to my room')"), True)
         check("six lines at once: the sixth not said (5 every 10 s)", await a.js("(r => r[5])(Array.from({ length: 6 }, (_, i) => v.say('n' + i)))"), False)
         await a.call("Page.reload")
         check("A's page reloads: its chat window has the chat A had, kept by its visit-client, its own lines too, before the window's note; no bubbles, all old",
               await a.until(f"window.v && v.visiting && v.chatLog.length > 5 && (c => !!c && (t => [t.includes('[B] whispers: psst'), t.includes('[Your room] [A]: for everyone here'), "
                             f"t.includes('[B] says: wake up'), t.at(-1).startsWith('Enter to chat'), v.chats.length === 0, v.chatLog.every(l => l.old)])"
                             f"([...c.querySelectorAll('.log .line')].map(d => d.textContent)))({cw})", 30), [True] * 6)
+        check("and the guide's line among it, kept by A's visit-client as the guide's", await a.js("v.chatLog.some(l => l.old && l.npc === 'guide' && l.name === 'Guide')"), True)
         check("and the box still says where A's lines went (this tab): Say, as A last chose", await a.js("JSON.parse(sessionStorage.getItem('visit:chat-to')).scope"), "say")
         await a.until("v.visiting && !v.visiting.paused && !!(v._viewer && v._viewer.scene)", 30)
         await a.js("v.leave()")

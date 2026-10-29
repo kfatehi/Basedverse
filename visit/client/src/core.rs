@@ -293,6 +293,8 @@ pub struct Core {
     voice: VoiceRoom,
     /// Lines this office's page said in the current window (8.9).
     says: (Instant, u32),
+    /// Lines each of this room's own figures said (`say_as`, 8.9), by its id, in its current window.
+    npc_says: HashMap<String, (Instant, u32)>,
     /// The chat this office's user has had (8.9), theirs too: the last CHAT_KEPT lines, each with when, for a page
     /// that comes back (a reload); all of it is in the database (8.12), and this run began with its last lines.
     chat: VecDeque<Value>,
@@ -379,6 +381,7 @@ impl Core {
             phone: false,
             voice: VoiceRoom::default(),
             says: (Instant::now(), 0),
+            npc_says: HashMap::new(),
             chat: loaded.chat.into_iter().collect(),
             db,
             unseen: loaded.unseen.into_iter().collect(),
@@ -1100,6 +1103,32 @@ impl Core {
                     self.say_out(line);
                 }
                 self.keep_chat(mine);
+            }
+            // A line one of this room's own figures says (8.9: a receptionist, a guide; none of them a person): `id` names
+            // it (its object in the room's scene is `visit:npc:<id>`), `name` is what it goes by. Said in this office's
+            // room, to everyone who can see it (its visitors, and those who have it in their worlds or corners), and kept
+            // in its chat, never as this office's user: their own limit is untouched, each figure has one of its own.
+            "say_as" => {
+                let id = m.get("id").and_then(Value::as_str).filter(|id| link::possession_id_ok(id)).map(str::to_string);
+                let name = m.get("name").and_then(Value::as_str).map(state::clip_name).map(|n| n.trim().to_string()).filter(|n| !n.is_empty());
+                let text = m.get("text").and_then(Value::as_str).map(said_text).unwrap_or_default();
+                let (Some(id), Some(name)) = (id, name) else {
+                    return self.page_error("bad_message", "id is 1 to 40 letters, digits, _ . or -, and name is not empty", Some("say_as"));
+                };
+                if text.is_empty() {
+                    return self.page_error("bad_message", &format!("text is 1 to {SAY_LEN} characters"), Some("say_as"));
+                }
+                if !counted(self.npc_says.entry(id.clone()).or_insert((Instant::now(), 0))) {
+                    return self.page_error("rate_limited", &format!("at most {SAYS} lines every {} s from each", SAY_WINDOW.as_secs()), Some("say_as"));
+                }
+                let line = json!({ "key": self.key, "name": name, "text": text, "npc": id });
+                for v in self.visits.values().filter(|v| v.up && v.role == Role::Host && !v.local && !self.chat_banned(v.peer.get("key").and_then(Value::as_str).unwrap_or(""))) {
+                    let _ = v.cmd.try_send(LinkCmd::Ctl(json!({ "said": line })));
+                }
+                let mut chat = line;
+                chat["type"] = json!("chat");
+                chat["conversation"] = json!(format!("room:{}", self.key));
+                self.to_page(chat);
             }
             // Whether someone is looking at this page's chat now (8.9): a line meant for its user that comes meanwhile is
             // seen as it comes; else it waits in the mailbox until they have read it (`read`).
@@ -3099,7 +3128,7 @@ fn page_for(v: &Value) -> PageRole {
 /// Whether a page of this role may send a message of this type (../../engine/SPEC.md 3.3). A page without a role
 /// may send them all.
 fn role_may(role: PageRole, t: &str) -> bool {
-    const HOST: &[&str] = &["host", "pose", "avatar_want", "possession_want", "phone", "body"];
+    const HOST: &[&str] = &["host", "pose", "avatar_want", "possession_want", "phone", "body", "say_as"];
     const USER: &[&str] = &["input", "point", "keyframe", "scene_resync", "avatar_clear", "possessions", "user", "say", "attention", "read",
         "unhold", "media_get", "preview", "history", "shared", "voice_join", "call", "speaker", "world", "enter", "exit", "place", "unplace",
         "seen", "plot_keep", "plot_load", "plot_forget", "link_where", "knock", "answer", "leave_lobby", "join_lobby", "status", "rename"];
@@ -3180,8 +3209,8 @@ fn media_ids(line: &Value) -> Vec<String> {
     ids
 }
 
-/// A line the host says was said in its room, checked: who (a key, a name; a visitor's visit id there, or the
-/// room's owner) and what.
+/// A line the host says was said in its room, checked: who (a key, a name; a visitor's visit id there, one of the
+/// room's own figures, or the room's owner) and what.
 fn said_from(v: &Value) -> Option<Value> {
     let s = |x: &Value, n: usize| x.as_str().map(|s| s.chars().filter(|c| !c.is_control()).take(n).collect::<String>());
     let text = said_text(v["text"].as_str().unwrap_or(""));
@@ -3193,6 +3222,8 @@ fn said_from(v: &Value) -> Option<Value> {
     attach(&mut out, media, links);
     if let Some(id) = s(&v["id"], 40) {
         out["id"] = json!(id);
+    } else if let Some(npc) = v["npc"].as_str().filter(|id| link::possession_id_ok(id)) {
+        out["npc"] = json!(npc);
     } else if v["owner"] == json!(true) {
         out["owner"] = json!(true);
     }
@@ -3322,6 +3353,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_rooms_figures_are_the_rooms_to_say() {
+        assert!(role_may(PageRole::Host, "say_as") && role_may(PageRole::Both, "say_as") && !role_may(PageRole::User, "say_as"));
+        assert!(!role_may(PageRole::Host, "say") && role_may(PageRole::User, "say"));
+    }
+
+    #[test]
     fn revisions_are_digits() {
         assert!(revision("128") && revision("186"));
         assert!(!revision("r128") && !revision("") && !revision("12345") && !revision("1.2"));
@@ -3344,6 +3381,10 @@ mod tests {
         assert_eq!(line, json!({ "key": "k1", "name": "Ada", "id": "v1", "text": "hello [31m" }));
         assert_eq!(said_from(&json!({ "key": "k2", "owner": true, "text": "yo" })), Some(json!({ "key": "k2", "name": "", "owner": true, "text": "yo" })));
         assert!(said_from(&json!({ "key": "k3", "text": "  " })).is_none() && said_from(&json!({ "text": "no key" })).is_none());
+        // one of the room's own figures: its id kept (never also the owner's), a bad id dropped (then it is nobody's)
+        assert_eq!(said_from(&json!({ "key": "k4", "name": "Reception", "npc": "receptionist", "owner": true, "text": "Hello!" })),
+                   Some(json!({ "key": "k4", "name": "Reception", "npc": "receptionist", "text": "Hello!" })));
+        assert_eq!(said_from(&json!({ "key": "k4", "npc": "../x", "text": "hi" })), Some(json!({ "key": "k4", "name": "", "text": "hi" })));
         let mut w = (Instant::now(), 0);
         assert_eq!((0..7).map(|_| counted(&mut w)).filter(|ok| *ok).count(), SAYS as usize);
     }
