@@ -9,6 +9,17 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## Unreleased
+
+**Fixed: a page left for another stayed connected.** Chrome (148 on) keeps a page that a tab leaves, its sockets
+open, frozen, in its back/forward cache, and never closes them: visit-client went on having it, so a person who
+went to another page in the tab was still in their room, their visit up, their mailbox not filling. visit.js now
+says `bye` as the browser hides the page, and visit-client ends it as if it had closed (1001); back to it, it
+connects again. The browser test's "the person's page gone" check failed on CI, whose Chrome is newer, for this.
+
+**What an integration does about it:** nothing. It is in visit.js and visit-client; a relay passes `bye` on as
+anything else.
+
 ## v1.0.1 — 2026-10-29
 
 **The tests on every push, on a GPU** ([#19](https://github.com/sarmiena/Basedverse/pull/19), Keyvan's). A workflow

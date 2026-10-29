@@ -186,6 +186,11 @@ async fn page(mut sock: WebSocket, st: Arc<PageState>) {
                     closing = true;
                     break;
                 }
+                if msg.get("type").and_then(Value::as_str) == Some("bye") {   // a page the browser keeps as it goes (5.2): gone now
+                    let _ = closer.send(PageOut::Close(1001, "bye"));
+                    closing = true;
+                    break;
+                }
                 Ev::PageMsg { id, msg }
             }
             Message::Binary(b) => Ev::PageBin { id, data: b },
