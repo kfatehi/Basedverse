@@ -1319,6 +1319,17 @@ async def main():
         check("a user page again (its token in its hello, no relay): home in its ready, not paused", (ru["home"] is not None and ru["home"]["paused"], [v.get("home") for v in ru["visits"]]), (False, [True]))
         vh2 = await h.until(lambda m: m["type"] == "visit_started")
         check("and the room has its owner again, on a channel of its own", (vh2.get("owner"), vh2["channel"] != cha), (True, True))
+        await u.send(type="bye")   # kept by the browser as it goes (its back/forward cache): its socket open, and silent
+        ve = await h.until(lambda m: m["type"] == "visit_ended")
+        try:
+            await u.until(lambda m: False, timeout=3)
+        except (AssertionError, asyncio.TimeoutError):
+            pass
+        check("the person's page says bye: gone as a closed one is (the room hears its owner left), and closed 1001",
+              (ve.get("owner"), ve["reason"], u.ws.close_code), (True, "gone", 1001))
+        u = await Page(7414, tud).open(role="user")
+        ru = await u.expect("ready")
+        await h.until(lambda m: m["type"] == "visit_started")
         await h.close()
         hp = await u.until(lambda m: m["type"] == "host_paused")
         check("the room's page gone: the person's home is paused, not ended", hp["channel"], ru["home"]["channel"])
