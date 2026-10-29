@@ -44,6 +44,7 @@ for f in "$out"/bin/* "$out"/lib/*.dylib "$out"/lib/postgresql/*; do
   codesign --force --sign - "$f" 2>/dev/null
 done
 left=$(for f in "$out"/bin/* "$out"/lib/*.dylib "$out"/lib/postgresql/*; do
-  [ -f "$f" ] && [ ! -L "$f" ] && file "$f" | grep -q Mach-O && otool -L "$f" | grep -F "$out/" || true; done)
+  # (otool -L's first line is the file's own name, inside the prefix: only what follows it are its libraries)
+  [ -f "$f" ] && [ ! -L "$f" ] && file "$f" | grep -q Mach-O && otool -L "$f" | tail -n +2 | grep -F "$out/" || true; done)
 [ -z "$left" ] || { echo "macos.sh: still pointing into the build's prefix:"; echo "$left"; exit 1; }
 echo "macos.sh: Postgres for $arch ($(lipo -archs "$out/bin/postgres")), macOS $target and later, relocatable"
