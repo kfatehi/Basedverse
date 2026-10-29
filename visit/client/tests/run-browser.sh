@@ -29,10 +29,9 @@ trap 'kill "${pids[@]}" 2>/dev/null || true' EXIT
 # hosts C's room in a window of its own instead.
 engine=""
 [ "${ENGINE:-1}" != 0 ] && engine=7425
-# Each visit's database is the Postgres inside it (V2.md 4), run as this machine's user: its /etc/passwd lent, so
-# initdb knows the user.
-docker run --rm --network host -u "$(id -u):$(id -g)" -e HOME=/tmp -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro \
+# Each visit's database is the Postgres inside it (V2.md 4), run as this machine's user (tests/as-user.sh).
+docker run --rm --network host -e AS_UID="$(id -u)" -e AS_GID="$(id -g)" \
   ${engine:+-e ENGINE_PORT=$engine} \
   -v visit-target:/target:ro -v "$repo":/repo:ro -v "$out":/out -w /repo \
-  python:3.13-slim-bookworm sh -c 'pip install -q --user websockets==15.0.1 2>/dev/null && python3 -u visit/client/tests/browser_test.py /target/debug/visit 9351 9352 /out'
+  python:3.13-slim-bookworm sh visit/client/tests/as-user.sh sh -c 'pip install -q --user websockets==15.0.1 2>/dev/null && python3 -u visit/client/tests/browser_test.py /target/debug/visit 9351 9352 /out'
 echo "screenshots and logs: $out"

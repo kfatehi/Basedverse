@@ -9,8 +9,8 @@ set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../.." && pwd)"
 "$repo/visit/client/cargo" build
-docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro \
-  -v visit-target:/target:ro -v "$here":/tests:ro python:3.13-slim-bookworm bash -c '
+docker run --rm -e AS_UID="$(id -u)" -e AS_GID="$(id -g)" -v "$repo/visit/client/tests/as-user.sh":/as-user.sh:ro \
+  -v visit-target:/target:ro -v "$here":/tests:ro python:3.13-slim-bookworm sh /as-user.sh bash -c '
     set -u
     d=$(mktemp -d); export XDG_DATA_HOME=$d/xdg AUTH_PORT=7403 AUTH_TOKEN_FILE=$d/auth-token ENGINE_PORT=7405 VISIT_PORT=7401
     (umask 077; od -An -tx1 -N32 /dev/urandom | tr -d " \n" > $d/visit-token; od -An -tx1 -N32 /dev/urandom | tr -d " \n" > $AUTH_TOKEN_FILE)

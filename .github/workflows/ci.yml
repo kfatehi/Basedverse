@@ -37,8 +37,8 @@ jobs:
         run: engine/tests/run-engine.sh
       - name: A fresh start (bare Python image)
         run: |
-          docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp -v /etc/passwd:/etc/passwd:ro -v visit-target:/target:ro -v "$PWD":/repo:ro \
-            python:3.13-slim-bookworm python3 /repo/visit/client/tests/fresh_start.py /target/debug/visit
+          docker run --rm -e AS_UID="$(id -u)" -e AS_GID="$(id -g)" -v visit-target:/target:ro -v "$PWD":/repo:ro \
+            python:3.13-slim-bookworm sh /repo/visit/client/tests/as-user.sh python3 /repo/visit/client/tests/fresh_start.py /target/debug/visit
       - name: visit.js in two Chromes, on the GPU
         env:
           OUT: ${{ runner.temp }}/browser-test   # screenshots and logs (under /work: a path dind sees too)
