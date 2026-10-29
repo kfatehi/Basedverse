@@ -62,13 +62,17 @@ EOF
 packages=$( (for f in "$out"/lib/*; do rpm -qf "/usr/lib64/$(basename "$f")" 2>/dev/null || true; done
              rpm -qf /usr/share/fonts/dejavu/DejaVuSans.ttf /usr/share/fonts/dejavu/DejaVuSansMono.ttf /usr/share/fonts/dejavu/DejaVuSerif.ttf) \
            | grep -v "not owned" | sort -u)
+# (installed again with their docs: the image's tsflags=nodocs leaves some licences out even when asked not to)
+packages="$packages
+$(rpm -q dejavu-fonts-common)"
+# shellcheck disable=SC2086
+dnf -y -q --setopt=tsflags= reinstall $packages >/dev/null
 for p in $packages; do
-  for l in $(rpm -q --licensefiles "$p" 2>/dev/null | grep -v "^(contains no files)" || true); do
+  for l in $( (rpm -q --licensefiles "$p"; rpm -qd "$p" | grep -iE '/(COPYING|LICEN[CS]E)[^/]*$') 2>/dev/null | sort -u || true); do
     [ -f "$l" ] && mkdir -p "$out/licenses/$p" && cp "$l" "$out/licenses/$p/"
   done
 done
-for d in $(rpm -qd dejavu-fonts-common 2>/dev/null | grep -iE "LICENSE" || true); do
-  [ -f "$d" ] && mkdir -p "$out/licenses/dejavu" && cp "$d" "$out/licenses/dejavu/"
-done
+none=$(for p in $packages; do [ -d "$out/licenses/$p" ] || echo "$p"; done)
+[ -z "$none" ] || echo "linux-inside: no licence file in these packages (their spec's License tag stands): $(echo $none)"
 echo "$packages" >"$out/licenses/PACKAGES.txt"
 echo "linux-inside: chrome-headless-shell $("$out/chrome-headless-shell" --version 2>/dev/null | awk '{print $NF}' || echo '?'), $(ls "$out/lib" | wc -l) libraries packed, $(echo "$packages" | wc -l) packages"
