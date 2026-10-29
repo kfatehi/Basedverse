@@ -136,7 +136,7 @@ async def start_client(name, port, url, *extra, binary=None, user_token=False):
     p = await asyncio.create_subprocess_exec(binary or BIN, "--lobby", url, "--name", name, "--sim", "e2e/1", "--port", str(port),
                                              "--token-file", path, "--relays", "none", *extra,
                                              stdout=asyncio.subprocess.PIPE, stderr=log,
-                                             env=dict(os.environ, RUST_LOG=os.environ.get("RUST_LOG", "visit_client=debug,iroh=warn")))
+                                             env=dict(os.environ, RUST_LOG=os.environ.get("RUST_LOG", "visit=debug,auth=debug,iroh=warn")))
     ready = json.loads(await asyncio.wait_for(p.stdout.readline(), 10))
     check("%s prints its ready line" % name, (ready["ready"], ready["port"], ready["proto"]), (True, port, "basedverse-visit-local/2"))
     return (p, token, utoken) if user_token else (p, token)

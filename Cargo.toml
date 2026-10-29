@@ -1,0 +1,15 @@
+# Visit 2.0 (V2.md): one program, `visit`, from three crates. visit/client is the binary; auth/client (and, from
+# step 4, engine/) are libraries it is built with. Build and test through each crate's ./cargo (Docker).
+[workspace]
+members = ["visit/client", "auth/client"]
+resolver = "2"
+
+[profile.release]
+strip = true      # a smaller file to hand around
+lto = "thin"
+
+# Argon2 at its real cost in a debug build too (the tests sign in, and an unoptimized hash takes seconds).
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3

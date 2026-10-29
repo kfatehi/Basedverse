@@ -1,0 +1,8 @@
+# The build context of visit/client's Dockerfiles is the repository (the workspace): only what they COPY matters.
+.git
+**/target
+**/bin
+deps/dist
+deps/.work
+postgres/dist
+postgres/.work

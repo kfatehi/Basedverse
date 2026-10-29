@@ -54,7 +54,7 @@ async def start_client(name, lobby, port):
     log = open("/out/%s.log" % name, "w")
     p = await asyncio.create_subprocess_exec("/bin/visit-client", "--lobby", lobby, "--name", name, "--sim", "perf/1", "--port", str(port),
                                              "--token-file", path, "--relays", "none", "--max-visitors", "8",
-                                             stdout=asyncio.subprocess.PIPE, stderr=log, env=dict(os.environ, RUST_LOG="visit_client=info,iroh=warn"))
+                                             stdout=asyncio.subprocess.PIPE, stderr=log, env=dict(os.environ, RUST_LOG="visit=info,iroh=warn"))
     json.loads(await asyncio.wait_for(p.stdout.readline(), 15))
     return p, token
 

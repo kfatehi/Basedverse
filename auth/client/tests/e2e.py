@@ -17,7 +17,7 @@ import urllib.request
 
 import psycopg
 
-AUTH, VISIT = sys.argv[1], sys.argv[2]
+AUTH, VISIT = [sys.argv[1], "auth"], sys.argv[2]   # `visit auth`: what auth-client was (V2.md 2.1)
 OLD_ADMIN = "postgres://visit:old-password-0.20-setup@old/visit"   # 0.20's VISIT_DATABASE_URL: the superuser itself
 NEW_ADMIN = "postgres://basedverse:a-new-admin-password@old/visit"
 OLD_VISIT, OLD_AUTH = "postgres://visit:visit-password-0123456789@old/visit", "postgres://auth:auth-password-0123456789@old/visit"
@@ -37,7 +37,7 @@ def check(what, got, want):
 
 def run(*args, env=None, stdin=None):
     """auth-client (or visit-client, given first): (exit code, stdout, stderr)."""
-    cmd = list(args) if args[0] in (AUTH, VISIT) else [AUTH, *args]
+    cmd = list(args) if args[0] == VISIT else [*AUTH, *args]
     r = subprocess.run(cmd, env={**os.environ, **(env or {})}, input=stdin, capture_output=True, text=True,
                        stdin=None if stdin is not None else subprocess.DEVNULL, timeout=60)
     return r.returncode, r.stdout, r.stderr
@@ -126,7 +126,7 @@ def main():
     with open(tfile, "w") as f:
         f.write(token + "\n")
     os.chmod(tfile, 0o600)
-    server = subprocess.Popen([AUTH, "--port", "7403", "--token-file", tfile, "--visit-port", "17401", "--visit-token-file", vfile],
+    server = subprocess.Popen([*AUTH, "--port", "7403", "--token-file", tfile, "--visit-port", "17401", "--visit-token-file", vfile],
                               env={**os.environ, "AUTH_DATABASE_URL": AUTH_URL, "AUTH_LOG": "warn"})
     short = None
     try:
@@ -204,7 +204,7 @@ def main():
               [(False, False, True), (False, True, True), (True, False, True)])
 
         lsock.close()
-        noprobe = subprocess.Popen([AUTH, "--port", "7405", "--token-file", tfile, "--visit-port", "17401", "--visit-token-file", vfile, "--visit-probe", "false"],
+        noprobe = subprocess.Popen([*AUTH, "--port", "7405", "--token-file", tfile, "--visit-port", "17401", "--visit-token-file", vfile, "--visit-probe", "false"],
                                    env={**os.environ, "AUTH_DATABASE_URL": AUTH_URL, "AUTH_LOG": "warn"})
         try:
             until(lambda: call(7405, "/health", None, None)[0] == 200)
@@ -219,7 +219,7 @@ def main():
         # In a container, beside a workroom's server in another: its container's own network (--listen 0.0.0.0).
         here = socket.gethostbyname(socket.gethostname())   # this container's address on its network
         check("by default on 127.0.0.1 only: nothing answers on this container's network", call(7403, "/health", None, None, host=here)[0], 0)
-        wide = subprocess.Popen([AUTH, "--listen", "0.0.0.0", "--port", "7406", "--token-file", tfile],
+        wide = subprocess.Popen([*AUTH, "--listen", "0.0.0.0", "--port", "7406", "--token-file", tfile],
                                 env={**os.environ, "AUTH_DATABASE_URL": AUTH_URL, "AUTH_LOG": "warn"})
         try:
             check("--listen 0.0.0.0: on this container's network too, where another container reaches it",
@@ -230,7 +230,7 @@ def main():
             wide.wait(5)
 
         print("\na session's two ends: unused, and in all")
-        short = subprocess.Popen([AUTH, "--port", "7404", "--token-file", tfile, "--idle", "2s", "--max-age", "5s"],
+        short = subprocess.Popen([*AUTH, "--port", "7404", "--token-file", tfile, "--idle", "2s", "--max-age", "5s"],
                                  env={**os.environ, "AUTH_DATABASE_URL": AUTH_URL, "AUTH_LOG": "warn"})
         until(lambda: call(7404, "/health", None, None)[0] == 200)
         s4 = call(7404, "/v1/login", {"user": "aldo", "password": NEW_PASSWORD}, token)[1]["session"]

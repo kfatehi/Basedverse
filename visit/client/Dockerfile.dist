@@ -1,16 +1,16 @@
-# A static visit-client to hand out (one file, no libraries: it runs on any Linux of its architecture).
-# Used by ./build, which writes it to ./bin/:
-#   docker build -f Dockerfile.dist --build-arg TARGET=x86_64-unknown-linux-musl --target out --output type=local,dest=bin .
+# A static visit to hand out (one file, no libraries: it runs on any Linux of its architecture), built from the
+# workspace (../../Cargo.toml: visit with auth inside it). Used by ./build, which writes it to ./bin/:
+#   docker build -f visit/client/Dockerfile.dist --build-arg TARGET=x86_64-unknown-linux-musl --target out --output type=local,dest=visit/client/bin .
+# (from the repository's root: the build context is the workspace)
 FROM rust:1-bookworm AS build
 ARG TARGET=x86_64-unknown-linux-musl
 RUN apt-get update && apt-get install -y --no-install-recommends musl-tools && rm -rf /var/lib/apt/lists/* && rustup target add "$TARGET"
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
-COPY src src
-COPY web web
-COPY migrations migrations
+COPY visit/client visit/client
+COPY auth/client auth/client
 RUN --mount=type=cache,target=/usr/local/cargo/registry --mount=type=cache,target=/src/target \
-    cargo build --release --target "$TARGET" && cp "target/$TARGET/release/visit-client" /visit-client
+    cargo build --release --locked --target "$TARGET" -p visit && cp "target/$TARGET/release/visit" /visit
 
 FROM scratch AS out
-COPY --from=build /visit-client /visit-client
+COPY --from=build /visit /visit

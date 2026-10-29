@@ -1,4 +1,6 @@
-//! visit-client: Visit's local client (../SPEC.md). One per workroom per machine. It owns all networking
+//! visit (../../V2.md): the one program a workroom needs; at its heart visit-client, Visit's local client
+//! (../SPEC.md). One per workroom per machine. It also serves the workroom's sign-in (../../auth/SPEC.md, the `auth`
+//! crate: its API in this process, `visit auth …` in a terminal). visit-client owns all networking
 //! (the lobby session, the links to other visit-clients, the visits), keeps them across page reloads,
 //! and serves the workroom's pages (the room's, the person's: engine/SPEC.md 3) on 127.0.0.1 only, or on a
 //! container's own network, behind a token. What it keeps, it keeps in its database
@@ -23,7 +25,8 @@ use tracing::error;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Parser)]
-#[command(version, about = "Visit's local client: the lobby, the links to other workrooms, and the page on 127.0.0.1 (visit/SPEC.md)")]
+#[command(name = "visit", version, about = "Visit, the one program a workroom needs: the lobby, the links to other workrooms, the page on 127.0.0.1, the sign-in (V2.md)",
+          after_help = "The sign-in's accounts, sessions and keys: visit auth --help")]
 struct Args {
     /// The lobby's wss:// (or, to test, ws://127.0.0.1:...) URL.
     #[arg(long, env = "VISIT_LOBBY")]
@@ -81,6 +84,25 @@ struct Args {
     /// to date after each upgrade, by `visit-client migrate --database <url>`.
     #[arg(long, env = "VISIT_DATABASE_URL", hide_env_values = true)]
     database: Option<String>,
+    /// The sign-in API (auth/SPEC.md 3), served by this program for the workroom's server: on when given the
+    /// service token's file (at least 32 characters, new each run, readable by the user only).
+    #[arg(long, env = "AUTH_TOKEN_FILE")]
+    auth_token_file: Option<PathBuf>,
+    /// The sign-in API's port.
+    #[arg(long, env = "AUTH_PORT", default_value_t = 7403)]
+    auth_port: u16,
+    /// The address the sign-in API answers on: 127.0.0.1, or, in a container, 0.0.0.0 (as --listen).
+    #[arg(long, env = "AUTH_LISTEN", default_value = "127.0.0.1")]
+    auth_listen: std::net::IpAddr,
+    /// A session ends after this long unused (a number and s, m, h or d).
+    #[arg(long, env = "AUTH_IDLE", default_value = "7d", value_parser = auth::secret::duration)]
+    auth_idle: Duration,
+    /// ...and after this long in all.
+    #[arg(long, env = "AUTH_MAX_AGE", default_value = "30d", value_parser = auth::secret::duration)]
+    auth_max_age: Duration,
+    /// The sign-in's database, as its own role: postgres://auth:password@host:port/database.
+    #[arg(long, env = "AUTH_DATABASE_URL", hide_env_values = true)]
+    auth_database: Option<String>,
 }
 
 /// `visit-client migrate`: makes the database ready for this visit-client, or brings it up to date after an
@@ -127,11 +149,14 @@ fn main() -> ExitCode {
     // A blank setting (`VISIT_PORT=` in a .env, ../../.env.example) means its default, as .env files have it;
     // clap would take it as an empty value. Done before the runtime starts any thread.
     for (k, v) in std::env::vars_os() {
-        if v.is_empty() && k.to_string_lossy().starts_with("VISIT_") {
+        if v.is_empty() && ["VISIT_", "AUTH_", "ENGINE_"].iter().any(|p| k.to_string_lossy().starts_with(p)) {
             std::env::remove_var(&k);
         }
     }
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("the tokio runtime");
+    if std::env::args().nth(1).as_deref() == Some("auth") {
+        return rt.block_on(auth::main_with(std::iter::once("visit auth".to_string()).chain(std::env::args().skip(2))));
+    }
     if std::env::args().nth(1).as_deref() == Some("migrate") {
         return rt.block_on(migrate(Migrate::parse_from(std::iter::once("visit-client migrate".to_string()).chain(std::env::args().skip(2)))));
     }
@@ -156,7 +181,7 @@ async fn migrate(m: Migrate) -> ExitCode {
 async fn run() -> ExitCode {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "visit_client=info,iroh=warn".into()))
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "visit=info,auth=info,iroh=warn".into()))
         .init();
     let a = Args::parse();
     let token = match (&a.token, &a.token_file) {
@@ -199,6 +224,9 @@ async fn run() -> ExitCode {
         return bad_flags("--lobby: a ws:// or wss:// URL");
     }
     let Some(database) = a.database.clone().filter(|d| !d.is_empty()) else { return bad_flags(NO_DATABASE) };
+    if a.auth_token_file.is_some() && a.auth_database.is_none() {
+        return bad_flags("the sign-in API (--auth-token-file) needs its database: --auth-database (or AUTH_DATABASE_URL)");
+    }
     let relays = a.relays.as_deref().map(|r| match r {
         "none" => link::Relays::Off,
         "default" => link::Relays::Default,
@@ -242,6 +270,26 @@ async fn run() -> ExitCode {
             error!("the page server stopped: {e}");
         }
     });
+    // The sign-in, in this process: ready (its token, its database, its port) before this says it is.
+    if let (Some(token_file), Some(database)) = (a.auth_token_file.clone(), a.auth_database.clone()) {
+        let visit = a.token_file.clone().map(|f| (a.port, f));
+        let serve = auth::Serve { database, port: a.auth_port, listen: a.auth_listen, token_file, idle: a.auth_idle, max_age: a.auth_max_age, visit };
+        match auth::serve_with(serve).await {
+            Ok(api) => {
+                let stopper = core_tx.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = api.await {
+                        error!("the sign-in API stopped: {e:#}");
+                        let _ = stopper.send(core::Ev::Shutdown);
+                    }
+                });
+            }
+            Err(e) => {
+                eprintln!("visit: the sign-in API: {e:#}");
+                return ExitCode::from(5);
+            }
+        }
+    }
     let ticker = core_tx.clone();
     tokio::spawn(async move {
         loop {

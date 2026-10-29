@@ -48,5 +48,5 @@ fi
 docker run --rm --network host -u "$(id -u):$(id -g)" -e HOME=/tmp -e VISIT_TEST_DB=postgres://postgres@127.0.0.1:$dbport \
   ${engine:+-e ENGINE_PORT=7425 -e VISIT_C_TOKEN="$(cat "$out/c.token")" -e VISIT_C_USER_TOKEN="$(cat "$out/c.user-token")"} \
   -v visit-target:/target:ro -v "$repo":/repo:ro -v "$out":/out -w /repo \
-  python:3.13-slim-bookworm sh -c 'pip install -q --user websockets==15.0.1 2>/dev/null && python3 -u visit/client/tests/browser_test.py /target/debug/visit-client 9351 9352 /out'
+  python:3.13-slim-bookworm sh -c 'pip install -q --user websockets==15.0.1 2>/dev/null && python3 -u visit/client/tests/browser_test.py /target/debug/visit 9351 9352 /out'
 echo "screenshots and logs: $out"

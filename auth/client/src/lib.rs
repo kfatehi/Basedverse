@@ -1,12 +1,13 @@
-//! auth-client (../SPEC.md): a workroom's sign-in. It keeps the owner's account (made in a terminal, never in a
+//! auth (../SPEC.md): a workroom's sign-in, built into `visit` (../../V2.md): `visit auth …` is its terminal side
+//! ([`main_with`]), and `visit` serves its API ([`serve_with`]). It keeps the owner's account (made in a terminal, never in a
 //! browser), checks passwords, makes and checks sessions and API keys, and hands visit-client's port and token to a
 //! signed-in session. It listens on 127.0.0.1 (in a container, on its container's own network: --listen), and only
 //! the workroom's server talks to it, with its service token. Its data is in Visit's own Postgres, in a schema and
 //! as a role of its own.
 mod api;
 mod cli;
-mod db;
-mod secret;
+pub mod db;
+pub mod secret;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -18,7 +19,7 @@ use tracing::error;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Parser)]
-#[command(version, about = "A workroom's sign-in: the owner's account, sessions and API keys, for its server (auth/SPEC.md)",
+#[command(name = "visit auth", version, about = "A workroom's sign-in: the owner's account, sessions and API keys, for its server (auth/SPEC.md)",
           args_conflicts_with_subcommands = true)]
 struct Args {
     #[command(subcommand)]
@@ -123,14 +124,20 @@ enum KeyCmd {
     Revoke { label: String },
 }
 
+/// `visit auth <args>`: what auth-client was on its own (its first argument, the program's name, is skipped).
 /// How it ends: 0 done; 1 it failed; 2 bad flags; 5 the database is not at the schema it needs (`migrate`).
-#[tokio::main]
-async fn main() -> ExitCode {
-    let a = Args::parse();
+pub async fn main_with<I: IntoIterator<Item = String>>(args: I) -> ExitCode {
+    let a = match Args::try_parse_from(args) {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = e.print();
+            return ExitCode::from(if e.use_stderr() { 2 } else { 0 });
+        }
+    };
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::try_from_env("AUTH_LOG").unwrap_or_else(|_| "info".into()))
         .with_writer(std::io::stderr).init();
     let Some(url) = a.database.clone() else {
-        eprintln!("auth-client: its database is required: --database or AUTH_DATABASE_URL (postgres://auth:password@host:port/database)");
+        eprintln!("visit auth: its database is required: --database or AUTH_DATABASE_URL (postgres://auth:password@host:port/database)");
         return ExitCode::from(2);
     };
     let done = match a.cmd {
@@ -145,7 +152,7 @@ async fn main() -> ExitCode {
         .map(|lines| lines.iter().for_each(|l| println!("{l}"))),
         Some(cmd) => match db::open(&url).await {
             Err(e) => {
-                eprintln!("auth-client: {e:#}");
+                eprintln!("visit auth: {e:#}");
                 return ExitCode::from(5);
             }
             Ok(c) => match cmd {
@@ -165,25 +172,59 @@ async fn main() -> ExitCode {
     match done {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("auth-client: {e:#}");
+            eprintln!("visit auth: {e:#}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// The sign-in API inside a running `visit` (V2.md 2.1): its settings, and visit-client's port and token file for
+/// `/v1/visit` (the same process: nothing to probe).
+pub struct Serve {
+    pub database: String,
+    pub port: u16,
+    pub listen: std::net::IpAddr,
+    pub token_file: PathBuf,
+    pub idle: Duration,
+    pub max_age: Duration,
+    pub visit: Option<(u16, PathBuf)>,
+}
+
+/// Readies the API: its token read, its database at the schema it needs, its port taken; then what serves it,
+/// until it fails. A `visit` awaits this before it says it is ready, so a sign-in that cannot start stops it.
+pub async fn serve_with(s: Serve) -> anyhow::Result<impl std::future::Future<Output = anyhow::Result<()>>> {
+    let token = read_token(&s.token_file).map_err(|e| anyhow::anyhow!(e))?;
+    if s.idle > s.max_age {
+        anyhow::bail!("--auth-idle is at most --auth-max-age");
+    }
+    let client = db::open(&s.database).await?;
+    let cfg = api::Config { database: s.database, listen: s.listen, port: s.port, token, idle: s.idle, max_age: s.max_age,
+                            visit: s.visit, visit_probe: false };
+    let listener = api::bind(&cfg).await?;
+    Ok(api::serve_on(cfg, client, listener))
+}
+
+/// The service token in `f`: at least 32 characters (and a warning when others may read it).
+fn read_token(f: &std::path::Path) -> Result<String, String> {
+    match std::fs::read_to_string(f) {
+        Ok(t) if t.trim().len() >= 32 => {
+            #[cfg(unix)]
+            if std::fs::metadata(f).is_ok_and(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o077 != 0) {
+                tracing::warn!("--token-file {}: others on this machine can read it (chmod 600 it)", f.display());
+            }
+            Ok(t.trim().to_string())
+        }
+        Ok(_) => Err(format!("--token-file {}: a token of at least 32 characters", f.display())),
+        Err(e) => Err(format!("--token-file {}: {e}", f.display())),
     }
 }
 
 async fn serve(a: Args, url: String) -> ExitCode {
     let token = match &a.token_file {
         None => return bad_flags("a service token is required: --token-file (or AUTH_TOKEN_FILE)"),
-        Some(f) => match std::fs::read_to_string(f) {
-            Ok(t) if t.trim().len() >= 32 => {
-                #[cfg(unix)]
-                if std::fs::metadata(f).is_ok_and(|m| std::os::unix::fs::PermissionsExt::mode(&m.permissions()) & 0o077 != 0) {
-                    tracing::warn!("--token-file {}: others on this machine can read it (chmod 600 it)", f.display());
-                }
-                t.trim().to_string()
-            }
-            Ok(_) => return bad_flags(&format!("--token-file {}: a token of at least 32 characters", f.display())),
-            Err(e) => return bad_flags(&format!("--token-file {}: {e}", f.display())),
+        Some(f) => match read_token(f) {
+            Ok(t) => t,
+            Err(e) => return bad_flags(&e),
         },
     };
     if a.idle > a.max_age {
@@ -208,6 +249,6 @@ async fn serve(a: Args, url: String) -> ExitCode {
 }
 
 fn bad_flags(msg: &str) -> ExitCode {
-    eprintln!("auth-client: {msg}");
+    eprintln!("visit auth: {msg}");
     ExitCode::from(2)
 }

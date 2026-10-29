@@ -46,7 +46,7 @@ want=" $* "
 
 echo "building visit-client (release) and the perf image"
 "$here/../../cargo" build --release >/dev/null 2>&1 || "$here/../../cargo" build --release
-docker run --rm -v visit-target:/target:ro -v "$out":/o alpine sh -c 'cp /target/release/visit-client /o/visit-client && chmod 755 /o/visit-client'
+docker run --rm -v visit-target:/target:ro -v "$out":/o alpine sh -c 'cp /target/release/visit /o/visit-client && chmod 755 /o/visit-client'
 docker build -q -t visit-perf "$here" >/dev/null
 [ -z "${BROWSERS:-}" ] || docker build -q -t visit-perf-browser -f "$here/Dockerfile.browser" "$here" >/dev/null
 docker network create "$net" >/dev/null 2>&1 || true

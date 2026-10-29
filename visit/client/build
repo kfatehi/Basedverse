@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Builds a static visit-client into ./bin/visit-client, in Docker (nothing to install). It runs on any Linux of
-# this machine's architecture. On macOS or Windows, download it from a release, or build it there, with Rust
-# installed (https://rustup.rs): `cargo build --release` in this directory gives target/release/visit-client
-# (Docker cannot help there: a container cannot listen on the host's 127.0.0.1).
+# Builds a static visit into ./bin/visit, in Docker (nothing to install). It runs on any Linux of this machine's
+# architecture. On macOS or Windows, download it from a release, or build it there, with Rust installed
+# (https://rustup.rs): `cargo build --release -p visit` at the repository's root gives target/release/visit.
 set -euo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-[ "$(uname -s)" = Linux ] || { echo "build: this makes a Linux binary; on $(uname -s), download it from a release (../INTEGRATING.md, step 1), or run: cargo build --release" >&2; exit 2; }
+repo="$(cd "$here/../.." && pwd)"
+[ "$(uname -s)" = Linux ] || { echo "build: this makes a Linux binary; on $(uname -s), download it from a release (../INTEGRATING.md, step 1), or run: cargo build --release -p visit" >&2; exit 2; }
 target="$(uname -m)-unknown-linux-musl"
 DOCKER_BUILDKIT=1 docker build -q -f "$here/Dockerfile.dist" --build-arg TARGET="$target" --target out \
-  --output "type=local,dest=$here/bin" "$here" >/dev/null
-echo "built $here/bin/visit-client ($target, static)"
+  --output "type=local,dest=$here/bin" "$repo" >/dev/null
+echo "built $here/bin/visit ($target, static)"

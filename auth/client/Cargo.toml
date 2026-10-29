@@ -1,9 +1,9 @@
 [package]
-name = "auth-client"
+name = "auth"
 version = "1.1.0"
 edition = "2021"
 license = "MIT"
-description = "A workroom's sign-in: the owner's account, sessions and API keys, for its server on 127.0.0.1 (../SPEC.md)"
+description = "A workroom's sign-in, built into visit (../../V2.md): the owner's account, sessions and API keys, for its server on 127.0.0.1 (../SPEC.md)"
 publish = false
 
 [dependencies]
@@ -24,12 +24,3 @@ tokio-postgres = "0.7.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
-[profile.release]
-strip = true      # a smaller file to hand around
-lto = "thin"
-
-# Argon2 at its real cost in a debug build too (the tests sign in, and an unoptimized hash takes seconds).
-[profile.dev.package.argon2]
-opt-level = 3
-[profile.dev.package.blake2]
-opt-level = 3

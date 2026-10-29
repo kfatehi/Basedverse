@@ -408,9 +408,21 @@ async fn listening(app: &Arc<App>, ticks: &mut u32) -> Result<()> {
 
 /// A run: the API on its address (127.0.0.1, or its container's network) until it is stopped.
 pub async fn serve(cfg: Config, client: Client) -> Result<()> {
+    let listener = bind(&cfg).await?;
+    serve_on(cfg, client, listener).await
+}
+
+/// Its port, taken (so a `visit` whose sign-in port is in use says so before it says it is ready).
+pub async fn bind(cfg: &Config) -> Result<tokio::net::TcpListener> {
+    let at = std::net::SocketAddr::new(cfg.listen, cfg.port);
+    tokio::net::TcpListener::bind(at).await.with_context(|| format!("the sign-in API's port: {at}"))
+}
+
+/// Serves on a port already taken ([`bind`]).
+pub async fn serve_on(cfg: Config, client: Client, listener: tokio::net::TcpListener) -> Result<()> {
     let dummy = tokio::task::spawn_blocking(|| secret::hash_password(&secret::hex(&secret::random(16)))).await??;
     let db = Db { url: cfg.database.clone(), client: tokio::sync::Mutex::new(Some(Arc::new(client))) };
-    let at = std::net::SocketAddr::new(cfg.listen, cfg.port);
+    let at = listener.local_addr()?;
     let app = Arc::new(App { cfg, db, sessions: Mutex::default(), keys: Mutex::default(), dummy, hashing: Semaphore::new(HASHING) });
     app.reload().await?;
     app.sweep().await?;
@@ -423,7 +435,6 @@ pub async fn serve(cfg: Config, client: Client) -> Result<()> {
         .route("/v1/visit", post(visit))
         .layer(DefaultBodyLimit::max(16 * 1024))
         .with_state(app);
-    let listener = tokio::net::TcpListener::bind(at).await.with_context(|| at.to_string())?;
     info!(version = VERSION, "listening on {at}");
     axum::serve(listener, router).with_graceful_shutdown(async { let _ = tokio::signal::ctrl_c().await; }).await?;
     Ok(())
