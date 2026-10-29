@@ -14,6 +14,12 @@ so walking in it is as quick as in your own. What everyone agrees on is a thin i
 two hooks, and two pieces everyone drops in unchanged.
 
 <p align="center">
+  <img alt="In a friend's workroom, drawn by your own page: Gooshy's office, its name on the ground, blocky agents at their desks under the kanban board, a visitor among them, the Visit panel, and you, walking around" src=".github/assets/gooshy-office.png">
+  <br>
+  <em>In a friend's room: Gooshy's office, with GOOSHY on the ground, drawn by your own page from what his room sends. The panel is yours; the room is his.</em>
+</p>
+
+<p align="center">
   <img alt="A workroom, an office: blocky agents at their desks, what each is doing written above it, a kanban board on the wall, one agent's console open beside you, the Visit panel, and you, walking around" src=".github/assets/office.png">
   <br>
   <em>A workroom: the office. Its kanban board on the wall, and an agent's console, open beside you.</em>
@@ -29,12 +35,6 @@ two hooks, and two pieces everyone drops in unchanged.
   <img alt="Another workroom, in a dark cave: blocky agents at their desks, what each is doing written above it, a kanban board on the wall, a tally of recruits lost, the Visit panel, and you, walking around" src=".github/assets/terrorist-sweatshop.png">
   <br>
   <em>And another: the terrorist sweatshop. Recruits lost: 0 (shot by the boss: 0, blew up: 0).</em>
-</p>
-
-<p align="center">
-  <img alt="The terrorist sweatshop with a friend over: blocky agents at their desks under the kanban board, two people walking among them, the friend's room next door with GOOSHY written on its ground, the Visit panel, and the chat window with lines from both" src=".github/assets/friend-over.png">
-  <br>
-  <em>With a friend over: Gooshy's room is next door in your world, its name on the ground, and you talk as you walk.</em>
 </p>
 
 <p align="center">
