@@ -83,7 +83,8 @@ and your page's address, gets `visit` for your machine, and writes your workroom
 agent writes the launcher, the token handoff, the scene and hooks, and the UI, and tests it on one machine.
 Your workroom must be made with three.js (r125 to r186): that is what every room shares. Nothing is installed:
 `visit` is one file for Linux, macOS or Windows, with its database (a Postgres) and a headless Chrome inside it,
-and Docker is never needed to run a workroom.
+and Docker is never needed to run a workroom. A room on Visit 1.x (visit-client, auth-client, a Postgres beside
+them) is upgraded first, by the guide's "Upgrading a 1.x room to 2.0" (the skill does it for you).
 By hand, that is:
 
 1. **Get this repository** (`git clone https://github.com/sarmiena/Basedverse`) anywhere; beside your

@@ -53,8 +53,8 @@ integration log.
 ## Step 1 — It is inside `visit`
 
 Nothing to get: from 2.0 the sign-in is built into `visit` ([../visit/INTEGRATING.md](../visit/INTEGRATING.md),
-step 1). Before 2.0 it was a program of its own, auth-client; [../CHANGELOG.md](../CHANGELOG.md)'s v2.0.0 says how
-a workroom moves over.
+step 1). Before 2.0 it was a program of its own, auth-client; a workroom on it moves over by
+[../visit/INTEGRATING.md](../visit/INTEGRATING.md)'s "Upgrading a 1.x room to 2.0".
 
 **Check:** `visit auth --help` lists its commands.
 
@@ -376,8 +376,8 @@ for method, path in ROUTES:
 
 Read [../CHANGELOG.md](../CHANGELOG.md) from your version up; then get the new `visit`
 ([../visit/INTEGRATING.md](../visit/INTEGRATING.md), "Upgrading"): the sign-in comes with it, its schema brought up
-to date by its first start, with nothing to run. From auth-client (1.x): the changelog's v2.0.0, "Upgrading" (its
-accounts, sessions and keys move in with `visit import`).
+to date by its first start, with nothing to run. From auth-client (1.x): ../visit/INTEGRATING.md's "Upgrading a 1.x
+room to 2.0" (its accounts, sessions and keys move in with `visit import`).
 
 ## Don't
 

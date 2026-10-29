@@ -29,7 +29,7 @@ python3 -m venv /tmp/lobby-venv && /tmp/lobby-venv/bin/pip install -r lobby/serv
 STUN_URLS= LOBBY_HOST=127.0.0.1 /tmp/lobby-venv/bin/python lobby/server/lobby.py      # ws://127.0.0.1:8765
 ```
 
-Then point two workrooms at `ws://127.0.0.1:8765` (two visit-clients, as
+Then point two workrooms at `ws://127.0.0.1:8765` (two `visit`s, as
 [../visit/INTEGRATING.md](../visit/INTEGRATING.md) step 8 runs them), knock from one, and let it in from
 the other.
 
@@ -68,8 +68,8 @@ visit-clients).
    LOBBY_URL=wss://<elastic-ip>/
    ```
 
-5. **Point the workrooms at it**: each gives `wss://<elastic-ip>/` as its lobby (`VISIT_LOBBY` for a
-   visit-client, [../.env.example](../.env.example)).
+5. **Point the workrooms at it**: each gives `wss://<elastic-ip>/` as its lobby (`VISIT_LOBBY` in its `.env`,
+   [../.env.example](../.env.example)).
 
 **Running it**, from your machine. The server is remembered (`LOBBY_DEPLOY` in this repository's `.env`,
 made on the first deploy), so:
