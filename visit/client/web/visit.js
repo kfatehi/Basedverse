@@ -342,9 +342,13 @@
   // the host's own, where a sim keeps its state (who a figure is, its handles), and never leaves its page; it is
   // put back as it was the moment the JSON is made.
   const SHARED_DATA = ["visitor", "visitPoint", "visitRider"];
+  // A geometry three.js's loader makes from no recipe: an EdgesGeometry or a WireframeGeometry (lines along another
+  // geometry's edges) says in its JSON only what it was made from, which is not there to make it from again.
+  const NO_RECIPE = new Set(["EdgesGeometry", "WireframeGeometry"]);
   function sharedJSON(o, meta) {
-    const kept = [];
+    const kept = [], lines = [];
     o.traverse(x => {
+      if (x.geometry && NO_RECIPE.has(x.geometry.type) && x.geometry.attributes && x.geometry.attributes.position) lines.push(x.geometry);
       const u = x.userData;
       if (!u || typeof u !== "object" || !Object.keys(u).length) return;
       const shared = {};
@@ -352,7 +356,16 @@
       kept.push([x, u]);
       x.userData = shared;
     });
-    try { return o.toJSON(meta); } finally { for (const [x, u] of kept) x.userData = u; }
+    try {
+      const json = o.toJSON(meta);
+      // Those travel as their lines: a plain geometry with their vertices, loaded anywhere.
+      for (const g of lines) {
+        const at = meta && meta.geometries ? meta.geometries : null, pos = g.attributes.position;
+        if (!at || !at[g.uuid] || at[g.uuid].type !== g.type) continue;
+        at[g.uuid] = { uuid: g.uuid, type: "BufferGeometry", data: { attributes: { position: { itemSize: pos.itemSize, type: pos.array.constructor.name, array: Array.from(pos.array), normalized: !!pos.normalized } } } };
+      }
+      return json;
+    } finally { for (const [x, u] of kept) x.userData = u; }
   }
 
   // Every uuid in a landscape's JSON named anew, in the order each first comes (L1, L2, ...), and every mention of

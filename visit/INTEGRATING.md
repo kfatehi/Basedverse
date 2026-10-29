@@ -426,7 +426,8 @@ visit.host({
   anything drawn outside the scene. **A primitive travels as its parameters**: a `BoxGeometry`, an
   `IcosahedronGeometry` and the rest go as what made them (`toJSON`), so corners you pulled on one arrive as
   the primitive, unpulled. A geometry whose vertices you edit must be a plain one: `new
-  THREE.BufferGeometry().copy(new THREE.IcosahedronGeometry(1, 1))`, then edit.
+  THREE.BufferGeometry().copy(new THREE.IcosahedronGeometry(1, 1))`, then edit. (An `EdgesGeometry` or a
+  `WireframeGeometry`, lines along another's edges, travels as its lines: Visit sees to it.)
 - **What it costs you**: under 1 ms of your page's time 30 times a second while you have visitors (Visit reads
   the scene for changes, your landscape aside), and the whole scene once as each visitor starts (`toJSON`: some
   tens of ms for a room of a few hundred objects; your landscape apart, once, to visitors who do not have it).
