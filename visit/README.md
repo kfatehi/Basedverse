@@ -1,6 +1,6 @@
 # Visit — walk around each other's workrooms
 
-**Status: built and tested on one machine (visit-client, visit.js, the lobby's version 3). Visit 0.4 has gone between two machines over the internet; 0.5 not yet. 0.7 adds worlds ([WORLD.md](WORLD.md)): your friends' rooms round yours, walked onto without knocking. 0.8 adds links ([SPEC.md](SPEC.md) 8.5): a room you link with shows in a corner first; go there, or put it in your world. 0.9 adds a map of your world, avatars (8.6), interactions by type (8.3: cosmetic ones unless the user agrees), voice by who is near in a room (8.7), and phones (8.8).**
+**Status: built and tested on one machine (visit-client, visit.js, the lobby's version 3). Visit 0.4 has gone between two machines over the internet; 0.5 not yet. 0.7 adds worlds ([WORLD.md](WORLD.md)): your friends' rooms round yours, walked onto without knocking. 0.8 adds links ([SPEC.md](SPEC.md) 8.5): a room you link with shows in a corner first; go there, or put it in your world. 0.9 adds a map of your world, avatars (8.6), interactions by type (8.3: cosmetic ones unless the user agrees), voice by who is near in a room (8.7), and phones (8.8). 1.0 adds the engine ([../engine/](../engine/)): the room's page runs headless, and the person's browser is one more client of it. 2.0 makes Visit one program, `visit`, with its database, the sign-in and the engine inside it ([SPEC.md](SPEC.md) 4).**
 
 Everyone builds their own workroom, with three.js, and Visit lets you walk around each other's with WASD
 and the mouse. The host sends its room's scene, as data; your browser draws it, with the host's very three.js
@@ -11,23 +11,23 @@ pieces everyone drops in unchanged.
 | doc | for |
 |---|---|
 | [INTEGRATING.md](INTEGRATING.md) | adding Visit to a workroom. Written for the coding agent doing it: hand it this file and say "integrate this into my workroom". |
-| [SPEC.md](SPEC.md) | the contract: the local client, the page connection, the lobby (`basedverse-lobby/3`), the link between machines, scenes and input, worlds, security, limits, errors, versions. For whoever builds or changes the shared pieces. |
+| [SPEC.md](SPEC.md) | the contract: `visit` and its local client, the page connection, the lobby (`basedverse-lobby/3`), the link between machines, scenes and input, worlds, security, limits, errors, versions. For whoever builds or changes the shared pieces. |
 | [WORLD.md](WORLD.md) | worlds: why they are the way they are, and what is still to come. |
 
 ## Giving it to someone
 
 Visit travels with the rest of basedverse: [../README.md](../README.md) says how to add it to a workroom
-(get the repository, get visit-client, hand the guide to a coding agent). The settings a workroom gives
-visit-client are in [../.env.example](../.env.example).
+(get the repository, get `visit`, hand the guide to a coding agent). The settings a workroom gives `visit`
+are in [../.env.example](../.env.example).
 
 ```
 visit/
   README.md          this
   INTEGRATING.md     the guide to hand an agent
   SPEC.md            the contract behind it
-  client/            visit-client (Rust) and visit.js, which it serves
-    build            a static binary into client/bin/ (Linux, in Docker)
-    cargo            cargo in Docker, for working on visit-client
+  client/            visit (Rust: visit-client, with the sign-in and the engine built in) and visit.js, which it serves
+    build            a static binary into client/bin/visit (Linux, in Docker)
+    cargo            cargo in Docker, for working on visit
     web/visit.js     the library
     tests/           the end-to-end and browser tests (with ../lobby/'s server), perf/ (visits through
                      simulated networks), and room.html, a small workroom to try it with
@@ -35,10 +35,12 @@ visit/
 
 ## The pieces
 
-- **visit-client** (Rust): the local client. One per workroom per machine, started by the workroom's
-  launcher. It owns all networking: the lobby session, the links to other visit-clients (QUIC through
-  [iroh](https://iroh.computer): direct when the two machines can reach each other, through a relay when
-  they cannot), and the visits. It survives page reloads, listens on 127.0.0.1 only, and takes a token.
+- **`visit`** (Rust): the one program a workroom runs, one per workroom per machine, started by the workroom's
+  launcher. At its heart is **visit-client**, the local client. It owns all networking: the lobby session, the
+  links to other visit-clients (QUIC through [iroh](https://iroh.computer): direct when the two machines can
+  reach each other, through a relay when they cannot), and the visits. It survives page reloads, listens on
+  127.0.0.1 only, and takes a token. Its database (a Postgres it carries), the workroom's sign-in
+  ([../auth/](../auth/)) and its engine ([../engine/](../engine/)) are inside it: nothing to install.
 - **visit.js**: the library in the workroom's page, served by its own visit-client (so the two always
   match). It talks only to that visit-client: it sends the room's scene to its visitors and moves them with the
   host hooks, draws the scene of the room it visits (with that room's three.js, checked against its hash), and
@@ -60,3 +62,4 @@ visit/
       relays (still encrypted end to end).
 - [x] A visit between two machines over the internet.
 - [x] A second workroom.
+- [x] One program, `visit`, with its database, the sign-in and the engine inside it (2.0).
