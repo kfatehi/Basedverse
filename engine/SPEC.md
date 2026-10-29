@@ -151,12 +151,17 @@ owner's visit: a visit of the host's with no link, over the two local connection
   itself (`id`, `name`, `key`: its own). Its `spawn` runs with `who.owner` true and `at` null when the user
   connects, and with `at` when the person steps back home from a plot (8.4); its `move` walks them; its
   interactions run for them (`who.owner` in each `run`). The host draws their body for others (8.6: their own
-  avatar, or its model, by the room's choice as for anyone) and reports where they are as `voice_where.me`.
-  They do not count toward `max_visitors`, nor as a watcher.
+  avatar, or its model, by the room's choice as for anyone: its `look(visitor)` hook, before the panel's
+  setting) and reports where they are as `voice_where.me`. A room that poses bodies itself (a seat, a drink,
+  a mount's wheel) says "mine" of `who.owner`: Visit's clips for an avatar are walk, idle and ride, and the
+  room's poses happen to the room's own figure. They do not count toward `max_visitors`, nor as a watcher.
 - **To the user** it is `home` (3.2): a visit whose `channel` carries the room's scene stream, exactly as a
   visit's link does (7.4): the whole scene, then deltas and edits; its inputs and points go up it (7.3). The
-  user's page walks at once by the host's `walk` and takes its answers (8.1); it draws its own body itself
-  (8.4, "the watcher's own body"), and never the host's copy of it (`userData.visitor`).
+  user's page walks at once by the host's `walk` and takes its answers (8.1). Itself it shows one of two ways:
+  its own body, drawn by the page, the host's copy of it hidden (`userData.visitor`; `v.world({ self: "mine" })`,
+  the default, as a watcher's own body, 8.4), or the host's copy (`self: "room"`), for a room that poses its
+  owner: then the host draws them (its `look` hook) and the page draws none of its own at home. The latter is
+  what the owner of a room with things to sit on and eat wants: what the room does to them is what they see.
 - **`yaw0` is 0** for the owner's visit, as for a watch: the person's look is in the room's own terms.
 - **Rate limits** as a visitor's (visit/SPEC.md 3, point 7): inputs clamped, at most 120 a second, points 5.
 - **Pictures, voice messages, the avatar, mounts** go from the user as they do from any page today (page to
@@ -357,13 +362,18 @@ const v = await Visit.connect({ port, token, sim: { name, version } });
   or null, `"change"` as it changes). Everything personal works as today. Two ways to draw home:
   - **`Visit.stage(v)`** draws home full-window as it draws a visited room, first person, the room's
     `walk` at once: the vanilla client page is `connect`, `stage`, `panel`.
-  - **`v.world({ three, renderer, ground, gap, bubbles, speaking })`**, for a room with a camera of its own
-    (third person, from above): no `scene`, since the page has none. Visit reads home from the host's stream
+  - **`v.world({ three, renderer, ground, gap, bubbles, speaking, self })`**, for a room with a camera of its
+    own (third person, from above): no `scene`, since the page has none. Visit reads home from the host's stream
     with the page's `three` (or fetches the host's revision, as a stage does), makes it the office's own plot,
     and draws friends' plots round it as today. `world.frame(dt, pose, input)` sends `input` up the home
     channel (or the plot's, when inside one) and returns where its host has the person; the page draws its own
-    body there, and `world.render(camera)` draws it all. `world.room` is the home scene's root, read-only: for a
-    camera to follow something, never to change (the host owns it); `world.plots` lists home too (`home: true`).
+    body there (`self: "mine"`, the default) or shows the host's copy of it (`self: "room"`, section 4; settable
+    as the page goes, for first person), and `world.render(camera)` draws it all. `world.point(target)` sends a
+    click as a point aimed from the person's eyes at `target`, a point in the page's world (what its own ray
+    met in the received scene): a camera behind the body does not look along the body's line; without `target`,
+    where the page looks. `world.atHome` says whether the person is in their own room. `world.room` is the home
+    scene's root, read-only: for a camera to follow something, never to change (the host owns it); `world.plots`
+    lists home too (`home: true`).
 - `v.visitors` is informational for a user (the panel's Kick, Unlink): `pose` and `look` as the host reports
   them; no inputs.
 - **A page without a role** has every method, as today.

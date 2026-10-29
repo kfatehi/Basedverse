@@ -449,6 +449,14 @@ Through the HTTPS proxy of auth step 10, on your LAN first, then from outside it
 - [ ] At the desk: walking feels as before; the ⏱ reports, before and after, kept.
 - [ ] From another device: step 7 passes; nothing on the office machine's host ports but the proxy's.
 - [ ] `visit-client`, `auth-client` and `visit-engine` from one release; `migrate --status` up to date.
+- [ ] Nothing the browser decided decides the room: no `localStorage`, `matchMedia` or `?query` behind the server
+      page's look; the environment, the theme, the owner's look through your server.
+- [ ] Every mark the person's page reads is a name, not `userData`; every geometry you deform is a plain one.
+- [ ] The room draws its owner (`look` hook) and the person's page shows that copy (`self: "room"`); poses the
+      old page gave `me` are given the owner's body.
+- [ ] Clicks aimed at what the person's ray met; the hand by `visitPoint`; your click division kept, `visitor.owner`
+      yours; the reach rule said on the person's page.
+- [ ] The jump, and any physics the page did to its owner, in `move`.
 
 ## Troubleshooting
 
@@ -470,11 +478,86 @@ Through the HTTPS proxy of auth step 10, on your LAN first, then from outside it
 | a slow laptop's page keeps closing 4408 | the scene is too big for its link (the relay's 1 MiB): a landscape marked `visitStatic` is sent once and cached; mark more of the room static |
 | walking from the laptop lags behind the keys | the room gives no `walk` (`v.host`): then walking waits for the round trip; give the speed your `move` uses |
 | `/api/visit` is still asked for | an old client page: it must connect through `/visit/ws` with no token |
+| the room's colours are wrong for the person: white walls, day under a dark theme, the wrong environment | the engine's page decided from its own browser (light, an empty `localStorage`): the setting, the theme, the look go through your server (Upgrading, below) |
+| two rooms over each other, a striped floor | the person's page still builds scenery of its own (an environment from the address or `localStorage`) |
+| a deformed primitive arrives as the primitive (round boulders) | a primitive travels as its recipe: a plain `BufferGeometry` |
+| walls, slopes or the ground ghost or fade wrongly on the person's page | your fade reads `userData` marks, which do not travel: names |
+| clicks do nothing, no hand over a seat | the page points where the body faces, not where the mouse was: `world.point(hit.point)`; the hover looks for `visitPoint` in the received scene |
+| the engine's log says the owner ate, sat or threw (`-> thing`, `-> throw`) and the person saw nothing | Visit drew the avatar over the room's posed dude: `look` hook "mine" for `who.owner`, `v.world({ self: "room" })` |
+| the owner cannot jump | the page's own physics: a jump in `move` |
+| `Unsupported geometry type "EdgesGeometry"`, `Undefined geometry` in the person's console | a plot from an older host: its outlines arrive empty, harmless |
 
 ## Upgrading
 
 [../CHANGELOG.md](../CHANGELOG.md), as for Visit: the engine's image, visit-client and auth-client move together,
 one version; `visit-client migrate` after each.
+
+### A room that hosts today: what the first one taught
+
+The Sweatshop made the split in a day, then spent a day at the desk finding what the split breaks. Every item
+below cost an hour of looking at a wrong room. Read them before you start; go down them after. The lobby did not
+change: a room on an older Visit visits you and is visited as before, so nobody else has to move when you do.
+
+**Everything your page took from the browser is now the engine's, not the person's.**
+
+- The environment picked in a dropdown and kept in `localStorage` or `?env=`: the engine's page drew its own
+  (the default) under the person's, two rooms over each other, a striped floor. A setting goes to your server;
+  every page follows the snapshot ("Settings", above).
+- Dark mode: headless Chromium is light. The room drew its day palette, white walls and floor, under a dark
+  theme. The person's page tells your server its theme; the engine's page sets `data-theme` from it, so its CSS
+  colours, palettes and lights follow.
+- The owner's look, picked at random and kept in the browser: the room's page had no idea of it. Through your
+  server too.
+- The rule: grep your page for `localStorage`, `matchMedia`, `prefers-color-scheme`, `location.search`,
+  `devicePixelRatio`, `innerWidth`. Each is a decision that moves to your server, or is made per page on purpose.
+
+**What travels, and what does not.**
+
+- `userData` is stripped to `visitor`, `visitPoint` and `visitRider`. Every mark your page read to decide things
+  (what is a floor, what is rock, what may fade, what is a roof to lift) is gone on the person's page: the
+  mountain's slopes ghosted, the ground you walked on faded. Names travel: suffix them (`#floor`, `#rock`,
+  `lid:`) where you build, and read them on the person's page.
+- A primitive geometry travels as its recipe: corners you pulled arrive unpulled (round boulders). Copy it into a
+  plain `BufferGeometry` first (visit/INTEGRATING.md).
+- An `EdgesGeometry` or `WireframeGeometry` travels as its lines from this release on; from an older host it
+  arrives empty.
+- Visibility you toggle at draw time for your own camera (a cave's roof lifted for the overview) reaches nobody:
+  the person's page does the same to the received scene, by name.
+
+**The owner is a visitor now, and your page is two.**
+
+- Physics your page did to its owner locally (a jump, falling, a mount's lift) is gone: the room walks them.
+  Move it into `move`, for everyone (a jump on `up`, once a press).
+- Clicks: a visitor's point is a direction from their eyes, and a third-person camera's mouse ray is not. The
+  person's page casts its own ray into the received scene and calls `world.point(hit.point)`, which aims from the
+  eyes at it; the hand shows for `userData.visitPoint` there, with some slack for small things (a mosquito).
+- Your division of clicks (yours against a guest's): the owner's clicks arrive as a visitor's point. Keep the
+  table: `visitor.owner` marks them yours, entries that open things on your screen never run from a point, and
+  the typed path (Visit's interactions) passes `visitor` too.
+- The room's word to a visitor ("you are too far away") does not reach a screen: say the rule on the person's
+  page as well.
+
+**Who draws the owner.**
+
+- With the panel on "visitors look like their model", Visit draws the owner's avatar with its own clips (walk,
+  idle, ride). The room's poses (a seat, a drink, the peel in a hand) happen to the room's own dude, hidden under
+  it. The owner clicked bananas and saw nothing; the engine's log said `-> throw`. The room draws its owner:
+  `look: who => who.owner ? "mine" : undefined` in `visit.host`, with the look from your server; the person's
+  page shows the room's copy, `v.world({ self: "room" })`, and hides its own dude at home. Your old page's poses
+  for `me` (sat at a wheel) become poses for the owner's body in your visitor code.
+- Shadows and lights travel whole (checked pixel by pixel). The owner's own dude had no shadow because it lived in
+  the page's scene, apart from the floor; the room's copy has one.
+
+**Operating it.**
+
+- The engine's log is your only screen: `console.info` in the server page lands there. Log each point and each
+  `tell` while proving; `ENGINE_DEBUG=1` gives `/debug/eval` on the compose network, for the proving alone.
+- Never `docker compose up -d engine`: it recreates visit-client without the launcher's environment, a crash
+  loop and the room gone. Use the launcher; `docker compose restart engine` reloads the page alone. Every engine
+  restart reloads the page, and whatever you poked into it.
+- The person's page reconnects by itself when visit-client restarts, but a page loaded before a deploy keeps the
+  old code: reload before judging anything.
+- Tests that grep your page (a click table's gate) break on the refactor: move them with it.
 
 ## Don't
 
