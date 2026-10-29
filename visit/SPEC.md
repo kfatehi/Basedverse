@@ -1,8 +1,8 @@
 # Visit — the specification
 
-**Status: built** (visit-client and visit.js in `client/`, the lobby's version 3 in `../lobby/server/`) and
-tested on one machine (Visit 0.4 went between two machines over the internet; 0.5 not yet). This is the
-contract they are built to. Where it says MUST, SHOULD or MAY, those words mean what RFC 2119 says they mean.
+**Status: built** (`visit`, the one program a workroom runs, with visit-client and visit.js, in `client/`; the
+lobby's version 3 in `../lobby/server/`), and in use between machines over the internet. This is the contract they
+are built to. Where it says MUST, SHOULD or MAY, those words mean what RFC 2119 says they mean.
 
 Visit lets the people running agent-office sims ("workrooms") walk around each other's rooms. Every room
 is made with three.js. A visitor moves with WASD and the mouse; the host sends its room's scene, as data,
@@ -30,7 +30,7 @@ how-to. This file is the contract behind it, for whoever builds or changes the s
 
 | piece | what it is | who provides it |
 |---|---|---|
-| **visit-client** | the local client: a Rust binary, one per sim per machine. Owns **all** networking: the lobby session, the links to other visit-clients, visit state. Listens on 127.0.0.1 only. | shared, identical for everyone |
+| **visit-client** | the local client: the heart of `visit`, the one program a workroom runs (section 4), one per sim per machine. Owns **all** networking: the lobby session, the links to other visit-clients, visit state. Listens on 127.0.0.1 only (or a container's own network, 4.1). | shared, identical for everyone |
 | **visit.js** | the library, in the sim's page. Talks only to its own visit-client. Sends the room's three.js scene to its visitors and moves them with the sim's hooks; draws the scene of the room it visits; captures input. Served by the visit-client itself, so the two always match. | shared, identical for everyone |
 | **lobby server** | presence, knocks, and introducing visit-clients to each other (`basedverse-lobby/3`, section 6). | shared, one server |
 | **relay** | an [iroh](https://iroh.computer) relay, for links between machines that cannot reach each other directly. Encrypted end to end; it cannot read what it carries. | shared: the ones the lobby names (`relays` in its welcome); until one runs beside the lobby, iroh's public relays |
@@ -75,7 +75,8 @@ These are MUSTs for the visit-client. They exist because any web page a person o
 program listening on their machine.
 
 1. **127.0.0.1 only.** The visit-client binds its HTTP/WebSocket listener to 127.0.0.1 and nothing else
-   (not 0.0.0.0, not ::, not a LAN address). It refuses to start if asked to bind elsewhere.
+   (not ::, not a LAN address), or, told `--listen 0.0.0.0` in a container, its container's own network, its port
+   never published (../engine/SPEC.md 6.1). It refuses to start if asked to bind elsewhere.
 2. **A token on the page connection.** The visit-client is started with a token (at least 32 hex
    characters, from a cryptographically secure source, new for every run). A page connection MUST send it
    in its first message (`hello`, section 5.1) within 5 s; the visit-client compares it in constant time
@@ -84,10 +85,11 @@ program listening on their machine.
 3. **The token reaches only the sim's own page.** The launcher hands it to the sim's page by a route other
    sites cannot read: the sim's own server answering a same-origin request, a file served beside the page,
    or the page's URL fragment (INTEGRATING.md step 3). It is never written into a URL query, a log, or
-   anything served to another origin. A server that hands it over gives it only to its signed-in owner
-   (auth-client's `/v1/visit`, ../auth/SPEC.md 3) or, without a sign-in, SHOULD answer only requests naming this
-   machine (`Host: localhost` or `127.0.0.1`): that turns away DNS-rebinding sites, and nothing more (a program on
-   the network can send any `Host`). What keeps the network out is that server listening on `127.0.0.1`.
+   anything served to another origin. A server that hands it over gives it only to its signed-in owner (the
+   sign-in API's `/v1/visit`, served by `visit` itself, ../auth/SPEC.md 3) or, without a sign-in, SHOULD answer
+   only requests naming this machine (`Host: localhost` or `127.0.0.1`): that turns away DNS-rebinding sites, and
+   nothing more (a program on the network can send any `Host`). What keeps the network out is that server
+   listening on `127.0.0.1`.
 4. **The page's origin, too (SHOULD, always).** Given `--origins` (the sim's own page origins), the visit-client
    refuses (HTTP 403) a page connection from any other. Browsers always send a WebSocket's origin and a page
    cannot change it, so a token that leaked anyway is no use to another site's page.
@@ -127,15 +129,20 @@ Visitors get the host's whole scene: a sim that shows issue titles or agent acti
 to its visitors, wherever they stand and whether they look or not. Letting someone in is the host's
 decision, one knock at a time, or once and for all for its guests (point 9).
 
-## 4. The visit-client
+## 4. The visit-client: `visit`
+
+The visit-client is the heart of `visit`, the one program a workroom runs: one file per platform (Linux x86_64 and
+ARM64 with glibc 2.28 or newer, macOS 11 or later on Apple silicon and Intel, Windows x86_64), with everything it
+needs inside it. Besides the visit-client it serves the workroom's sign-in (../auth/SPEC.md) and runs its engine
+(../engine/SPEC.md 5), and it carries a Postgres, its database (4.4), and a headless Chrome, the engine's, each
+with every library it needs. Nothing is installed, nothing is downloaded as it runs, and it needs no Docker. How
+the Postgres and the Chrome are built and pinned: [../deps/README.md](../deps/README.md).
 
 ### 4.1 Running it
 
 ```
-visit-client --lobby wss://lobby.example/ --name "Magic Room" --sim my-sim/1.0 \
-             --port 7401 --token-file /run/user/1000/visit.token \
-             --database postgres://visit:<password>@127.0.0.1:7432/visit [--max-visitors 3] [--idle-exit 0]
-visit-client migrate --database postgres://visit:<password>@127.0.0.1:7432/visit [--status]
+visit --lobby wss://lobby.example/ --name "Magic Room" --sim my-sim/1.0 \
+      --port 7401 --token-file /run/user/1000/visit.token [--max-visitors 3] [--idle-exit 0]
 ```
 
 | flag | env | default | meaning |
@@ -143,37 +150,50 @@ visit-client migrate --database postgres://visit:<password>@127.0.0.1:7432/visit
 | `--lobby` | `VISIT_LOBBY` | — (required) | the lobby's `wss://` (or, for a local test, `ws://127.0.0.1:…`) URL |
 | `--name` | `VISIT_NAME` | — (required) | the office's name: 1–24 letters, digits, space, `_ . -`, starting and ending with a letter or digit |
 | `--sim` | `VISIT_SIM` | `unknown/0` | `name/version` of the sim, shown to others |
-| `--port` | `VISIT_PORT` | 7401 | the 127.0.0.1 port for the page |
-| `--token` / `--token-file` | `VISIT_TOKEN` / `VISIT_TOKEN_FILE` | — (required) | the page token (section 3). `--token-file` keeps it off the process list and SHOULD be preferred |
+| `--port` | `VISIT_PORT` | 7401 | the port for the page |
+| `--listen` | `VISIT_LISTEN` | `127.0.0.1` | the address it answers the page on: `127.0.0.1`, or, in a container, `0.0.0.0`, its container's own network, its port never published (../engine/SPEC.md 6.1). Nothing else (exit 2) |
+| `--token` / `--token-file` | `VISIT_TOKEN` / `VISIT_TOKEN_FILE` | — (required) | the page token (section 3): the host's, and a page's without a role (../engine/SPEC.md 6.2). `--token-file` keeps it off the process list and SHOULD be preferred |
+| `--user-token` / `--user-token-file` | `VISIT_USER_TOKEN` / `VISIT_USER_TOKEN_FILE` | none | the user token, for a room on the engine: what the workroom's server relays a person with (../engine/SPEC.md 6.2, 6.3). As the page token: at least 32 hex characters, new each run, and another one. None: no user connection is taken |
 | `--max-visitors` | `VISIT_MAX_VISITORS` | 3 | 0–8; 0 takes no visitors |
 | `--idle-exit` | `VISIT_IDLE_EXIT` | 0 | exit after this many seconds with no page connected (0: never) |
 | `--origins` | `VISIT_ORIGINS` | none | the page origins allowed to connect (`http://localhost:3000`, comma-separated); none: any page with the token (section 3, point 4) |
 | `--relays` | `VISIT_RELAYS` | the lobby's | the relays for links: `none`, `default` (iroh's own), or URLs, comma-separated |
-| `--state-file` | `VISIT_STATE_FILE` | none | a file where it keeps what outlasts a run: whether the office is away (`leave_lobby`, 5.2), so a restart stays away; its key (section 2), so it is the same office to its guests' hosts; its door and its guests; its world's layout (8.4); whose look its visitors have (8.6). Readable by its owner only (section 3, point 10). None: every start joins the lobby, with a new key and no guests. A launcher SHOULD give one |
-| `--database` | `VISIT_DATABASE_URL` | — (required, Visit 0.20) | its database (8.12): Postgres beside it, `postgres://user:password@host:port/database`, no TLS (on this machine or its own network). Made ready, and brought up to date after every upgrade, by `visit-client migrate`; a start checks it is at the schema it needs |
-| `--cache-dir` | `VISIT_CACHE_DIR` | beside the state file (`landscapes/`); none without one | where it keeps friends' landscapes (8.10), each by its office's key and hash, at most 256 MiB (the oldest go first), and the plots it keeps to draw while their offices are away; without a directory, for the run only |
+| `--data-dir` | `VISIT_DATA_DIR` | `basedverse/<the name>` in the user's data folder (4.4) | where the workroom keeps everything (4.4): its database, its state file, friends' landscapes. A launcher SHOULD give one, so a renamed office keeps its data |
+| `--state-file` | `VISIT_STATE_FILE` | `state.json` in the data directory | a file where it keeps what outlasts a run: whether the office is away (`leave_lobby`, 5.2), so a restart stays away; its key (section 2), so it is the same office to its guests' hosts; its door and its guests; its world's layout (8.4); whose look its visitors have (8.6). Readable by its owner only (section 3, point 10) |
+| `--cache-dir` | `VISIT_CACHE_DIR` | `landscapes/` in the data directory | where it keeps friends' landscapes (8.10), each by its office's key and hash, at most 256 MiB (the oldest go first), and the plots it keeps to draw while their offices are away |
+| `--auth-token-file` | `AUTH_TOKEN_FILE` | none: no sign-in API | the sign-in API's service token (../auth/SPEC.md 3): given, `visit` serves the API |
+| `--auth-port`, `--auth-listen`, `--auth-idle`, `--auth-max-age` | `AUTH_PORT`, `AUTH_LISTEN`, `AUTH_IDLE`, `AUTH_MAX_AGE` | 7403, `127.0.0.1`, `7d`, `30d` | the sign-in API's (../auth/SPEC.md 8) |
+| `--engine-room-url` | `ENGINE_ROOM_URL` | none: no engine | the room's server page: given, `visit` hosts it in its engine (../engine/SPEC.md 5) |
+| `--engine-port`, `--engine-tick-idle`, `--engine-memory-max`, `--engine-window`, `--engine-log`, `--engine-debug` | `ENGINE_PORT`, `ENGINE_TICK_IDLE`, `ENGINE_MEMORY_MAX`, `ENGINE_WINDOW`, `ENGINE_LOG`, `ENGINE_DEBUG` | 7405, 10, 1024, `1280x720`, `info`, off | the engine's (../engine/SPEC.md 5.2) |
 
 A flag wins over its environment variable, and a variable set but blank counts as unset (its default), as a
-`.env` file has it. [`../.env.example`](../.env.example) is the template of them all.
+`.env` file has it. [`../.env.example`](../.env.example) is the template of them all. There is no setting for a
+database: the one inside `visit` is the database (4.4).
 
-On start it prints **one JSON line** to stdout once it listens, then logs to stderr:
+On start it prints **one JSON line** to stdout once it is ready (its database up and its page's port taken; when
+asked for, the sign-in API's port taken, and the engine's port taken and its Chrome unpacked), then logs to stderr
+(`RUST_LOG`, in tracing's filter syntax, replaces its default, `visit=info,auth=info,engine=<ENGINE_LOG>,iroh=warn`):
 
 ```json
-{"ready": true, "port": 7401, "version": "0.7.0", "proto": "basedverse-visit-local/2"}
+{"ready": true, "port": 7401, "version": "2.0.0", "proto": "basedverse-visit-local/2"}
 ```
 
-Exit codes: 0 asked to stop (SIGINT/SIGTERM, or idle-exit); 2 bad flags (no `--database` among them: it says how to
-have one); 3 the port is taken; 4 the lobby refused it for good (`proto_unsupported`, `name_invalid`); 5 its database:
-not reached in 30 s, or not at the schema this visit-client needs (it says what to run: `visit-client migrate`).
+Exit codes: 0 asked to stop (4.2), or idle-exit; 2 bad flags (it says which); 3 the page's port is taken; 4 the
+lobby refused it for good (`proto_unsupported`, `name_invalid`); 5 the workroom could not start, and it says why:
+another `visit` runs it already (4.2), its database (Postgres did not start, its log named; or could not be made
+ready), the sign-in API (its token file, its port) or the engine (its port, `ENGINE_ROOM_URL`, its Chrome).
 
-**`visit-client migrate`** (`--database`, or `VISIT_DATABASE_URL`) makes its database ready, or brings it up to date
-after an upgrade: each migration this visit-client knows that the database lacks, in order, once, each in a
-transaction of its own (recorded in `visit_migrations`), one run at a time (an advisory lock). It refuses a database
-newer than it knows. `--status` says where the database is and what is pending, changing nothing. Exit 0, or 1 and
-why. The migrations are built into the binary: whoever has a visit-client has its migrations.
+There is no migrate step: `visit` brings its database up to date itself, at every start (4.4). The commands beside
+a run (`visit auth …`, `visit import`, `visit psql`, `visit status`) are in 4.5.
 
 ### 4.2 Lifecycle
 
+- **One per workroom.** A workroom is its data directory (4.4): a running `visit` holds its `visit.lock`, and a
+  second `visit` for the same directory is refused (exit 5). Two workrooms on one machine have two data
+  directories (two names, or two `--data-dir`), and two of each port.
+- **Starting.** Postgres first (made at the first start, brought up to date at every one: 4.4), then the page's
+  port, the lobby, the sign-in API and the engine (each when asked for), then the ready line (4.1). A first start
+  takes longer: it unpacks what is inside `visit` and makes the database.
 - **Hosting.** The office is in the lobby to be visited, and can knock, only while a page hosts its scene
   (`host`, 5.2): the visit-client publishes its link to the lobby then (6.1), and withdraws it when the page
   goes; visits under way carry on.
@@ -195,9 +215,12 @@ why. The migrations are built into the binary: whoever has a visit-client has it
 - **Away.** The page can take the office out of the lobby on purpose (`leave_lobby`) while the visit-client
   goes on running: its visits end (`"gone"`), its knocks go, it says `bye` (no resume window) and stays out,
   reconnecting to nothing, until the page sends `join_lobby`, which starts a new session (a new office
-  id). With `--state-file` it stays away across restarts too: a visit-client started away joins nothing.
-- **Stopping** the visit-client takes the office out of the lobby, which ends all its visits.
-- **`--idle-exit`** is for sims whose launcher starts the visit-client again whenever the page loads. It
+  id). Its state file keeps it away across restarts too: a visit-client started away joins nothing.
+- **Stopping** (SIGINT or SIGTERM; on Windows, Ctrl-C or its console closing) takes the office out of the lobby,
+  which ends all its visits; then the engine stops, its browser with it, and Postgres last (a fast shutdown:
+  nothing kept is lost). A `visit` killed outright (SIGKILL; on Windows, a launcher's kill) leaves its Postgres
+  running: the next `visit`, or command, for the workroom stops it first.
+- **`--idle-exit`** is for sims whose launcher starts `visit` again whenever the page loads. It
   counts from the last page disconnect.
 
 ### 4.3 HTTP on 127.0.0.1
@@ -208,6 +231,95 @@ why. The migrations are built into the binary: whoever has a visit-client has it
 | `GET /health` | none | `{"ok": true, "version": "0.7.0"}` |
 | `GET /ws` (WebSocket upgrade) | `hello.token` (5.1) | the page connection |
 | anything else | — | 404 |
+
+The sign-in API (../auth/SPEC.md 3) answers on a port of its own (`AUTH_PORT`, at `AUTH_LISTEN`), and the engine's
+`/health` (../engine/SPEC.md 5.1) on `ENGINE_PORT`, at `--listen`'s address: each only when asked for (4.1).
+Postgres answers on 127.0.0.1 alone, to `visit` and its commands (4.4).
+
+### 4.4 What it keeps, and what it carries
+
+Everything a workroom keeps is in its **data directory** (`VISIT_DATA_DIR`):
+
+```
+<VISIT_DATA_DIR>/
+  visit.lock            held by the running visit (a second one is refused; a command uses its Postgres)
+  state.json            the state file (VISIT_STATE_FILE)
+  landscapes/           friends' landscapes (VISIT_CACHE_DIR)
+  postgres/data/        the database (Postgres' own log: postgres/data/start.log)
+  postgres/secrets      its roles' passwords (the superuser, visit, auth), readable by the user only
+  postgres/pwfile       the superuser's, for initdb; readable by the user only
+  engine/profile/       the engine's browser profile, made new each start
+```
+
+Without `VISIT_DATA_DIR` it is `basedverse/<the office's name>` in the user's data folder (`$XDG_DATA_HOME` or
+`~/.local/share` on Linux, `~/Library/Application Support` on macOS, `%LOCALAPPDATA%` on Windows), the name made a
+folder's (letters and digits kept, in lower case, anything else a `-`: "Magic Room" is `magic-room`); a name with
+no letter or digit needs `VISIT_DATA_DIR`. It holds the office's key and the database's passwords: a secret, as
+the state file is (section 3, point 10), never in a repository, never copied elsewhere. A copy of it, taken while
+its `visit` is stopped, is a backup of the workroom.
+
+**What `visit` carries** (its Postgres, its Chrome) is unpacked once into `basedverse/runtime/` in the user's data
+folder, a directory per version (`postgresql-18.6-1-<platform>/`, `chrome-156.0.8078.73-1-<platform>/`), shared by
+every workroom of that user. Each is checked against the sha256 it was built with before it is unpacked, and
+marked with it (`.visit-sha256`, written last): a directory without the mark is unpacked again. Two `visit`s
+starting at once each unpack into a directory of their own, and the first to move it into place wins.
+
+**The database** is that Postgres, run by `visit` as its child, its data in `postgres/data`:
+
+- **The first start** makes it: `initdb` with the built-in `C.UTF-8` locale (the same on every platform) and
+  SCRAM passwords, the superuser's (`postgres`) and the two roles' made at random and kept in `postgres/secrets`.
+- **Every start**: `pg_hba.conf` written (the roles, with their passwords, from 127.0.0.1 only); Postgres on
+  127.0.0.1, on a port free at that moment, with no Unix socket. Then, as the superuser, the database `visit` and
+  its two roles made right: `visit` (the visit-client's) and `auth` (the sign-in's, ../auth/SPEC.md 5), each a
+  plain role owning a schema of its name, reading nobody else's. Then each schema brought up to date as its own
+  role: each migration this `visit` knows that the database lacks, in order, once, each in a transaction of its
+  own (recorded in `visit.visit_migrations` and `auth.migrations`). The migrations are built into the binary:
+  whoever has a `visit` has its migrations. A Postgres left running by a `visit` that was killed is stopped first.
+- **Stopping**: last, after everything else (4.2).
+- **Its user.** Postgres won't run as root, and `initdb` asks the system for the user's name: `visit` runs as a
+  user the machine knows.
+- **In a container** (`--listen 0.0.0.0`), so: a user the container's `/etc/passwd` names, not root; a home it can
+  write (the user's data folder, where what `visit` carries is unpacked); `VISIT_DATA_DIR` on a volume; and the C
+  library Postgres and Chrome need (glibc 2.28 or newer). Chrome's own sandbox does not run there: the engine starts
+  it without (../engine/SPEC.md 5.3).
+- **A newer Postgres.** A `visit` carrying a new minor version (18.6 to 18.7) unpacks it and runs the same data. A
+  new major version (19) would need `pg_upgrade` from one to the other: no `visit` does that yet.
+
+What the database holds is 8.12's, and the sign-in's (../auth/SPEC.md 5).
+
+### 4.5 The commands
+
+| command | does |
+|---|---|
+| `visit auth <command>` | the sign-in's accounts, sessions and keys, in a terminal (../auth/SPEC.md 2): `user add`, `user list`, `user remove`, `passwd`, `sessions`, `revoke`, `key add`, `key list`, `key revoke` |
+| `visit import <URL>` | moves a 1.x workroom's database in, once (below) |
+| `visit psql [<psql's arguments>]` | a `psql` on the workroom's database (`visit`), as its superuser; what follows goes to `psql` (`visit psql -c '\dn'`) |
+| `visit status` | its version, what it carries, where the workroom's data is, where the runtime is, and whether the workroom's `visit` runs |
+| `visit --version` | its version, and the Postgres and Chrome it carries: `visit 2.0.0 (Postgres 18.6, Chrome 156.0.8078.73)` |
+| `visit --help`, `visit auth --help` | the flags; the sign-in's commands |
+
+**Which workroom**: `VISIT_DATA_DIR`, else the default made from `VISIT_NAME` (4.4), as a run finds it, so a command
+run with the workroom's `.env` loaded finds its workroom; or `--data-dir` (or `--name`) after the command (for
+`visit auth`, right after `auth`: `visit auth --data-dir <dir> user list`). Neither: exit 2.
+
+**While the workroom's `visit` runs**, a command uses its Postgres (its port from `postmaster.pid`); otherwise the
+command starts the workroom's Postgres for itself, made and brought up to date as a run does (4.4), does its work,
+and stops it. A `visit` that is still starting: try again in a moment (exit 5).
+
+**`visit import <the old database's URL, as its superuser>`** (`VISIT_DATABASE_ADMIN_URL` in a 1.x `.env`) copies
+what is in its `visit` and `auth` schemas (chat, the mailbox's marks, pictures and voice messages, links, whispers
+held, bans; accounts, sessions, API keys, sign-ins tried) into this workroom's database, with the `pg_dump` and
+`pg_restore` `visit` carries, in one transaction; each schema's record of its migrations stays as this one has it.
+Only before the workroom's `visit` runs (else exit 5: stop it first), and only into a workroom with no accounts,
+chat or bans yet (else exit 1: import into a new data directory). It says what came, a count of each. The old
+database must be reachable from where it runs; afterwards it can go.
+
+| exit | `visit auth` | `visit import` | `visit psql` | `visit status` |
+|---|---|---|---|---|
+| 0 | done | done | once `psql` runs, its own code | always, given a workroom |
+| 1 | it failed (said on stderr) | it failed (said: the workroom has data, the old database cannot be read) | | |
+| 2 | bad flags, or no workroom | no workroom | no workroom | no workroom |
+| 5 | the workroom's database could not be opened | its database could not start, or its `visit` runs | its database could not be opened | |
 
 ## 5. Page ↔ visit-client: `basedverse-visit-local/2`
 
@@ -1028,8 +1140,9 @@ names, paces), puts it under its rider in the room they are in, and leaves the d
 
 ### 8.12 What a visit-client keeps: its database; pictures and links in chat
 
-A visit-client has a database beside it (Visit 0.20; required): Postgres, its own (one per office), on its machine
-or its machine's own network. It keeps there what its user has had, never anyone else's:
+A visit-client has a database (Visit 0.20): from 2.0, the Postgres inside `visit`, one per workroom, in its data
+directory (4.4), in a schema of its own (`visit`) as a role of its own. It keeps there what its user has had, never
+anyone else's:
 
 - **The chat**: every line its user has had (8.9), their own too, as their page had it, by conversation: a room's
   (`room:<its owner's key>`: said in it, or in its chat), a person's (`person:<their key>`: whispers), the lobby's.
@@ -1044,8 +1157,8 @@ or its machine's own network. It keeps there what its user has had, never anyone
 - **Whom its room keeps out** (8.9; a state file of the release before kept them: they move once).
 
 What was shared in a conversation, the page asks for (`shared`): its pictures, its voice messages, or its links, newest
-first. Its schema
-is made, and brought up to date after every upgrade, by `visit-client migrate` (4.1), never by a run.
+first. `visit` makes its schema, and brings it up to date after an upgrade, at every start (4.4); a 1.x workroom's
+is moved in once, by `visit import` (4.5).
 
 **Pictures** (and voice messages, which go as they do). A page shares one (`v.share(blob)`: pasted, dropped, recorded) as a binary message (5.4, bit 7); its
 visit-client checks it, keeps it, and says its id (`media_ready`). A line names its pictures (`say`'s `media`:
