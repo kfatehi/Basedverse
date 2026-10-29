@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+# Tests a Chrome archive from deps/chrome/build the way the engine uses it: unpacked somewhere new, started headless
+# as deps/README.md says (on Linux, with only the archive's libraries and fonts), on test.html: WebGL 2 through
+# SwiftShader with a shader compiled, and text drawn on a 2D canvas. Its own sandbox where the place allows one,
+# else without (a container's, usually), as the engine does; it says which.
+#   deps/chrome/test <archive>
+# A Linux archive is tested on each of LINUX_TEST_IMAGES in Docker, with nothing installed; a macOS or Windows one
+# on this machine.
+set -euo pipefail
+what=chrome/test
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib.sh"
+archive="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
+name="${DEPS_TEST_NAME:-$(basename "$archive")}"
+case "$name" in
+  *-linux-*)
+    if [ "${DEPS_TEST_INSIDE:-}" != 1 ]; then
+      for image in $LINUX_TEST_IMAGES; do
+        say "on $image"
+        docker run --rm -e DEPS_TEST_INSIDE=1 -e DEPS_TEST_NAME="$name" -v "$deps":/deps:ro -v "$archive":/a.tar.gz:ro "$image" \
+          sh -c 'useradd -m chrometest && su chrometest -s /bin/bash -w DEPS_TEST_INSIDE,DEPS_TEST_NAME -c "bash /deps/chrome/test /a.tar.gz"'
+      done
+      exit 0
+    fi ;;
+esac
+
+dir=$(mktemp -d "${TMPDIR:-/tmp}/chrometest.XXXXXX")
+trap 'rm -rf "$dir"' EXIT
+tar -xzf "$archive" -C "$dir"
+top=$(echo "$dir"/chrome-*)
+exe="$top/chrome-headless-shell"; [ -f "$exe.exe" ] && exe="$exe.exe"
+page="$deps/chrome/test.html"
+url="file://$page"; command -v cygpath >/dev/null && url="file:///$(cygpath -m "$page")"
+case "$name" in
+  *-linux-*) export LD_LIBRARY_PATH="$top/lib" FONTCONFIG_FILE="$top/fonts/fonts.conf" ;;
+esac
+run() {
+  "$exe" "$@" --disable-gpu --enable-unsafe-swiftshader --no-first-run --no-default-browser-check \
+    --user-data-dir="$dir/profile" --virtual-time-budget=5000 --dump-dom "$url" 2>"$dir/stderr"
+}
+sandbox="its own"
+out=$(run) || out=""
+if ! echo "$out" | grep -q "RESULT "; then
+  sandbox="none (--no-sandbox: this place allows no sandbox)"
+  out=$(run --no-sandbox) || { cat "$dir/stderr" >&2; die "FAILED: it did not start"; }
+fi
+result=$(echo "$out" | grep -o 'RESULT {.*}' | head -1)
+[ -n "$result" ] || { cat "$dir/stderr" >&2; die "FAILED: the page said nothing"; }
+echo "$result" | grep -q '"ok":true' || die "FAILED: $result"
+say "ok, $("$exe" --version 2>/dev/null | tr -d '\r' || echo "$name"), sandbox: $sandbox; ${result#RESULT }"
