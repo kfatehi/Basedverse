@@ -9,7 +9,7 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
-## Unreleased
+## v1.1.0 â€” 2026-10-29
 
 **A room's own figures say lines** ([#14](https://github.com/sarmiena/Basedverse/pull/14), Keyvan's, for
 [#13](https://github.com/sarmiena/Basedverse/issues/13)'s say half). `v.sayAs(id, name, text)`: something of the
@@ -19,7 +19,7 @@ the room's user, each figure on a limit of its own (5 lines every 10 s). Page â†
 `chat` carry `npc`. On the engine it is the server page's to say (engine/SPEC.md 3.3; the client page's is refused
 `wrong_role`), and the owner has each line once.
 
-**Fixed: a page left for another stayed connected.** Chrome (148 on) keeps a page that a tab leaves, its sockets
+**Fixed: a page left for another stayed connected** ([#21](https://github.com/sarmiena/Basedverse/pull/21)). Chrome (148 on) keeps a page that a tab leaves, its sockets
 open, frozen, in its back/forward cache, and never closes them: visit-client went on having it, so a person who
 went to another page in the tab was still in their room, their visit up, their mailbox not filling. visit.js now
 says `bye` as the browser hides the page, and visit-client ends it as if it had closed (1001); back to it, it
