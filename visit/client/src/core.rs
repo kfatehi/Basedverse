@@ -36,6 +36,9 @@ pub enum PageRole {
 /// of tasks (link::local_pair): the host's side, a watch of its plot by its owner; the user's side, that watch.
 const HOME_HOST: &str = "home:host";
 const HOME_USER: &str = "home:user";
+/// Its one id to both pages (as a visit's is one to both sides): the host marks the owner's body with it, and the
+/// owner's page knows that body as its own by it (8.1).
+const HOME_ID: &str = "home";
 
 /// What the core hears about.
 pub enum Ev {
@@ -711,8 +714,8 @@ impl Core {
             "role": match role { PageRole::Host => json!("host"), PageRole::User => json!("user"), PageRole::Both => Value::Null },
         });
         match role {
-            PageRole::User => m["home"] = self.visits.get(HOME_USER).map_or(Value::Null, |v| json!({ "id": v.id, "channel": v.channel, "paused": self.host_page.is_none() })),
-            PageRole::Host => m["owner"] = self.visits.get(HOME_HOST).map_or(Value::Null, |v| json!({ "id": v.id, "channel": v.channel })),
+            PageRole::User => m["home"] = self.visits.get(HOME_USER).map_or(Value::Null, |v| json!({ "id": HOME_ID, "channel": v.channel, "paused": self.host_page.is_none() })),
+            PageRole::Host => m["owner"] = self.visits.get(HOME_HOST).map_or(Value::Null, |v| json!({ "id": HOME_ID, "channel": v.channel })),
             PageRole::Both => {}
         }
         m
@@ -1332,7 +1335,7 @@ impl Core {
             },
             "end" => {
                 let visit = m.get("visit").and_then(Value::as_str).unwrap_or("");
-                if self.visits.get(visit).is_some_and(|v| v.local) {
+                if visit == HOME_ID || self.visits.get(visit).is_some_and(|v| v.local) {
                     self.page_error("bad_message", "the owner's visit is not ended: it goes with the person's page", Some("end"));
                 } else if self.visits.contains_key(visit) {
                     let v = visit.to_string();
@@ -2486,7 +2489,7 @@ impl Core {
             self.tell_near();
         }
         if v.up {
-            let mut ended = json!({ "type": "visit_ended", "id": id, "channel": v.channel, "reason": reason });
+            let mut ended = json!({ "type": "visit_ended", "id": if v.local { HOME_ID } else { id }, "channel": v.channel, "reason": reason });
             if v.local {
                 ended[if v.role == Role::Host { "owner" } else { "home" }] = json!(true);
             }
@@ -3059,6 +3062,7 @@ fn started(v: &Visit) -> Value {
     }
     if v.local {
         m[if v.role == Role::Host { "owner" } else { "home" }] = json!(true);
+        m["id"] = json!(HOME_ID);   // one id to both pages
     }
     m
 }
