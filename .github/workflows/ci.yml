@@ -1,7 +1,7 @@
 # The tests (the top README, "Tests"), on the self-hosted runner with a GPU (runner/ in basedverse-runner): the
 # browser test's Chromes draw on it, never in software. Each step is a script a person runs the same way.
-# The runner gets jobs from this repository's own branches only: the repo is public, and a fork's pull request
-# would run its code on that machine.
+# A fork's pull request runs here too, once approved: the repo is public, and its code runs on that machine, so
+# Settings → Actions → General keeps a fork's runs waiting for a maintainer's approval.
 name: ci
 
 on:
@@ -19,7 +19,6 @@ concurrency:
 
 jobs:
   test:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux, gpu]
     timeout-minutes: 60
     steps:
