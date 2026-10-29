@@ -163,7 +163,9 @@ Rules the server page keeps (SPEC 8.1):
 ```html
 <!-- room/index.html: the person. Served to a session (your sign-in). -->
 <!doctype html><meta charset="utf-8"><title>my-workroom</title>
-<div id="hud"><!-- your boards, consoles, forms: they talk to YOUR server, with the session --></div>
+<div id="hud"><!-- your boards, consoles, forms: they talk to YOUR server, with the session -->
+  <form method="post" action="/logout"><button>sign out</button></form>   <!-- the person's page is signed in: a way out (auth step 6) -->
+</div>
 <div id="panel"></div>
 <script src="/visit/visit.js"></script>
 <script>
