@@ -22,7 +22,7 @@ use std::{path::PathBuf, process::ExitCode, time::Duration};
 use clap::Parser;
 use serde_json::json;
 use tokio::{net::TcpListener, sync::mpsc};
-use tracing::error;
+use tracing::{error, info};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -30,9 +30,10 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 #[command(name = "visit", version, long_version = long_version(), about = "Visit, the one program a workroom needs: the lobby, the links to other workrooms, the page on 127.0.0.1, the sign-in (V2.md)",
           after_help = "The sign-in's accounts, sessions and keys: visit auth --help")]
 struct Args {
-    /// The lobby's wss:// (or, to test, ws://127.0.0.1:...) URL.
+    /// The lobby's wss:// (or, to test, ws://127.0.0.1:...) URL. None: no lobby, the office keeps to itself (its
+    /// pages, its sign-in and its engine run all the same).
     #[arg(long, env = "VISIT_LOBBY")]
-    lobby: String,
+    lobby: Option<String>,
     /// The office's name: 1-24 letters, digits, space, _ . -, starting and ending with a letter or digit.
     #[arg(long, env = "VISIT_NAME")]
     name: String,
@@ -122,7 +123,7 @@ struct Args {
     #[arg(long, env = "ENGINE_LOG")]
     engine_log: Option<String>,
     /// A test aid, never for a workroom: POST /debug/eval and /debug/crash on the engine's port.
-    #[arg(long, env = "ENGINE_DEBUG")]
+    #[arg(long, env = "ENGINE_DEBUG", action = clap::ArgAction::SetTrue, value_parser = clap::builder::FalseyValueParser::new())]
     engine_debug: bool,
 }
 
@@ -391,7 +392,7 @@ async fn run() -> ExitCode {
     if a.max_visitors > 8 {
         return bad_flags("--max-visitors: 0 to 8");
     }
-    if !(a.lobby.starts_with("wss://") || a.lobby.starts_with("ws://")) {
+    if a.lobby.as_deref().is_some_and(|l| !(l.starts_with("wss://") || l.starts_with("ws://"))) {
         return bad_flags("--lobby: a ws:// or wss:// URL");
     }
     let data = match data_dir(a.data_dir.clone(), Some(&a.name)) {
@@ -447,7 +448,12 @@ async fn run() -> ExitCode {
     tokio::spawn(db::run(database, client, db_rx, core_tx.clone()));
     let away = saved.away;
     let hello = lobby::Hello { name: a.name.clone(), sim, status: "available".into(), max_visitors: a.max_visitors };
-    tokio::spawn(lobby::run(a.lobby.clone(), hello, lobby_rx, core_tx.clone(), away));
+    match a.lobby.clone() {
+        Some(url) => {
+            tokio::spawn(lobby::run(url, hello, lobby_rx, core_tx.clone(), away));
+        }
+        None => info!("no lobby (VISIT_LOBBY): the office keeps to itself"),
+    }
     let origins: Vec<String> = a.origins.split(',').map(|o| o.trim().trim_end_matches('/').to_string()).filter(|o| !o.is_empty()).collect();
     let state = page::PageState::new(token.clone(), user_token, origins, core_tx.clone());
     tokio::spawn(async move {
