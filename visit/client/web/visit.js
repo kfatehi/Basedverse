@@ -265,6 +265,7 @@
     const arr = k => (Array.isArray(json[k]) ? json[k] : []).filter(isObj);
     json.materials = arr("materials").map(m => MATERIALS.has(m.type) ? m : { uuid: String(m.uuid), type: "MeshLambertMaterial", color: 0x808080 });
     json.geometries = arr("geometries").map(g => {
+      if (NO_RECIPE.has(g.type)) return { uuid: String(g.uuid), type: "BufferGeometry", data: { attributes: {} } };   // from an older host, with nothing to make it from: empty, not a warning an object
       let n = 1;
       if (isObj(g.data)) n = (((g.data.attributes || {}).position || {}).array || []).length / 3;
       else {
