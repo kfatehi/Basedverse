@@ -1,0 +1,74 @@
+# What is built into visit (deps/README.md): Postgres and the headless Chrome, each platform's made and tested on
+# that platform by deps/<postgres|chrome>/build, from deps/versions.env. A push that changes deps/ (any branch)
+# builds and tests them; a pushed tag deps-<n> also publishes the release deps-<n> with every archive and
+# SHA256SUMS, never marked the latest (bin/setup fetches Visit from /releases/latest). Then deps/pin <n>, and
+# commit deps/pinned.json.
+name: deps
+
+on:
+  push:
+    branches: ["**"]
+    paths: ["deps/**", ".github/workflows/deps.yml"]
+    tags: ["deps-*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        dep: [postgres, chrome]
+        platform: [linux-x86_64, linux-aarch64, macos-aarch64, macos-x86_64, windows-x86_64]
+        include:
+          - { platform: linux-x86_64, os: ubuntu-24.04, test: true }
+          - { platform: linux-aarch64, os: ubuntu-24.04-arm, test: true }
+          - { platform: macos-aarch64, os: macos-15, test: true }
+          # on Apple silicon: the Intel build is made (Postgres cross-compiled) and checked, not run
+          - { platform: macos-x86_64, os: macos-15, test: false }
+          - { platform: windows-x86_64, os: windows-2025, test: true }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test
+        run: deps/${{ matrix.dep }}/build ${{ matrix.platform }} ${{ !matrix.test && '--no-test' || '' }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deps-${{ matrix.dep }}-${{ matrix.platform }}
+          path: deps/dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/deps-')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: The tag is deps-<n>
+        run: '[[ "$GITHUB_REF_NAME" =~ ^deps-[1-9][0-9]*$ ]] || { echo "tag $GITHUB_REF_NAME: a release of the deps is deps-<n>, n a whole number"; exit 1; }'
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          source deps/versions.env
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS
+          cat > ../notes.md <<EOF
+          What visit is built with: Postgres $POSTGRES_VERSION (build $POSTGRES_BUILD) and Chrome for Testing's headless
+          shell $CHROME_VERSION (build $CHROME_BUILD), for each platform. Not something to download by hand: visit's
+          build takes them (deps/pinned.json) and carries them inside. How they are made:
+          [deps/README.md]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/$GITHUB_SHA/deps/README.md).
+          EOF
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --latest=false \
+            --title "visit's dependencies $GITHUB_REF_NAME: Postgres $POSTGRES_VERSION, Chrome $CHROME_VERSION" --notes-file ../notes.md *

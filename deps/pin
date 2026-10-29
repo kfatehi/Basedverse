@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Points visit's build at a set of deps: writes deps/pinned.json, each archive's name, URL and sha256 per platform,
+# for Postgres and Chrome at the versions in deps/versions.env. Commit what it changed.
+#   deps/pin <n>       the published release deps-<n> (its SHA256SUMS): every platform of both, or it refuses
+#   deps/pin --local   what deps/<…>/build made here, in deps/dist/ (file:// URLs; only the platforms there)
+set -euo pipefail
+what=pin
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib.sh"
+arg="${1:?usage: deps/pin <n> | deps/pin --local}"
+repo="${DEPS_REPO:-sarmiena/Basedverse}"
+if [ "$arg" = --local ]; then
+  release=local base=""
+  sums=$(cd "$deps/dist" && for f in *.tar.gz; do [ -f "$f" ] && echo "$(sha256 "$f")  $f"; done)
+  [ -n "$sums" ] || die "nothing in deps/dist/: run deps/postgres/build or deps/chrome/build first"
+else
+  [[ "$arg" =~ ^[1-9][0-9]*$ ]] || die "deps/pin <n>: n a whole number (the release deps-<n>), or --local"
+  release="deps-$arg"
+  base="https://github.com/$repo/releases/download/$release/"
+  sums=$(curl -fsSL "${base}SHA256SUMS") || die "no ${base}SHA256SUMS: push the tag $release first (the deps workflow publishes it)"
+fi
+
+# entries <dep> <archive name prefix>: the "files" object's lines for one dep
+entries() {
+  sep=""
+  for platform in $PLATFORMS; do
+    name="$2-$platform.tar.gz"
+    sha=$(echo "$sums" | awk -v n="$name" '$2 == n || $2 == "*" n { print $1 }')
+    if [ -z "$sha" ]; then
+      [ "$release" = local ] && continue
+      die "$release has no $name"
+    fi
+    url="$base$name"; [ "$release" = local ] && url="file://$deps/dist/$name"
+    printf '%s      "%s": { "name": "%s", "url": "%s", "sha256": "%s" }' "$sep" "$platform" "$name" "$url" "$sha"
+    sep=$',\n'
+  done
+  echo
+}
+out="$deps/pinned.json"
+{
+  echo "{"
+  echo "  \"release\": \"$release\","
+  echo "  \"postgres\": {"
+  echo "    \"version\": \"$POSTGRES_VERSION\", \"build\": $POSTGRES_BUILD,"
+  echo "    \"files\": {"
+  entries postgres "postgresql-$POSTGRES_VERSION-$POSTGRES_BUILD"
+  echo "    }"
+  echo "  },"
+  echo "  \"chrome\": {"
+  echo "    \"version\": \"$CHROME_VERSION\", \"build\": $CHROME_BUILD,"
+  echo "    \"files\": {"
+  entries chrome "chrome-$CHROME_VERSION-$CHROME_BUILD"
+  echo "    }"
+  echo "  }"
+  echo "}"
+} >"$out.new"
+mv "$out.new" "$out"
+say "deps/pinned.json now pins $release"
