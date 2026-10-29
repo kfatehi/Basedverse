@@ -32,7 +32,9 @@ pub async fn connect(url: &str) -> Result<Client> {
     let (client, conn) = tokio_postgres::connect(url, NoTls).await.with_context(|| format!("cannot reach the database at {}", redact(url)))?;
     tokio::spawn(async move {
         if let Err(e) = conn.await {
-            warn!("the database connection ended: {e}");
+            if !crate::stopping() {
+                warn!("the database connection ended: {e}");
+            }
         }
     });
     Ok(client)

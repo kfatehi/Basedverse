@@ -1,7 +1,8 @@
-"""auth-client against real Postgres (run-e2e.sh starts them): the roles made, and a 0.20 database moved over; the
-terminal's commands; and the API, as a workroom's server calls it.
+"""auth, inside visit (V2.md 2): the workroom's database as visit makes it (its roles apart); the terminal's
+commands (`visit auth …`, on a running visit's database and on one started for the command); and the API a running
+visit serves, as a workroom's server calls it. No Postgres of its own: the one inside visit.
 
-  python3 e2e.py <auth-client> <visit-client>
+  python3 e2e.py <visit>
 """
 import hashlib
 import json
@@ -10,19 +11,16 @@ import socket
 import subprocess
 import sys
 import tempfile
-import threading
 import time
 import urllib.error
 import urllib.request
 
 import psycopg
 
-AUTH, VISIT = [sys.argv[1], "auth"], sys.argv[2]   # `visit auth`: what auth-client was (V2.md 2.1)
-OLD_ADMIN = "postgres://visit:old-password-0.20-setup@old/visit"   # 0.20's VISIT_DATABASE_URL: the superuser itself
-NEW_ADMIN = "postgres://basedverse:a-new-admin-password@old/visit"
-OLD_VISIT, OLD_AUTH = "postgres://visit:visit-password-0123456789@old/visit", "postgres://auth:auth-password-0123456789@old/visit"
-FRESH_ADMIN = "postgres://basedverse:admin-password-fresh@new/visit"
-VISIT_URL, AUTH_URL = "postgres://visit:visit-password-abcdefghij@new/visit", "postgres://auth:auth-password-abcdefghij@new/visit"
+VISIT = sys.argv[1]
+TMP = tempfile.mkdtemp()
+os.environ["XDG_DATA_HOME"] = os.path.join(TMP, "xdg")   # where the Postgres inside visit is unpacked, once
+DATA = os.path.join(TMP, "office")                        # the workroom's data directory
 PASSWORD, NEW_PASSWORD = "correct horse battery staple", "a whole new password, longer"
 failures = []
 
@@ -35,12 +33,40 @@ def check(what, got, want):
         print("FAIL  %s\n      got  %r\n      want %r" % (what, got, want), flush=True)
 
 
-def run(*args, env=None, stdin=None):
-    """auth-client (or visit-client, given first): (exit code, stdout, stderr)."""
-    cmd = list(args) if args[0] == VISIT else [*AUTH, *args]
-    r = subprocess.run(cmd, env={**os.environ, **(env or {})}, input=stdin, capture_output=True, text=True,
+def run(*args, data=DATA, stdin=None):
+    """`visit auth <args>` on the workroom in `data`: (exit code, stdout, stderr)."""
+    r = subprocess.run([VISIT, "auth", "--data-dir", data, *args], input=stdin, capture_output=True, text=True,
                        stdin=None if stdin is not None else subprocess.DEVNULL, timeout=60)
     return r.returncode, r.stdout, r.stderr
+
+
+def secret_file(path, value):
+    with open(path, "w") as f:
+        f.write(value + "\n")
+    os.chmod(path, 0o600)
+    return path
+
+
+def start(data, visit_port, auth_port, *extra):
+    """A running visit for the workroom in `data`, its sign-in API on `auth_port`: (process, service token, its
+    page token). No lobby answers (none is needed here): it keeps trying, as it would."""
+    token, vtoken = os.urandom(32).hex(), os.urandom(32).hex()
+    tfile = secret_file(os.path.join(data + ".auth-token"), token)
+    vfile = secret_file(os.path.join(data + ".visit-token"), vtoken)
+    p = subprocess.Popen([VISIT, "--lobby", "ws://127.0.0.1:9/", "--name", "Auth Test", "--port", str(visit_port), "--token-file", vfile,
+                          "--data-dir", data, "--auth-token-file", tfile, "--auth-port", str(auth_port), *extra],
+                         stdout=subprocess.PIPE, stderr=open(data + ".log", "w"), env={**os.environ, "RUST_LOG": "warn"})
+    ready = json.loads(p.stdout.readline() or "{}")
+    if not ready.get("ready"):
+        raise AssertionError("visit did not start: " + open(data + ".log").read())
+    return p, token, vtoken
+
+
+def urls(data):
+    """Each role's URL to the Postgres of a running visit, from what it keeps (its passwords; its port)."""
+    secrets_ = json.load(open(os.path.join(data, "postgres", "secrets")))
+    port = int(open(os.path.join(data, "postgres", "data", "postmaster.pid")).read().splitlines()[3])
+    return {r: "postgres://%s:%s@127.0.0.1:%d/visit" % ("postgres" if r == "superuser" else r, secrets_[r], port) for r in secrets_}
 
 
 def sql(url, q, *params):
@@ -57,6 +83,18 @@ def refused(url, q):
         return type(e).__name__
 
 
+def postgres_running():
+    """How many processes here are Postgres' (its server and its backends), from /proc."""
+    n = 0
+    for pid in filter(str.isdigit, os.listdir("/proc")):
+        try:
+            if open("/proc/%s/cmdline" % pid, "rb").read().split(b"\0")[0].endswith(b"/postgres"):
+                n += 1
+        except OSError:
+            pass
+    return n
+
+
 def until(f, timeout=5.0):
     end = time.time() + timeout
     while True:
@@ -67,69 +105,46 @@ def until(f, timeout=5.0):
 
 
 def main():
-    print("\na database as 0.20's setup made it: visit-client on the superuser, its tables in public")
-    code, out, err = run(VISIT, "migrate", "--database", OLD_ADMIN)
-    check("visit-client 0.20 made its tables", code, 0)
-    sql(OLD_ADMIN, "INSERT INTO bans (key, name, voice, chat, at) VALUES ('k1', 'Mallory', true, false, 1)")
-    env = {"AUTH_DATABASE_URL": OLD_AUTH, "VISIT_DATABASE_URL": OLD_VISIT}
-    code, out, err = run("migrate", "--admin", OLD_ADMIN, env=env)
-    check("migrate --admin, visit-client on the superuser and no --new-admin: refused, saying what to give", (code, "--new-admin" in err), (1, True))
-    code, out, err = run("migrate", "--admin", OLD_ADMIN, "--new-admin", NEW_ADMIN, env=env)
-    check("with --new-admin: done", (code, err), (0, ""))
-    print("      " + out.strip().replace("\n", "\n      "))
-    roles = dict(sql(NEW_ADMIN, "SELECT rolname::text, rolsuper FROM pg_roles WHERE rolname IN ('visit', 'auth', 'basedverse') OR rolname LIKE 'auth_setup_%'"))
-    check("the superuser is basedverse now; visit and auth are plain roles; the role of the moment gone", roles, {"basedverse": True, "visit": False, "auth": False})
-    check("the old URL (the superuser's, which visit-client held) no longer gets in", refused(OLD_ADMIN, "SELECT 1"), "OperationalError")
-    check("visit-client's tables moved into its schema, its own", sorted(sql(NEW_ADMIN, "SELECT tablename::text, tableowner::text FROM pg_tables WHERE schemaname IN ('public', 'visit') AND tablename IN ('bans', 'messages', 'visit_migrations')")),
-          [("bans", "visit"), ("messages", "visit"), ("visit_migrations", "visit")])
-    check("what was in them kept: visit-client's role reads its ban", sql(OLD_VISIT, "SELECT name FROM bans"), [("Mallory",)])
-    code, out, err = run(VISIT, "migrate", "--status", "--database", OLD_VISIT)
-    check("visit-client, on its plain role: its schema up to date", (code, "up to date" in out), (0, True))
-    check("visit-client's role cannot read auth-client's tables", refused(OLD_VISIT, "SELECT * FROM auth.users"), "InsufficientPrivilege")
-    check("nor auth-client's visit-client's", refused(OLD_AUTH, "SELECT * FROM visit.bans"), "InsufficientPrivilege")
-    check("nor make tables in public", refused(OLD_VISIT, "CREATE TABLE public.x (y int)"), "InsufficientPrivilege")
-    code, out, err = run("migrate", "--admin", NEW_ADMIN, env=env)
-    check("run again (the superuser on its own now): changes nothing but passwords", (code, "plain, its password set" in out), (0, True))
-
-    print("\na fresh database: its superuser for setup only")
-    env = {"AUTH_DATABASE_URL": AUTH_URL, "VISIT_DATABASE_URL": VISIT_URL}
-    code, out, err = run("migrate", "--admin", FRESH_ADMIN, env=env)
-    check("migrate --admin: the roles made, auth-client's schema ready", (code, "role visit: made" in out, "applied: 1 auth" in out), (0, True, True))
-    code, out, err = run(VISIT, "migrate", "--database", VISIT_URL)
-    check("visit-client migrates as its plain role: its tables in its schema", (code, sql(FRESH_ADMIN, "SELECT schemaname::text FROM pg_tables WHERE tablename = 'messages'")), (0, [("visit",)]))
-    code, out, err = run("migrate", "--status", env=env)
-    check("auth-client migrate --status: up to date", (code, "up to date" in out), (0, True))
-    code, out, err = run("user", "list", env={"AUTH_DATABASE_URL": FRESH_ADMIN.replace("/visit", "/postgres")})
-    check("a database it has not made ready: exit 5, saying to migrate", (code, "auth-client migrate" in err), (5, True))
-
-    print("\nthe terminal's commands")
-    env = {"AUTH_DATABASE_URL": AUTH_URL}
-    code, out, err = run("user", "add", "aldo", "--password-stdin", env=env, stdin="too short\n")
-    check("user add: a short password refused", (code, "at least 12" in err), (1, True))
-    check("user add, typed with no terminal to type in: refused, saying so", "no terminal" in run("user", "add", "aldo", env=env)[2], True)
-    check("user add aldo", run("user", "add", "aldo", "--password-stdin", env=env, stdin=PASSWORD + "\n")[:2], (0, "aldo can sign in now\n"))
-    check("user add Aldo again: there is one", run("user", "add", "Aldo", "--password-stdin", env=env, stdin=PASSWORD + "\n")[0], 1)
-    check("a name with a space refused", run("user", "add", "a b", "--password-stdin", env=env, stdin=PASSWORD + "\n")[0], 1)
-    check("the hash kept: Argon2id at OWASP's parameters", sql(AUTH_URL, "SELECT left(password_hash, 31) FROM auth.users"), [("$argon2id$v=19$m=19456,t=2,p=1$",)])
-    code, out, err = run("user", "list", env=env)
+    print("\nthe terminal's commands, on a workroom no visit runs yet: its database made for them")
+    code, out, err = run("user", "add", "aldo", "--password-stdin", stdin="too short\n")
+    check("user add, the first command: the database made; a short password refused", (code, "at least 12" in err, os.path.isfile(os.path.join(DATA, "postgres", "data", "PG_VERSION"))), (1, True, True))
+    check("user add, typed with no terminal to type in: refused, saying so", "no terminal" in run("user", "add", "aldo")[2], True)
+    check("user add aldo", run("user", "add", "aldo", "--password-stdin", stdin=PASSWORD + "\n")[:2], (0, "aldo can sign in now\n"))
+    check("user add Aldo again: there is one", run("user", "add", "Aldo", "--password-stdin", stdin=PASSWORD + "\n")[0], 1)
+    check("a name with a space refused", run("user", "add", "a b", "--password-stdin", stdin=PASSWORD + "\n")[0], 1)
+    code, out, err = run("user", "list")
     check("user list", (code, out.splitlines()[0].split(), out.splitlines()[1].split()[0]), (0, ["USER", "MADE", "PASSWORD", "CHANGED", "SESSIONS"], "aldo"))
-    code, key, err = run("key", "add", "ci", env=env)
+    code, key, err = run("key", "add", "ci")
     key = key.strip()
     check("key add ci: a key, printed once", (code, key.startswith("bvk_"), len(key)), (0, True, 47))
-    check("key add ci again: a live one has that label", run("key", "add", "ci", env=env)[0], 1)
-    check("only its hash kept", sql(AUTH_URL, "SELECT key_hash FROM auth.api_keys"), [(hashlib.sha256(key.encode()).digest(),)])
+    check("key add ci again: a live one has that label", run("key", "add", "ci")[0], 1)
+    check("no Postgres left running after them", postgres_running(), 0)
+    check("which workroom, said when nothing says it", (lambda r: (r.returncode, "VISIT_DATA_DIR" in r.stderr))(
+        subprocess.run([VISIT, "auth", "user", "list"], capture_output=True, text=True, env={k: v for k, v in os.environ.items() if k not in ("VISIT_DATA_DIR", "VISIT_NAME")})), (2, True))
 
-    print("\nthe API, as a workroom's server calls it")
-    token = os.urandom(32).hex()
-    tdir = tempfile.mkdtemp()
-    tfile, vfile = os.path.join(tdir, "auth-token"), os.path.join(tdir, "visit-token")
-    with open(tfile, "w") as f:
-        f.write(token + "\n")
-    os.chmod(tfile, 0o600)
-    server = subprocess.Popen([*AUTH, "--port", "7403", "--token-file", tfile, "--visit-port", "17401", "--visit-token-file", vfile],
-                              env={**os.environ, "AUTH_DATABASE_URL": AUTH_URL, "AUTH_LOG": "warn"})
-    short = None
+    print("\nvisit running: its database, its roles apart")
+    server, token, vtoken = start(DATA, 17401, 7403)
+    short = wide = None
     try:
+        u = urls(DATA)
+        roles = dict(sql(u["superuser"], "SELECT rolname::text, rolsuper FROM pg_roles WHERE rolname IN ('postgres', 'visit', 'auth')"))
+        check("the superuser, and visit and auth as plain roles", roles, {"postgres": True, "visit": False, "auth": False})
+        check("each schema its own role's", sorted(sql(u["superuser"], "SELECT tablename::text, tableowner::text FROM pg_tables WHERE tablename IN ('bans', 'messages', 'users', 'api_keys')")),
+              [("api_keys", "auth"), ("bans", "visit"), ("messages", "visit"), ("users", "auth")])
+        check("visit's role cannot read auth's tables", refused(u["visit"], "SELECT * FROM auth.users"), "InsufficientPrivilege")
+        check("nor auth's visit's", refused(u["auth"], "SELECT * FROM visit.bans"), "InsufficientPrivilege")
+        check("nor make tables in public", refused(u["visit"], "CREATE TABLE public.x (y int)"), "InsufficientPrivilege")
+        check("the hash kept: Argon2id at OWASP's parameters", sql(u["auth"], "SELECT left(password_hash, 31) FROM auth.users"), [("$argon2id$v=19$m=19456,t=2,p=1$",)])
+        check("only the key's hash kept", sql(u["auth"], "SELECT key_hash FROM auth.api_keys"), [(hashlib.sha256(key.encode()).digest(),)])
+        here = socket.gethostbyname(socket.gethostname())   # this container's address on its network
+        check("Postgres on 127.0.0.1 only: nothing answers on this container's network", refused(u["visit"].replace("127.0.0.1", here), "SELECT 1"), "OperationalError")
+        code, out, err = run("user", "list")
+        check("a command while visit runs: on its database (nothing started)", (code, "aldo" in out), (0, True))
+        r = subprocess.run([VISIT, "--lobby", "ws://127.0.0.1:9/", "--name", "Auth Test", "--port", "17409", "--token-file", DATA + ".visit-token", "--data-dir", DATA],
+                           capture_output=True, text=True, timeout=30)
+        check("a second visit for the workroom: refused", (r.returncode, "running already" in r.stderr), (5, True))
+
+        print("\nthe API, as a workroom's server calls it")
         api = lambda path, body=None, tok=token, port=7403: call(port, path, body, tok)
         check("GET /health: up, its version", until(lambda: api("/health")[0] == 200 and api("/health")[1].get("ok")), True)
         check("a call without the service token: refused", api("/v1/check", {"session": "x"}, tok=None), (401, {"error": "service_token"}))
@@ -144,42 +159,35 @@ def main():
         code, b = api("/v1/login", {"user": "ALDO", "password": PASSWORD, "client": client})
         session = b.get("session", "")
         check("signing in (the name as typed, any case): a session for aldo, 30 days at most", (code, b.get("user"), len(session), abs(b.get("expires", 0) - (time.time() + 30 * 86400)) < 60), (200, "aldo", 43, True))
-        check("kept by its SHA-256 only, with where it came from", sql(AUTH_URL, "SELECT id_hash, client_address, user_agent FROM auth.sessions"),
+        check("kept by its SHA-256 only, with where it came from", sql(u["auth"], "SELECT id_hash, client_address, user_agent FROM auth.sessions"),
               [(hashlib.sha256(session.encode()).digest(), "203.0.113.7", "e2e")])
         check("/v1/check: whose it is", api("/v1/check", {"session": session}), (200, {"user": "aldo"}))
         check("a session nobody made: 401", api("/v1/check", {"session": "A" * 43}), (401, {"error": "no_session"}))
         check("the API key: its label", api("/v1/check", {"key": key}), (200, {"key": "ci"}))
         check("a key nobody made: 401", api("/v1/check", {"key": "bvk_" + "A" * 43}), (401, {"error": "no_key"}))
-
-        check("/v1/visit, no visit-client's token file: 404", api("/v1/visit", {"session": session}), (404, {"error": "no_visit_client"}))
-        with open(vfile, "w") as f:
-            f.write("ab" * 32 + "\n")
-        check("its file there, but nothing on its port: 404", api("/v1/visit", {"session": session}), (404, {"error": "no_visit_client"}))
-        lsock = socket.socket(); lsock.bind(("127.0.0.1", 17401)); lsock.listen()
-        threading.Thread(target=lambda: [lsock.accept()[0].close() for _ in range(5)], daemon=True).start()
-        check("visit-client running: its port and token, read fresh", api("/v1/visit", {"session": session}), (200, {"port": 17401, "token": "ab" * 32}))
+        check("/v1/visit: this visit's own port and page token", api("/v1/visit", {"session": session}), (200, {"port": 17401, "token": vtoken}))
         check("for no session: 401", api("/v1/visit", {"session": "A" * 43}), (401, {"error": "no_session"}))
 
         check("/v1/logout", api("/v1/logout", {"session": session}), (200, {}))
-        check("the session over", (api("/v1/check", {"session": session})[0], sql(AUTH_URL, "SELECT count(*) FROM auth.sessions")), (401, [(0,)]))
+        check("the session over", (api("/v1/check", {"session": session})[0], sql(u["auth"], "SELECT count(*) FROM auth.sessions")), (401, [(0,)]))
 
         s2 = api("/v1/login", {"user": "aldo", "password": PASSWORD, "client": client})[1]["session"]
-        code, out, err = run("sessions", env=env)
+        code, out, err = run("sessions")
         prefix = hashlib.sha256(s2.encode()).hexdigest()[:10]
-        check("auth-client sessions: the session, by its hash's start, from where; the last sign-ins tried",
+        check("visit auth sessions: the session, by its hash's start, from where; the last sign-ins tried",
               (code, prefix in out, "203.0.113.7" in out, "the last sign-ins tried" in out, "wrong" in out), (0, True, True, True, True))
-        check("revoke <it>", run("revoke", prefix, env=env)[:2], (0, "1 session ended\n"))
-        check("...and the running auth-client knows at once", until(lambda: api("/v1/check", {"session": s2})[0] == 401, 3), True)
+        check("revoke <it>", run("revoke", prefix)[:2], (0, "1 session ended\n"))
+        check("...and the running visit knows at once", until(lambda: api("/v1/check", {"session": s2})[0] == 401, 3), True)
 
         s3 = api("/v1/login", {"user": "aldo", "password": PASSWORD, "client": client})[1]["session"]
-        check("passwd: a new password, the user's sessions ended", run("passwd", "aldo", "--password-stdin", env=env, stdin=NEW_PASSWORD + "\n")[:2], (0, "aldo's password changed; 1 session ended\n"))
+        check("passwd: a new password, the user's sessions ended", run("passwd", "aldo", "--password-stdin", stdin=NEW_PASSWORD + "\n")[:2], (0, "aldo's password changed; 1 session ended\n"))
         check("...at once", until(lambda: api("/v1/check", {"session": s3})[0] == 401, 3), True)
         check("the old password no longer signs in", api("/v1/login", {"user": "aldo", "password": PASSWORD})[0], 401)
         check("the new one does", api("/v1/login", {"user": "aldo", "password": NEW_PASSWORD})[0], 200)
 
-        check("key revoke ci", run("key", "revoke", "ci", env=env)[0], 0)
+        check("key revoke ci", run("key", "revoke", "ci")[0], 0)
         check("...and the key is refused at once", until(lambda: api("/v1/check", {"key": key})[0] == 401, 3), True)
-        code, out, err = run("key", "list", env=env)
+        code, out, err = run("key", "list")
         check("key list: it, revoked", (code, "ci" in out, "revoked" in out), (0, True, True))
 
         print("\nguessing, slowed")
@@ -200,63 +208,47 @@ def main():
         for i in range(5):
             api("/v1/login", {"user": "user%d" % i, "password": "spray", "client": spray})
         check("five names guessed from one address: that address waits", api("/v1/login", {"user": "aldo", "password": NEW_PASSWORD, "client": spray})[0], 429)
-        check("every try kept: signed in, wrong, too soon", sorted(sql(AUTH_URL, "SELECT ok, waited, count(*) > 0 FROM auth.login_attempts GROUP BY 1, 2")),
+        check("every try kept: signed in, wrong, too soon", sorted(sql(u["auth"], "SELECT ok, waited, count(*) > 0 FROM auth.login_attempts GROUP BY 1, 2")),
               [(False, False, True), (False, True, True), (True, False, True)])
 
-        lsock.close()
-        noprobe = subprocess.Popen([*AUTH, "--port", "7405", "--token-file", tfile, "--visit-port", "17401", "--visit-token-file", vfile, "--visit-probe", "false"],
-                                   env={**os.environ, "AUTH_DATABASE_URL": AUTH_URL, "AUTH_LOG": "warn"})
-        try:
-            until(lambda: call(7405, "/health", None, None)[0] == 200)
-            s6 = call(7405, "/v1/login", {"user": "aldo", "password": NEW_PASSWORD}, token)[1]["session"]
-            check("--visit-probe false: its token file there is enough (nothing need answer on its port)", call(7405, "/v1/visit", {"session": s6}, token), (200, {"port": 17401, "token": "ab" * 32}))
-            os.remove(vfile)
-            check("...and with the file gone, no visit-client: 404", call(7405, "/v1/visit", {"session": s6}, token)[0], 404)
-        finally:
-            noprobe.terminate()
-            noprobe.wait(5)
-
-        # In a container, beside a workroom's server in another: its container's own network (--listen 0.0.0.0).
-        here = socket.gethostbyname(socket.gethostname())   # this container's address on its network
+        # In a container, beside a workroom's server in another: its container's own network (--auth-listen 0.0.0.0).
         check("by default on 127.0.0.1 only: nothing answers on this container's network", call(7403, "/health", None, None, host=here)[0], 0)
-        wide = subprocess.Popen([*AUTH, "--listen", "0.0.0.0", "--port", "7406", "--token-file", tfile],
-                                env={**os.environ, "AUTH_DATABASE_URL": AUTH_URL, "AUTH_LOG": "warn"})
-        try:
-            check("--listen 0.0.0.0: on this container's network too, where another container reaches it",
-                  until(lambda: call(7406, "/health", None, None, host=here)[0] == 200), True)
-            check("...its service token still asked there", call(7406, "/v1/check", {"session": "x"}, None, host=here), (401, {"error": "service_token"}))
-        finally:
-            wide.terminate()
-            wide.wait(5)
+        wide_data = os.path.join(TMP, "wide")
+        wide, wtoken, _ = start(wide_data, 17406, 7406, "--auth-listen", "0.0.0.0")
+        check("--auth-listen 0.0.0.0: on this container's network too, where another container reaches it",
+              until(lambda: call(7406, "/health", None, None, host=here)[0] == 200), True)
+        check("...its service token still asked there", call(7406, "/v1/check", {"session": "x"}, None, host=here), (401, {"error": "service_token"}))
 
         print("\na session's two ends: unused, and in all")
-        short = subprocess.Popen([*AUTH, "--port", "7404", "--token-file", tfile, "--idle", "2s", "--max-age", "5s"],
-                                 env={**os.environ, "AUTH_DATABASE_URL": AUTH_URL, "AUTH_LOG": "warn"})
-        until(lambda: call(7404, "/health", None, None)[0] == 200)
-        s4 = call(7404, "/v1/login", {"user": "aldo", "password": NEW_PASSWORD}, token)[1]["session"]
-        check("signed in (2 s unused ends it)", call(7404, "/v1/check", {"session": s4}, token)[0], 200)
+        short_data = os.path.join(TMP, "short")
+        run("user", "add", "aldo", "--password-stdin", data=short_data, stdin=NEW_PASSWORD + "\n")
+        short, stoken, _ = start(short_data, 17404, 7404, "--auth-idle", "2s", "--auth-max-age", "5s")
+        s4 = call(7404, "/v1/login", {"user": "aldo", "password": NEW_PASSWORD}, stoken)[1]["session"]
+        check("signed in (2 s unused ends it)", call(7404, "/v1/check", {"session": s4}, stoken)[0], 200)
         time.sleep(2.3)
-        check("unused 2 s: over", call(7404, "/v1/check", {"session": s4}, token), (401, {"error": "no_session"}))
-        s5 = call(7404, "/v1/login", {"user": "aldo", "password": NEW_PASSWORD}, token)[1]["session"]
+        check("unused 2 s: over", call(7404, "/v1/check", {"session": s4}, stoken), (401, {"error": "no_session"}))
+        s5 = call(7404, "/v1/login", {"user": "aldo", "password": NEW_PASSWORD}, stoken)[1]["session"]
         alive = []
         for _ in range(6):
-            alive.append(call(7404, "/v1/check", {"session": s5}, token)[0])
+            alive.append(call(7404, "/v1/check", {"session": s5}, stoken)[0])
             time.sleep(1.0)
         check("used every second: alive until its 5 s are up, then over", (alive[:4], alive[-1]), ([200] * 4, 401))
 
-        code, out, err = run("user", "remove", "aldo", env=env)
-        check("user remove aldo: signed out everywhere", (code, until(lambda: api("/v1/check", {"session": s5})[0] == 401, 3), sql(AUTH_URL, "SELECT count(*) FROM auth.sessions")), (0, True, [(0,)]))
+        s6 = api("/v1/login", {"user": "aldo", "password": NEW_PASSWORD})[1]["session"]
+        code, out, err = run("user", "remove", "aldo")
+        check("user remove aldo: signed out everywhere", (code, until(lambda: api("/v1/check", {"session": s6})[0] == 401, 3), sql(u["auth"], "SELECT count(*) FROM auth.sessions")), (0, True, [(0,)]))
     finally:
-        for p in (server, short):
+        for p in (server, short, wide):
             if p:
                 p.terminate()
-                p.wait(5)
+                p.wait(15)
+    check("visit stopped: its Postgres with it", postgres_running(), 0)
     print("\n%d failure(s)" % len(failures))
     sys.exit(1 if failures else 0)
 
 
 def call(port, path, body, token, host="127.0.0.1"):
-    """(status, JSON) from auth-client, as a workroom's server asks it; 0 when nothing answers there."""
+    """(status, JSON) from the sign-in API, as a workroom's server asks it; 0 when nothing answers there."""
     data = body if isinstance(body, bytes) else (json.dumps(body).encode() if body is not None else None)
     req = urllib.request.Request("http://%s:%d%s" % (host, port, path), data=data, method="POST" if data is not None else "GET")
     if data is not None:

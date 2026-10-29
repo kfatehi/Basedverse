@@ -15,11 +15,6 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo="$(cd "$here/../../.." && pwd)"
 out="${OUT:-$(mktemp -d)}"; mkdir -p "$out"
 "$here/../cargo" build
-# Postgres for the two visit-clients (a database each), on this machine's loopback only (a free port Docker picks),
-# gone with the test.
-db="visit-browser-db-$$"
-docker run -d --rm --name "$db" -e POSTGRES_HOST_AUTH_METHOD=trust -p 127.0.0.1::5432 postgres:17-alpine >/dev/null
-dbport="$(docker port "$db" 5432/tcp | head -1 | sed 's/.*://')"
 pids=()
 for p in 9351 9352; do
   google-chrome --headless=new --remote-debugging-port=$p --user-data-dir="$(mktemp -d)" --window-size=1280,720 \
@@ -28,9 +23,7 @@ for p in 9351 9352; do
     --no-first-run --no-default-browser-check about:blank >"$out/chrome-$p.log" 2>&1 &
   pids+=($!)
 done
-trap 'kill "${pids[@]}" 2>/dev/null || true; docker rm -f "$db" >/dev/null 2>&1 || true' EXIT
-for _ in $(seq 1 120); do docker exec "$db" pg_isready -q -h 127.0.0.1 -U postgres && break; sleep 0.5; done
-for d in a b c; do docker exec "$db" createdb -h 127.0.0.1 -U postgres "$d"; done
+trap 'kill "${pids[@]}" 2>/dev/null || true' EXIT
 # visit-engine (../../../engine), for the third office's room (engine/SPEC.md 11, step 2): its image built, the
 # container on this machine's network (so it reaches the test's web server and visit-client C on 127.0.0.1), its
 # tokens made here and given to the test; it retries until both are there. ENGINE=0 skips it: the test then hosts
@@ -43,9 +36,11 @@ if [ "${ENGINE:-1}" != 0 ]; then
   docker run -d --rm --name "$engine" --network host -u "$(id -u):$(id -g)" -v "$out":/out:ro \
     -e ENGINE_ROOM_URL="http://127.0.0.1:18771/room.html?role=host&three=160&world=1" -e ENGINE_KEY_FILE=/out/c.key \
     -e VISIT_HOST=127.0.0.1 -e VISIT_PORT=7423 -e VISIT_TOKEN_FILE=/out/c.token -e ENGINE_PORT=7425 -e ENGINE_DEBUG=1 visit-engine >/dev/null
-  trap 'kill "${pids[@]}" 2>/dev/null || true; docker logs "'"$engine"'" > "'"$out"'/engine.log" 2>&1 || true; docker rm -f "'"$engine"'" >/dev/null 2>&1 || true; docker rm -f "'"$db"'" >/dev/null 2>&1 || true' EXIT
+  trap 'kill "${pids[@]}" 2>/dev/null || true; docker logs "'"$engine"'" > "'"$out"'/engine.log" 2>&1 || true; docker rm -f "'"$engine"'" >/dev/null 2>&1 || true' EXIT
 fi
-docker run --rm --network host -u "$(id -u):$(id -g)" -e HOME=/tmp -e VISIT_TEST_DB=postgres://postgres@127.0.0.1:$dbport \
+# Each visit's database is the Postgres inside it (V2.md 4), run as this machine's user: its /etc/passwd lent, so
+# initdb knows the user.
+docker run --rm --network host -u "$(id -u):$(id -g)" -e HOME=/tmp -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro \
   ${engine:+-e ENGINE_PORT=7425 -e VISIT_C_TOKEN="$(cat "$out/c.token")" -e VISIT_C_USER_TOKEN="$(cat "$out/c.user-token")"} \
   -v visit-target:/target:ro -v "$repo":/repo:ro -v "$out":/out -w /repo \
   python:3.13-slim-bookworm sh -c 'pip install -q --user websockets==15.0.1 2>/dev/null && python3 -u visit/client/tests/browser_test.py /target/debug/visit 9351 9352 /out'

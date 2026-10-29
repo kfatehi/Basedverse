@@ -3,8 +3,8 @@
 //! crate: its API in this process, `visit auth …` in a terminal). visit-client owns all networking
 //! (the lobby session, the links to other visit-clients, the visits), keeps them across page reloads,
 //! and serves the workroom's pages (the room's, the person's: engine/SPEC.md 3) on 127.0.0.1 only, or on a
-//! container's own network, behind a token. What it keeps, it keeps in its database
-//! beside it (Postgres, ../SPEC.md 8.12), whose schema `visit-client migrate` makes.
+//! container's own network, behind a token. What it keeps, it keeps in the workroom's data directory: its
+//! database is the Postgres inside visit (pg.rs, runtime.rs; ../SPEC.md 8.12), run while it runs.
 mod core;
 mod db;
 mod frames;
@@ -13,6 +13,8 @@ mod land;
 mod lobby;
 mod media;
 mod page;
+mod pg;
+mod runtime;
 mod state;
 
 use std::{path::PathBuf, process::ExitCode, time::Duration};
@@ -25,7 +27,7 @@ use tracing::error;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Parser)]
-#[command(name = "visit", version, about = "Visit, the one program a workroom needs: the lobby, the links to other workrooms, the page on 127.0.0.1, the sign-in (V2.md)",
+#[command(name = "visit", version, long_version = long_version(), about = "Visit, the one program a workroom needs: the lobby, the links to other workrooms, the page on 127.0.0.1, the sign-in (V2.md)",
           after_help = "The sign-in's accounts, sessions and keys: visit auth --help")]
 struct Args {
     /// The lobby's wss:// (or, to test, ws://127.0.0.1:...) URL.
@@ -71,19 +73,19 @@ struct Args {
     /// with the token. Naming the sim's own makes a token stolen somehow useless to another site.
     #[arg(long, env = "VISIT_ORIGINS", default_value = "")]
     origins: String,
+    /// Where the workroom keeps everything (V2.md 3): its database, its state file, friends' landscapes. Default:
+    /// the user's data folder, basedverse/<its name> (bin/setup writes it into the .env, so a new name keeps it).
+    #[arg(long, env = "VISIT_DATA_DIR")]
+    data_dir: Option<PathBuf>,
     /// A file where it keeps what outlasts a run: whether the office is out of the lobby (the page's
-    /// leave_lobby), its key (so it is the same office to its friends), its door and its guests; none: every
-    /// start joins the lobby, with a new key and no guests.
+    /// leave_lobby), its key (so it is the same office to its friends), its door and its guests. Default: state.json
+    /// in the data directory.
     #[arg(long, env = "VISIT_STATE_FILE")]
     state_file: Option<PathBuf>,
     /// A directory where it keeps friends' landscapes (the parts of their rooms that never change: sent once) and
-    /// their plots to draw while they are away; none: beside the state file (landscapes/), or for this run only.
+    /// their plots to draw while they are away. Default: landscapes/ in the data directory.
     #[arg(long, env = "VISIT_CACHE_DIR")]
     cache_dir: Option<PathBuf>,
-    /// Its database, beside it (required): postgres://user:password@host:port/database. Made ready, and brought up
-    /// to date after each upgrade, by `visit-client migrate --database <url>`.
-    #[arg(long, env = "VISIT_DATABASE_URL", hide_env_values = true)]
-    database: Option<String>,
     /// The sign-in API (auth/SPEC.md 3), served by this program for the workroom's server: on when given the
     /// service token's file (at least 32 characters, new each run, readable by the user only).
     #[arg(long, env = "AUTH_TOKEN_FILE")]
@@ -100,30 +102,56 @@ struct Args {
     /// ...and after this long in all.
     #[arg(long, env = "AUTH_MAX_AGE", default_value = "30d", value_parser = auth::secret::duration)]
     auth_max_age: Duration,
-    /// The sign-in's database, as its own role: postgres://auth:password@host:port/database.
-    #[arg(long, env = "AUTH_DATABASE_URL", hide_env_values = true)]
-    auth_database: Option<String>,
 }
 
-/// `visit-client migrate`: makes the database ready for this visit-client, or brings it up to date after an
-/// upgrade (each migration once, in order); `--status` says where it is, changing nothing.
+/// Which workroom a command is for: VISIT_DATA_DIR, or the default made from VISIT_NAME (as a run finds it).
+#[derive(clap::Args)]
+struct Which {
+    /// The workroom's data directory.
+    #[arg(long, env = "VISIT_DATA_DIR")]
+    data_dir: Option<PathBuf>,
+    /// The workroom's name, for its default data directory.
+    #[arg(long, env = "VISIT_NAME")]
+    name: Option<String>,
+}
+
+impl Which {
+    fn dir(&self) -> anyhow::Result<PathBuf> {
+        data_dir(self.data_dir.clone(), self.name.as_deref())
+    }
+}
+
+/// The commands beside a run (V2.md 2.1); `visit auth …` is auth's own (auth::main_with).
 #[derive(Parser)]
-#[command(name = "visit-client migrate", version, about = "Makes visit-client's database ready, or brings it up to date (visit/SPEC.md 8.12)")]
-struct Migrate {
-    /// The database: postgres://user:password@host:port/database.
-    #[arg(long, env = "VISIT_DATABASE_URL", hide_env_values = true)]
-    database: String,
-    /// Say where it is and what is pending, changing nothing.
-    #[arg(long)]
-    status: bool,
+#[command(name = "visit", version)]
+enum Command {
+    /// A psql on the workroom's database, as its superuser (what follows goes to psql).
+    Psql {
+        #[command(flatten)]
+        which: Which,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Where the workroom's data is, what is inside this visit, and whether it runs.
+    Status {
+        #[command(flatten)]
+        which: Which,
+    },
 }
 
-/// What a run with no database says: how to have one.
-const NO_DATABASE: &str = "a database is required: --database postgres://user:password@host:port/database (or VISIT_DATABASE_URL).
-Postgres in Docker, for example:
-  docker run -d --name visit-db --restart unless-stopped -e POSTGRES_USER=visit -e POSTGRES_PASSWORD=<a password> \
-    -v visit-db:/var/lib/postgresql/data -p 127.0.0.1:7432:5432 postgres:17-alpine
-then, once (and after every upgrade): visit-client migrate --database postgres://visit:<a password>@127.0.0.1:7432/visit";
+/// A workroom's data directory: the one given, or basedverse/<name> in the user's data folder.
+fn data_dir(given: Option<PathBuf>, name: Option<&str>) -> anyhow::Result<PathBuf> {
+    match (given, name) {
+        (Some(d), _) => Ok(d),
+        (None, Some(n)) => runtime::default_data_dir(n),
+        (None, None) => anyhow::bail!("which workroom: VISIT_DATA_DIR (--data-dir), or VISIT_NAME (--name) for its default"),
+    }
+}
+
+/// What this visit is, for --version: its own version, and what is inside it.
+fn long_version() -> &'static str {
+    Box::leak(format!("{VERSION} (Postgres {})", runtime::POSTGRES.version).into_boxed_str())
+}
 
 /// Compares two secrets in time that does not depend on where they differ.
 pub fn ct_eq(a: &str, b: &str) -> bool {
@@ -141,7 +169,7 @@ pub fn name_ok(n: &str) -> bool {
 }
 
 fn bad_flags(msg: &str) -> ExitCode {
-    eprintln!("visit-client: {msg}");
+    eprintln!("visit: {msg}");
     ExitCode::from(2)
 }
 
@@ -154,26 +182,97 @@ fn main() -> ExitCode {
         }
     }
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build().expect("the tokio runtime");
-    if std::env::args().nth(1).as_deref() == Some("auth") {
-        return rt.block_on(auth::main_with(std::iter::once("visit auth".to_string()).chain(std::env::args().skip(2))));
-    }
-    if std::env::args().nth(1).as_deref() == Some("migrate") {
-        return rt.block_on(migrate(Migrate::parse_from(std::iter::once("visit-client migrate".to_string()).chain(std::env::args().skip(2)))));
+    match std::env::args().nth(1).as_deref() {
+        Some("auth") => return rt.block_on(auth_command()),
+        Some("psql" | "status") => return rt.block_on(command(Command::parse())),
+        _ => {}
     }
     rt.block_on(run())
 }
 
-async fn migrate(m: Migrate) -> ExitCode {
-    match db::migrate(&m.database, m.status).await {
-        Ok(lines) => {
-            for l in lines {
-                println!("{l}");
-            }
-            ExitCode::SUCCESS
+/// `visit auth …` on the workroom's database: a running visit's, else one started for it (and stopped after).
+/// Which workroom: VISIT_DATA_DIR or VISIT_NAME, or `--data-dir`/`--name` right after `auth`.
+async fn auth_command() -> ExitCode {
+    let mut rest: Vec<String> = std::env::args().skip(2).collect();
+    let mut which = Which { data_dir: std::env::var_os("VISIT_DATA_DIR").map(PathBuf::from), name: std::env::var("VISIT_NAME").ok() };
+    while let Some(flag) = rest.first().cloned() {
+        let (k, v) = match flag.split_once('=') {
+            Some((k, v)) => (k.to_string(), Some(v.to_string())),
+            None => (flag.clone(), None),
+        };
+        if k != "--data-dir" && k != "--name" {
+            break;
         }
+        rest.remove(0);
+        let Some(v) = v.or_else(|| (!rest.is_empty()).then(|| rest.remove(0))) else { return bad_flags(&format!("{k} needs a value")) };
+        if k == "--data-dir" { which.data_dir = Some(v.into()) } else { which.name = Some(v) }
+    }
+    if rest.is_empty() || rest.iter().any(|a| a == "-h" || a == "--help" || a == "-V" || a == "--version") {
+        return auth::main_with(std::iter::once("visit auth".to_string()).chain(rest), "").await;
+    }
+    with_database(&which, |pg| async move {
+        auth::main_with(std::iter::once("visit auth".to_string()).chain(rest), &pg.auth_url()).await
+    }).await
+}
+
+/// Runs `f` with the workroom's Postgres up: a running visit's, else started for it and stopped after.
+async fn with_database<F, Fut>(which: &Which, f: F) -> ExitCode
+where
+    F: FnOnce(std::sync::Arc<pg::Pg>) -> Fut,
+    Fut: std::future::Future<Output = ExitCode>,
+{
+    tracing_subscriber::fmt().with_writer(std::io::stderr)
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "visit=warn,auth=warn".into())).init();
+    let dir = match which.dir() {
+        Ok(d) => d,
+        Err(e) => return bad_flags(&format!("{e:#}")),
+    };
+    let pg = match pg::open(&dir, false).await {
+        Ok((pg, _)) => std::sync::Arc::new(pg),
         Err(e) => {
-            eprintln!("visit-client migrate: {e:#}");
-            ExitCode::from(1)
+            eprintln!("visit: {e:#}");
+            return ExitCode::from(5);
+        }
+    };
+    let code = f(pg.clone()).await;
+    if let Ok(pg) = std::sync::Arc::try_unwrap(pg) {
+        pg.stop().await;
+    }
+    code
+}
+
+async fn command(c: Command) -> ExitCode {
+    match c {
+        Command::Psql { which, args } => with_database(&which, |pg| async move {
+            let status = std::process::Command::new(pg.bin.join(pg::exe("psql")))
+                .args(["-h", "127.0.0.1", "-p", &pg.port().to_string(), "-U", "postgres", "-d", "visit"])
+                .args(&args)
+                .env("PGPASSWORD", pg.superuser_password())
+                .status();
+            match status {
+                Ok(s) => ExitCode::from(s.code().unwrap_or(1) as u8),
+                Err(e) => {
+                    eprintln!("visit psql: {e}");
+                    ExitCode::FAILURE
+                }
+            }
+        }).await,
+        Command::Status { which } => {
+            let dir = match which.dir() {
+                Ok(d) => d,
+                Err(e) => return bad_flags(&format!("{e:#}")),
+            };
+            println!("visit {VERSION}");
+            println!("inside it: Postgres {} ({})", runtime::POSTGRES.version, runtime::POSTGRES.name);
+            println!("data: {}", dir.display());
+            match runtime::basedverse_dir() {
+                Ok(b) => println!("runtime: {}", b.join("runtime").display()),
+                Err(e) => println!("runtime: {e:#}"),
+            }
+            let running = std::fs::OpenOptions::new().write(true).open(dir.join("visit.lock"))
+                .map(|f| matches!(f.try_lock(), Err(std::fs::TryLockError::WouldBlock))).unwrap_or(false);
+            println!("running: {}", if running { "yes" } else { "no" });
+            ExitCode::SUCCESS
         }
     }
 }
@@ -223,10 +322,15 @@ async fn run() -> ExitCode {
     if !(a.lobby.starts_with("wss://") || a.lobby.starts_with("ws://")) {
         return bad_flags("--lobby: a ws:// or wss:// URL");
     }
-    let Some(database) = a.database.clone().filter(|d| !d.is_empty()) else { return bad_flags(NO_DATABASE) };
-    if a.auth_token_file.is_some() && a.auth_database.is_none() {
-        return bad_flags("the sign-in API (--auth-token-file) needs its database: --auth-database (or AUTH_DATABASE_URL)");
+    let data = match data_dir(a.data_dir.clone(), Some(&a.name)) {
+        Ok(d) => d,
+        Err(e) => return bad_flags(&format!("{e:#}")),
+    };
+    if let Err(e) = std::fs::create_dir_all(&data) {
+        return bad_flags(&format!("--data-dir {}: {e}", data.display()));
     }
+    let state_file = a.state_file.clone().unwrap_or_else(|| data.join("state.json"));
+    let cache = a.cache_dir.clone().unwrap_or_else(|| data.join("landscapes"));
     let relays = a.relays.as_deref().map(|r| match r {
         "none" => link::Relays::Off,
         "default" => link::Relays::Default,
@@ -247,13 +351,22 @@ async fn run() -> ExitCode {
 
     let (core_tx, core_rx) = mpsc::unbounded_channel();
     let (lobby_tx, lobby_rx) = mpsc::unbounded_channel();
-    let (mut saved, fresh) = state::Saved::load(a.state_file.as_deref());
-    // The database, at the schema this visit-client needs (else it says what to run); bans an older state file
-    // kept, moved into it.
+    let (mut saved, fresh) = state::Saved::load(Some(&state_file));
+    // The workroom's Postgres, started and made ready (its roles, its schemas up to date); then visit-client's
+    // database, with bans an older state file kept moved into it.
+    let pg = match pg::open(&data, true).await {
+        Ok((pg, _)) => pg,
+        Err(e) => {
+            eprintln!("visit: {e:#}");
+            return ExitCode::from(5);
+        }
+    };
+    let database = pg.visit_url();
     let (client, mut loaded) = match db::open(&database, &saved.bans).await {
         Ok(x) => x,
         Err(e) => {
-            eprintln!("visit-client: {e:#}");
+            eprintln!("visit: {e:#}");
+            pg.stop().await;
             return ExitCode::from(5);   // (4: the lobby refused it)
         }
     };
@@ -271,9 +384,9 @@ async fn run() -> ExitCode {
         }
     });
     // The sign-in, in this process: ready (its token, its database, its port) before this says it is.
-    if let (Some(token_file), Some(database)) = (a.auth_token_file.clone(), a.auth_database.clone()) {
+    if let Some(token_file) = a.auth_token_file.clone() {
         let visit = a.token_file.clone().map(|f| (a.port, f));
-        let serve = auth::Serve { database, port: a.auth_port, listen: a.auth_listen, token_file, idle: a.auth_idle, max_age: a.auth_max_age, visit };
+        let serve = auth::Serve { database: pg.auth_url(), port: a.auth_port, listen: a.auth_listen, token_file, idle: a.auth_idle, max_age: a.auth_max_age, visit };
         match auth::serve_with(serve).await {
             Ok(api) => {
                 let stopper = core_tx.clone();
@@ -286,6 +399,7 @@ async fn run() -> ExitCode {
             }
             Err(e) => {
                 eprintln!("visit: the sign-in API: {e:#}");
+                pg.stop().await;
                 return ExitCode::from(5);
             }
         }
@@ -306,9 +420,10 @@ async fn run() -> ExitCode {
     });
 
     println!("{}", json!({ "ready": true, "port": a.port, "version": VERSION, "proto": page::PROTO }));
-    let cache = a.cache_dir.clone().or_else(|| a.state_file.as_deref().map(|f| f.parent().unwrap_or(std::path::Path::new(".")).join("landscapes")));
-    let lands = land::Lands::open(cache);
-    let code = core::Core::new(lobby_tx, core_tx, relays, a.max_visitors, a.idle_exit, saved, fresh, a.state_file.clone(), lands, db_tx, loaded).run(core_rx).await;
+    let lands = land::Lands::open(Some(cache));
+    let code = core::Core::new(lobby_tx, core_tx, relays, a.max_visitors, a.idle_exit, saved, fresh, Some(state_file), lands, db_tx, loaded).run(core_rx).await;
+    auth::STOPPING.store(true, std::sync::atomic::Ordering::Relaxed);
+    pg.stop().await;
     ExitCode::from(code as u8)
 }
 

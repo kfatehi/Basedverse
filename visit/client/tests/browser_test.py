@@ -178,13 +178,12 @@ async def start_client(name, port, url, user_token=False, tokens=None):
         with open(upath, "w") as f:
             f.write(utoken)
         extra = ["--user-token-file", upath]
-    database = "%s/%s" % (os.environ["VISIT_TEST_DB"], name.lower())   # run-browser.sh's Postgres: made ready first
-    m = await asyncio.create_subprocess_exec(BIN, "migrate", "--database", database, stdout=asyncio.subprocess.DEVNULL)
-    assert await m.wait() == 0, "visit-client migrate failed"
+    # Its database: the Postgres inside visit, in a data directory of its own (unpacked once, under TMP/xdg).
     p = await asyncio.create_subprocess_exec(BIN, "--lobby", url, "--name", name, "--sim", "test-room/1", "--port", str(port),
-                                             "--token-file", path, "--relays", "none", "--database", database, *extra, stdout=asyncio.subprocess.PIPE,
-                                             stderr=open(os.path.join(OUT, name + ".log"), "w"))
-    await asyncio.wait_for(p.stdout.readline(), 10)
+                                             "--token-file", path, "--relays", "none", "--data-dir", os.path.join(TMP, name + ".data"), *extra,
+                                             stdout=asyncio.subprocess.PIPE, stderr=open(os.path.join(OUT, name + ".log"), "w"),
+                                             env=dict(os.environ, XDG_DATA_HOME=os.path.join(TMP, "xdg")))
+    await asyncio.wait_for(p.stdout.readline(), 30)
     return (p, token, utoken) if user_token else (p, token)
 
 

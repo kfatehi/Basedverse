@@ -362,6 +362,9 @@ async fn listen(app: Arc<App>) {
     let mut ticks = 0u32;
     loop {
         if let Err(e) = listening(&app, &mut ticks).await {
+            if crate::stopping() {
+                return;
+            }
             warn!("listening for changes: {e:#}");
         }
         tokio::time::sleep(Duration::from_secs(5)).await;
@@ -407,10 +410,6 @@ async fn listening(app: &Arc<App>, ticks: &mut u32) -> Result<()> {
 }
 
 /// A run: the API on its address (127.0.0.1, or its container's network) until it is stopped.
-pub async fn serve(cfg: Config, client: Client) -> Result<()> {
-    let listener = bind(&cfg).await?;
-    serve_on(cfg, client, listener).await
-}
 
 /// Its port, taken (so a `visit` whose sign-in port is in use says so before it says it is ready).
 pub async fn bind(cfg: &Config) -> Result<tokio::net::TcpListener> {

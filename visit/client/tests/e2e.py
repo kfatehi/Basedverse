@@ -102,7 +102,9 @@ class Page:
         self.pump.cancel()
 
 
-DB = os.environ["VISIT_TEST_DB"]   # Postgres (run-e2e.sh's): a database for each visit-client, by its name
+# The Postgres inside visit (V2.md 4) is unpacked once into the user's data folder, for every workroom: here, one for
+# the whole test; each visit's own data directory is TMP/<name>.data.
+os.environ["XDG_DATA_HOME"] = os.path.join(TMP, "xdg")
 
 
 async def run_bin(*args, timeout=40):
@@ -113,12 +115,9 @@ async def run_bin(*args, timeout=40):
 
 
 async def start_client(name, port, url, *extra, binary=None, user_token=False):
-    """`user_token`: with a user token too (engine/SPEC.md 6.2): then (process, token, user token)."""
-    database = "%s/%s" % (DB, name.lower())
-    code, _, err = await run_bin("migrate", "--database", database)   # (made ready, or already: nothing to do)
-    if code != 0:
-        raise AssertionError("visit-client migrate: " + err)
-    extra = ("--database", database) + extra
+    """`user_token`: with a user token too (engine/SPEC.md 6.2): then (process, token, user token). Its data in
+    TMP/<name>.data: a restart is the same workroom, its database kept."""
+    extra = ("--data-dir", os.path.join(TMP, name + ".data")) + extra
     token = secrets.token_hex(32)
     path = os.path.join(TMP, name + ".token")
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -137,7 +136,7 @@ async def start_client(name, port, url, *extra, binary=None, user_token=False):
                                              "--token-file", path, "--relays", "none", *extra,
                                              stdout=asyncio.subprocess.PIPE, stderr=log,
                                              env=dict(os.environ, RUST_LOG=os.environ.get("RUST_LOG", "visit=debug,auth=debug,iroh=warn")))
-    ready = json.loads(await asyncio.wait_for(p.stdout.readline(), 10))
+    ready = json.loads(await asyncio.wait_for(p.stdout.readline(), 30))   # (the first start makes its database)
     check("%s prints its ready line" % name, (ready["ready"], ready["port"], ready["proto"]), (True, port, "basedverse-visit-local/2"))
     return (p, token, utoken) if user_token else (p, token)
 
@@ -165,24 +164,21 @@ async def main():
         state = os.path.join(TMP, "A.state.json")   # where A keeps whether it is away
         a_flags = ("--origins", "http://room.test", "--state-file", state)
 
-        print("\nits database (8.12): required, made ready by visit-client migrate, checked at every start")
+        print("\nits database (V2.md 4): the Postgres inside visit, made at its first start, the workroom's own")
         tok = os.path.join(TMP, "check.token")
         with open(tok, "w") as f:
             f.write(secrets.token_hex(32))
-        bare = ("--lobby", url, "--name", "A", "--port", "7411", "--token-file", tok, "--relays", "none")
-        code, _, err = await run_bin(*bare)
-        check("without a database: it will not run, and says how to have one", (code, "a database is required" in err, "visit-client migrate" in err), (2, True, True))
-        code, _, err = await run_bin(*bare, "--database", DB + "/a")
-        check("with one not made ready: it will not run, and says what to run", (code, "needs 2" in err, "visit-client migrate --database" in err), (5, True, True))
-        code, out, _ = await run_bin("migrate", "--status", "--database", DB + "/a")
-        check("migrate --status: where it is, what is pending, changing nothing", (code, "at version 0" in out, "pending: 1 chat" in out, "pending: 2 mail" in out), (0, True, True, True))
-        code, out, _ = await run_bin("migrate", "--database", DB + "/a")
-        check("migrate: each migration applied, once", (code, "applied: 1 chat" in out, "applied: 2 mail" in out), (0, True, True))
-        code, out, _ = await run_bin("migrate", "--database", DB + "/a")
-        check("and again: nothing to do", (code, "up to date" in out), (0, True))
-        code, _, err = await run_bin("migrate", "--database", "postgres://postgres@127.0.0.1:1/a", timeout=60)
-        check("a database it cannot reach: said, and a failure", (code, "cannot reach the database" in err), (1, True))
+        a_data = os.path.join(TMP, "A.data")
+        code, out, _ = await run_bin("status", "--data-dir", a_data)
+        check("visit status: what is inside it, where the workroom's data is, not running",
+              (code, "inside it: Postgres 18" in out, a_data in out, "running: no" in out), (0, True, True, True))
         (pa, ta), (pb, tb) = await start_client("A", 7411, url, *a_flags), await start_client("B", 7412, url, "--cache-dir", os.path.join(TMP, "B.lands"))
+        check("A's first start made its database", os.path.isfile(os.path.join(a_data, "postgres", "data", "PG_VERSION")), True)
+        check("its roles' passwords kept for the user only", oct(os.stat(os.path.join(a_data, "postgres", "secrets")).st_mode & 0o777), "0o600")
+        code, out, _ = await run_bin("status", "--data-dir", a_data)
+        check("A running: visit status says so", "running: yes" in out, True)
+        code, _, err = await run_bin("--lobby", url, "--name", "A", "--port", "7419", "--token-file", tok, "--relays", "none", "--data-dir", a_data)
+        check("a second visit for A's workroom: refused, saying so", (code, "running already" in err), (5, True))
 
         print("\npage connection")
         bad = await Page(7411, ta).open(token="0" * 64)
@@ -1236,7 +1232,7 @@ async def main():
         tok = os.path.join(TMP, "D.check.token")
         with open(tok, "w") as f:
             f.write(secrets.token_hex(32))
-        bare = ("--lobby", url, "--name", "D", "--port", "7414", "--token-file", tok, "--relays", "none", "--database", DB + "/a")
+        bare = ("--lobby", url, "--name", "D", "--port", "7414", "--token-file", tok, "--relays", "none", "--data-dir", os.path.join(TMP, "D.data"))
         code, _, err = await run_bin(*bare, "--listen", "10.0.0.1")
         check("--listen takes 127.0.0.1 or 0.0.0.0, nothing else", (code, "--listen" in err), (2, True))
         code, _, err = await run_bin(*bare, "--user-token-file", tok)
