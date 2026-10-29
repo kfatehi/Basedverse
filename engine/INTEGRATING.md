@@ -1,13 +1,11 @@
-# Building a room on visit-engine
+# Building a room on the engine
 
 **Written for the coding agent doing the integration.** Read it all before you change anything, then work
 through the steps in order; each ends with how to check it. The contract behind it is [SPEC.md](SPEC.md)
 (cited as "SPEC n" below; visit's as "visit/SPEC.md n"): look things up there, but you should not need to.
 
-**Experimental** ([#17](https://github.com/sarmiena/Basedverse/issues/17), branch `engine`): the pieces this
-guide names are being built in the order of SPEC 11. Until a release says otherwise, nothing here is in a
-visit-client you can download. A room built by this guide before then is built against the contract, and runs
-when the pieces land.
+The engine came in 1.0.0 ([#17](https://github.com/sarmiena/Basedverse/issues/17)) as an image beside visit-client;
+from 2.0.0 it is inside `visit`, the one program your workroom runs: nothing to get or start but `visit`.
 
 This guide lives in basedverse's `engine/` directory, beside [`../visit/`](../visit/) and [`../auth/`](../auth/).
 It assumes the Visit integration ([../visit/INTEGRATING.md](../visit/INTEGRATING.md), through step 9) and the
@@ -17,19 +15,18 @@ room does those first, in that order, then this.
 ## What you are building
 
 Today your room is one page in the owner's tab: the room itself (its scene, its rules) and the person in it. After
-this integration it is two pages, and a third program runs beside visit-client:
+this integration it is two pages, and `visit` runs the first itself:
 
 - **the server page**: your scene, `spawn`, `move`, your interactions, your room's own logic. It runs in
-  **visit-engine**, a headless browser in a container beside visit-client, always, whether or not anyone is
-  looking. It is the room.
+  **the engine**, a headless browser inside `visit`, always, whether or not anyone is looking. It is the room.
 - **the client page**: what a person loads, with a session: Visit's stage, panel and chat window, and your own
   HUD. It draws your room the way a visitor's page draws any room, from the scene the server page sends. It
   runs in any browser: at the desk, a laptop at a coffee shop, a phone.
-- **your server** relays the person's connection to visit-client (a WebSocket route behind your session check),
-  serves visit.js, and starts the engine with the rest.
+- **your server** relays the person's connection to `visit` (a WebSocket route behind your session check), and
+  serves visit.js; your launcher gives `visit` the server page's address.
 
-Nothing in a browser reaches visit-client on `127.0.0.1` any more, so the exception the auth guide made for Visit
-(step 9: "visit-client is the exception") is gone: Visit works from another device like everything else of yours.
+Nothing in a browser reaches `visit` on `127.0.0.1` any more, so the exception the auth guide made for Visit
+(step 9: "Visit is the exception") is gone: Visit works from another device like everything else of yours.
 
 Visitors, watchers and friends' worlds see no difference: they only ever saw the bytes visit-client sends.
 
@@ -56,10 +53,9 @@ which SPEC 11 step 2 splits into a server page and a client page beside it: copy
 
 Check these about the room you are integrating; if one is not true, stop and tell your user why.
 
-1. **Visit and auth are integrated and checked** (their checklists pass), and the workroom runs in Docker
-   compose, or can: visit-client, auth-client, your server and the engine share one compose network. Without
-   compose, every piece can still run on one machine's network on `127.0.0.1` (SPEC 6.1 allows both); this guide
-   shows compose.
+1. **Visit and auth are integrated and checked** (their checklists pass): one `visit`, with its sign-in on, and
+   your server beside it, on one machine's `127.0.0.1` (this guide's way), or, with your server in a container,
+   `visit` on that container network (SPEC 6.1 allows both; step 3).
 2. **Your room's code can run with nobody at the keyboard.** Read the page and list what it does with the
    owner's keyboard, mouse, microphone and screen. Each goes to the client page or becomes a visitor's input
    (`move`, `v.interactions`) with `who.owner`:
@@ -75,17 +71,18 @@ Check these about the room you are integrating; if one is not true, stop and tel
 4. **Your HUD talks to your server**, not to the scene. The boards, consoles and forms of your room will live in
    the client page, where the scene is a copy they must not change.
 
-Then the settings, in your workroom's `.env` (started from [`../.env.example`](../.env.example)'s new `ENGINE_*`
-lines): `ENGINE_ROOM_URL` (your server page, by your server's name on the compose network, with `?role=host`
-if one page serves both roles: step 2), and the rest at their defaults.
+Then the settings, in your workroom's `.env` (from [`../.env.example`](../.env.example)'s `ENGINE_*` section):
+`ENGINE_ROOM_URL` (your server page on your server, `http://127.0.0.1:3001/room/server`, with `?role=host` if one
+page serves both roles: step 2), and the rest at their defaults; and `VISIT_USER_TOKEN_FILE` for your launcher to
+set (step 3).
 
-## Step 1 — Get visit-engine
+## Step 1 — It is inside `visit`
 
-The image, from the same release as visit-client: `bin/setup` pulls `ghcr.io/sarmiena/basedverse/visit-engine:<version>`
-(or builds `engine/` with Docker: `docker build -t visit-engine <basedverse>/engine`). Use the same version for
-visit-client, auth-client and the engine: the release job checks they match, and so should your launcher.
+Nothing to get: the engine and the Chrome it drives are inside `visit`
+([../visit/INTEGRATING.md](../visit/INTEGRATING.md), step 1), at the version `visit` was built with. It needs no
+GPU, no Docker, and no browser of the machine's.
 
-**Check:** `docker run --rm visit-engine --version` prints the version.
+**Check:** `visit --version` names the Chrome it carries.
 
 ## Step 2 — Split your room
 
@@ -221,59 +218,40 @@ token: "<the host token>", role: "host" }` set in its console first, hosts: your
 office's panel. The client page, opened with a session, shows your room in the stage and the panel beside it; its
 HUD works; nothing of your room's own UI is left in the server page.
 
-## Step 3 — visit-client on your network
+## Step 3 — Two tokens, and where your server reaches `visit`
 
-visit-client moves off the host's network and onto compose's, like auth-client did in 0.21.2:
-
-1. `VISIT_LISTEN=0.0.0.0`, **no `ports:`**, no `network_mode: host`. Your server and the engine reach it as
-   `visit:7401` (its service name).
-2. **Two tokens**, new each run, 32 random bytes as hex, each in a 0600 file under your `.visit/`: `token` (the
-   host's: visit-client and the engine) and `user-token` (the user's: visit-client and your server). The old
-   `visit.json` that handed `/api/visit` its token goes away.
-3. `VISIT_ORIGINS` lists your server's origins: the local ones, the HTTPS proxy's, and your server's name on the
-   network, which is what the engine's page has (`http://board:3001`).
-4. Its database as before (`visit-db`, by name).
-
-```yaml
-  visit:
-    build: ${BASEDVERSE:-../../basedverse}/visit/client
-    restart: unless-stopped
-    user: "${VISIT_UID:-1000}:${VISIT_GID:-1000}"
-    environment:
-      VISIT_LISTEN: 0.0.0.0                     # this container's network only: no `ports:`
-      VISIT_LOBBY: ${LOBBY_URL:-}
-      VISIT_NAME: ${LOBBY_NAME:-}
-      VISIT_SIM: my-workroom/2.0
-      VISIT_TOKEN_FILE: /visit/token            # the host's
-      VISIT_USER_TOKEN_FILE: /visit/user-token  # the user's
-      VISIT_STATE_FILE: /visit/state.json
-      VISIT_DATABASE_URL: postgres://visit:${VISIT_DB_PASSWORD:-}@visit-db:5432/visit
-      VISIT_ORIGINS: http://localhost:3001,http://127.0.0.1:3001,https://${REMOTE_HOST:-}:3443,http://board:3001
-    volumes:
-      - ../.visit:/visit
-    depends_on:
-      visit-db:
-        condition: service_healthy
-```
+1. **Two tokens**, new each run, 32 random bytes as hex, each in a 0600 file: the page token your launcher already
+   makes (`VISIT_TOKEN_FILE`), which is now the **host's**, `visit`'s alone (its engine takes it there), and a
+   **user token** (`VISIT_USER_TOKEN_FILE`), for `visit` and your server. Your server never has the host token. The
+   old `visit.json` that handed `/api/visit` its token goes away.
+2. **Where `visit` listens.** On one machine with your server, where it is: `127.0.0.1`. Your server reaches it
+   there, `127.0.0.1:7401` for the relay (step 4) and `127.0.0.1:7403` for the sign-in, and no browser reaches
+   either: a browser goes through your server. Your server in a container: `visit` in a container of its own on
+   that network (`VISIT_LISTEN=0.0.0.0`, `AUTH_LISTEN=0.0.0.0`, **no `ports:`**), reached by its service name, as
+   ../auth/INTEGRATING.md step 4 says; what it needs there is in visit/SPEC.md 4.4.
+3. `VISIT_ORIGINS` lists your server's origins: the local ones, the HTTPS proxy's, and `ENGINE_ROOM_URL`'s, which
+   is what the engine's page has (on one machine, the local one already; in containers, your server's name on the
+   network, `http://board:3001`).
+4. Its database is inside it, as always: nothing to do.
 
 ```sh
-# the launcher, each start: two tokens, 0600, before `up`
-(umask 077
- head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > .visit/token
- head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > .visit/user-token)
+# the launcher, each start, before visit starts (umask 077, as in visit/INTEGRATING.md step 2): the user's token
+export VISIT_USER_TOKEN_FILE="${XDG_RUNTIME_DIR:-/tmp}/my-workroom-user.token"
+head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$VISIT_USER_TOKEN_FILE"
 ```
 
-**Check:** on the host, `ss -ltnp` shows nothing on 7401 and `curl http://127.0.0.1:7401/health` does not
-connect; from your server's container, `curl http://visit:7401/health` answers `{"ok": true, …}`.
+**Check:** `ss -ltnp` shows 7401 on `127.0.0.1` only (in containers: nothing on the host's 7401); from your server,
+`curl http://127.0.0.1:7401/health` (in containers, from its container, `http://visit:7401/health`) answers
+`{"ok": true, …}`.
 
 ## Step 4 — Serve the library, and relay the person
 
 Two routes on your server. Both sit behind your session check (auth step 5), like every route.
 
-- **`GET /visit/visit.js`**: proxied from `http://visit:7401/visit.js` on each request (no caching beyond what
-  visit-client's headers say), so both pages always run the library their visit-client speaks.
+- **`GET /visit/visit.js`**: proxied from `http://127.0.0.1:7401/visit.js` on each request (no caching beyond what
+  `visit`'s headers say), so both pages always run the library their `visit` speaks.
 - **`GET /visit/ws`**, a WebSocket upgrade: the relay (SPEC 6.3). A session, never an API key. It opens a
-  WebSocket to `ws://visit:7401/ws` with the browser's `Origin`, sends the **relay preface** as the first
+  WebSocket to `ws://127.0.0.1:7401/ws` with the browser's `Origin`, sends the **relay preface** as the first
   message, then pipes bytes both ways unread. It never parses a frame after the preface, never forwards a token
   from the browser, buffers at most 1 MiB toward the browser (then closes both ends 4408), and holds one
   connection per session (a second replaces the first, 4409).
@@ -283,7 +261,7 @@ A sketch in Python's standard library (the shape, not a library; your server's o
 ```python
 import base64, hashlib, json, os, selectors, socket, threading
 
-VISIT = (os.environ.get("VISIT_HOST", "visit"), int(os.environ.get("VISIT_PORT", "7401")))
+VISIT = ("127.0.0.1", int(os.environ.get("VISIT_PORT", "7401")))   # in containers: visit's service name
 USER_TOKEN = open(os.environ["VISIT_USER_TOKEN_FILE"]).read().strip()
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 live = {}   # session hash -> the browser's socket, to replace a second connection's first
@@ -357,45 +335,30 @@ thing to remove). Your client page needs nothing but its session.
 
 **Check:** with a session, `GET /visit/visit.js` is the library; without one, 401. From the client page's console,
 `new WebSocket("/visit/ws")` opens and, after the page's `hello`, gets `ready` with `"role": "user"`; from another
-origin, or without a session, it does not open. `ss -ltnp` on the host: no 7401.
+origin, or without a session, it does not open. `ss -ltnp`: 7401 on `127.0.0.1` only.
 
-## Step 5 — The engine from your launcher
+## Step 5 — The engine, from your launcher
 
-1. **An API key for the engine**, once: `auth-client key add engine` (your `bin/auth`), its value written to
-   `.visit/engine-key` (0600) when first made; revoke and make a new one if it ever leaks.
-2. **Serve the server page to that key only**: `GET /room/server` (and every file it loads) answers a request
-   whose `Authorization: Bearer` is a key auth-client accepts (`/v1/check {key}`, as for agents, auth step 11),
-   and nothing else: not a session (a person never needs the room's code), never without one.
-3. **The engine service**, on the compose network, after visit-client and your server (it retries until both
-   answer, but a clean start is quieter):
+1. **`ENGINE_ROOM_URL`** in your `.env`: your server page, `http://127.0.0.1:3001/room/server` (`?role=host` if one
+   page serves both roles; in containers, by your server's name on the network). Given it, `visit` hosts that page
+   in its engine at every start, and makes the engine an API key of its own (labelled `engine`, made new at each
+   start, the one before it gone): there is no key to make, keep or pass on, and no other program to start.
+2. **The sign-in on**: `AUTH_TOKEN_FILE` given to `visit` (auth step 4), since your server checks the engine's key
+   with it.
+3. **Serve the server page to that key only**: `GET /room/server` (and every file it loads) answers a request
+   whose `Authorization: Bearer` is a key the sign-in accepts (`/v1/check {key}`, as for agents, auth step 11; the
+   engine's answers `{"key": "engine"}`, and you may hold the page to that label), and nothing else: not a session
+   (a person never needs the room's code), never without one.
 
-```yaml
-  engine:
-    image: ghcr.io/sarmiena/basedverse/visit-engine:${BASEDVERSE_VERSION}   # or build: ${BASEDVERSE}/engine
-    restart: unless-stopped
-    user: "${VISIT_UID:-1000}:${VISIT_GID:-1000}"
-    environment:
-      ENGINE_ROOM_URL: http://board:3001/room/server    # ?role=host if one page serves both
-      ENGINE_KEY_FILE: /visit/engine-key
-      VISIT_HOST: visit
-      VISIT_PORT: "7401"
-      VISIT_TOKEN_FILE: /visit/token                    # the host's: the engine's alone, beside visit-client
-    volumes:
-      - ../.visit:/visit:ro
-    depends_on:
-      - visit
-      - board
-```
+Your server gets `VISIT_PORT` and `VISIT_USER_TOKEN_FILE` (step 3); it must not have the host token. Start them in
+any order: the engine loads the page again until your server answers (SPEC 5.1, point 6), though a clean start,
+your server first, is quieter. Stop `visit` with the rest: it stops its engine first.
 
-Your server gets `VISIT_HOST=visit`, `VISIT_PORT=7401` and `VISIT_USER_TOKEN_FILE=/visit/user-token`; it must
-not have the host token. Start order: `visit-db` (healthy), `visit migrate`, `auth`, `visit`, `board`, `engine`.
-Stop the engine with the rest.
-
-**Check:** `docker compose logs engine` ends with the room hosting (`room: hosting`); from your server's
-container, `curl http://engine:7405/health` says `"room": "hosting"`; on the host nothing answers on 7405.
-Another office's panel shows yours `ready` **with your tab closed**. Restart `board` alone: the engine loads the
-page again and the room is back within its backoff; restart `engine` alone: visitors see `host_paused`, then the
-room again. `docker stats engine`: memory in the hundreds of MB, CPU a few percent with the room idle.
+**Check:** `visit`'s log (its stderr) says `room: hosting`; `curl http://127.0.0.1:7405/health` says
+`"room": "hosting"`; from another machine, nothing answers on 7405. Another office's panel shows yours `ready`
+**with your tab closed**. Restart your server alone: the room carries on, or comes back within the engine's backoff
+if its page failed meanwhile. Restart `visit` (your launcher): the room is back once the engine hosts it again.
+`ENGINE_LOG=debug` logs the browser's memory every 5 s: hundreds of MB; a few percent of a core with the room idle.
 
 ## Step 6 — At the desk: nothing felt
 
@@ -412,8 +375,8 @@ Open the client page at `http://localhost:3001`, signed in.
    before and after; SPEC 11 step 3 wants them.
 5. **Close the tab.** From another office: your room is still there, still visitable; a whisper to you lands in
    your mailbox. Open the tab again: 📬 says so.
-6. **Reload the engine's page** (`docker compose restart engine`): the stage says the room is paused, then shows
-   it again, where it was.
+6. **Restart `visit`** (your launcher): the client page reconnects by itself, and shows your room again once the
+   engine hosts it.
 
 **Check:** all six, and the ⏱ reports kept.
 
@@ -426,7 +389,8 @@ Through the HTTPS proxy of auth step 10, on your LAN first, then from outside it
 3. close the laptop: the room stays up; open it: you are where you were, or at `spawn` after a while;
 4. the desk's tab and the laptop's at once: the newer replaces the older (4409), the room unmoved.
 
-**Check:** all four, from outside your LAN too; `ss -ltnp` on the office machine still shows no 7401 and no 7405.
+**Check:** all four, from outside your LAN too; `ss -ltnp` on the office machine still shows 7401, 7403 and 7405 on
+`127.0.0.1` only (in containers, none of them on the host).
 
 ## Checklist
 
@@ -436,19 +400,21 @@ Through the HTTPS proxy of auth step 10, on your LAN first, then from outside it
       `v.world`), the panel, the chat window, and your HUD, which talks to your server.
 - [ ] The owner is spawned and walked by your hooks (`who.owner`); their clicks reach your interactions as a
       visitor's do; cosmetic interactions only, unless agreed by name.
-- [ ] visit-client on the compose network: `VISIT_LISTEN=0.0.0.0`, no `ports:`, no `network_mode: host`; nothing
-      on the host's 7401.
-- [ ] Two tokens each start, 0600: the host's to visit-client and the engine; the user's to visit-client and your
-      server; neither in a page, a response, a URL or a log; `visit.json` and `/api/visit` gone.
-- [ ] `VISIT_ORIGINS` names the local origins, the proxy's, and your server's name on the network.
+- [ ] `visit` on `127.0.0.1` beside your server (or, your server in a container, `visit` on its network with
+      `VISIT_LISTEN` and `AUTH_LISTEN` `0.0.0.0` and no `ports:`); none of 7401, 7403, 7405 reachable from another
+      machine.
+- [ ] Two tokens each start, 0600: the host's to `visit` alone; the user's to `visit` and your server; neither in a
+      page, a response, a URL or a log; `visit.json` and `/api/visit` gone.
+- [ ] `VISIT_ORIGINS` names the local origins, the proxy's, and `ENGINE_ROOM_URL`'s.
 - [ ] `/visit/visit.js` proxied; `/visit/ws` relayed behind the session check (a key refused): the preface, bytes
       unread after it, 1 MiB then 4408, one connection per session.
-- [ ] The engine's key made with `auth-client key add engine`, kept 0600; the server page served to that key only.
-- [ ] The engine on the compose network, `/health` unpublished, `room: hosting`; the room `ready` with every tab
-      closed; a restart of your server alone, and of the engine alone, each recovers by itself.
+- [ ] `ENGINE_ROOM_URL` given to `visit`, with the sign-in on; the server page served to the engine's key only
+      (`/v1/check {key}`), never to a session.
+- [ ] `/health` says `room: hosting`, at `127.0.0.1` only; the room `ready` with every tab closed; a restart of your
+      server alone, and of `visit`, each recovers by itself.
 - [ ] At the desk: walking feels as before; the ⏱ reports, before and after, kept.
 - [ ] From another device: step 7 passes; nothing on the office machine's host ports but the proxy's.
-- [ ] `visit-client`, `auth-client` and `visit-engine` from one release; `migrate --status` up to date.
+- [ ] One `visit` (2.0 on): no engine image or service, no key file, no auth-client, nothing to migrate.
 - [ ] Nothing the browser decided decides the room: no `localStorage`, `matchMedia` or `?query` behind the server
       page's look; the environment, the theme, the owner's look through your server.
 - [ ] Every mark the person's page reads is a name, not `userData`; every geometry you deform is a plain one.
@@ -462,10 +428,12 @@ Through the HTTPS proxy of auth step 10, on your LAN first, then from outside it
 
 | symptom | cause |
 |---|---|
-| the engine logs `failed`, `could not load` | `ENGINE_ROOM_URL` wrong, or the server page refuses the engine's key (check `/v1/check` with it); from the engine's container, `curl -H "Authorization: Bearer $(cat /visit/engine-key)" $ENGINE_ROOM_URL` |
-| the engine logs `ready` never came | the server page's `Visit.connect` fails: `window.VISIT_ENGINE` not passed through, `/visit/visit.js` not served, or the host token wrong (4401: the engine's token file is not visit-client's) |
-| visit-client closes the engine's page 4409 at once, again and again | something else connects as the host with the host token: an old `room.html` still open in a tab with no role (it takes both slots), or two engines |
-| the client page connects, then 4401 | the relay's user token is not visit-client's `--user-token-file` (a stale file; two launchers) |
+| `visit`'s log says `room: failed (could not load …)` | `ENGINE_ROOM_URL` wrong or your server not up, or the server page refuses the engine's key: your server must take a key the sign-in accepts (`/v1/check {key}`; the engine's is made at each start, labelled `engine`: `visit auth key list` shows it), and the sign-in must be on (`AUTH_TOKEN_FILE`) |
+| `visit`'s log says `` `ready` never came `` | the server page's `Visit.connect` fails: `window.VISIT_ENGINE` not passed through, `/visit/visit.js` not served to the engine's key, or `ENGINE_ROOM_URL`'s origin not in `VISIT_ORIGINS` (refused with 403) |
+| `visit` exits at once, saying `the engine: …` (exit 5) | its port taken (`ENGINE_PORT`, 7405: another workroom's engine?), or `ENGINE_ROOM_URL` not an `http://` or `https://` URL |
+| `visit`'s log says Chrome's own sandbox cannot run | the machine keeps unprivileged user namespaces from it (a container, Ubuntu 23.10 and later): the engine runs it with `--no-sandbox`, as it says, and nothing is wrong |
+| visit-client closes the engine's page 4409 at once, again and again | something else connects as the host with the host token: an old `room.html` still open in a tab with no role (it takes both slots) |
+| the client page connects, then 4401 | the relay's user token is not `visit`'s `VISIT_USER_TOKEN_FILE` (a stale file; two launchers) |
 | the client page's `new WebSocket("/visit/ws")` fails with 403 | the browser's `Origin` is not in `VISIT_ORIGINS` (the relay passes it through): add the origin the address bar shows |
 | the client page connects, but `v.home` stays null | no host: the engine is down or still loading (`/health`), or its page hosts nothing (`v.host` not called: its console, in the engine's log) |
 | `wrong_role` in the client page's console | your client page calls a host-only method (`v.host`, `v.interactions`, `v.listener`): move it to the server page |
@@ -489,8 +457,9 @@ Through the HTTPS proxy of auth step 10, on your LAN first, then from outside it
 
 ## Upgrading
 
-[../CHANGELOG.md](../CHANGELOG.md), as for Visit: the engine's image, visit-client and auth-client move together,
-one version; `visit-client migrate` after each.
+[../CHANGELOG.md](../CHANGELOG.md), as for Visit: from 2.0 the engine is inside `visit`, one version with the rest,
+nothing to migrate. From 1.x (an `engine` service beside visit-client, its key made with `auth-client key add
+engine`): the changelog's v2.0.0, "Upgrading", says what goes.
 
 ### A room that hosts today: what the first one taught
 
@@ -550,12 +519,12 @@ change: a room on an older Visit visits you and is visited as before, so nobody 
 
 **Operating it.**
 
-- The engine's log is your only screen: `console.info` in the server page lands there. Log each point and each
-  `tell` while proving; `ENGINE_DEBUG=1` gives `/debug/eval` on the compose network, for the proving alone.
-- Never `docker compose up -d engine`: it recreates visit-client without the launcher's environment, a crash
-  loop and the room gone. Use the launcher; `docker compose restart engine` reloads the page alone. Every engine
-  restart reloads the page, and whatever you poked into it.
-- The person's page reconnects by itself when visit-client restarts, but a page loaded before a deploy keeps the
+- The engine's log is your only screen: `console.info` in the server page lands there (`visit`'s stderr, with
+  `ENGINE_LOG`). Log each point and each `tell` while proving; `ENGINE_DEBUG=1` gives `/debug/eval` on the engine's
+  port, for the proving alone.
+- Start and stop `visit` with your launcher, never by hand beside it: it holds the tokens your server and the
+  engine use. Every restart of `visit` reloads the page, and whatever you poked into it.
+- The person's page reconnects by itself when `visit` restarts, but a page loaded before a deploy keeps the
   old code: reload before judging anything.
 - Tests that grep your page (a click table's gate) break on the refactor: move them with it.
 
@@ -564,8 +533,8 @@ change: a room on an older Visit visits you and is visited as before, so nobody 
 - Don't give the browser a Visit token, host or user, by any route: the relay puts the user token in, and the
   engine puts the host token into its own page.
 - Don't serve the server page to a session, or without the engine's key: it is your room's code.
-- Don't publish visit-client's or the engine's port, or put visit-client back on the host's network for a
-  container to reach it: your server relays, on the compose network.
+- Don't publish `visit`'s ports (the page's, the sign-in's, the engine's), or listen beyond `127.0.0.1` (or a
+  container's own network): your server relays.
 - Don't keep anything of the person's in the server page (chat, name, avatar, mic), or anything of the room's
   truth in the client page (a client page that moves furniture is overwritten by the next delta).
 - Don't read pixels back in the server page: nothing is drawn there.
