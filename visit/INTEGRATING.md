@@ -4,7 +4,7 @@
 through the steps in order; each ends with how to check it. The contract behind it is
 [SPEC.md](SPEC.md): look things up there, but you should not need to.
 
-This guide lives in basedverse's `visit/` directory, beside `client/` (visit-client's source and
+This guide lives in basedverse's `visit/` directory, beside `client/` (the source of `visit`, and
 visit.js) and [SPEC.md](SPEC.md); basedverse's settings template, `.env.example`, is one level up. Paths
 below are relative to `visit/`.
 
@@ -23,12 +23,15 @@ Your sim draws an office (a "workroom") in a browser page, with three.js. After 
 
 You get two shared pieces you do not modify:
 
-- **visit-client**: a program that runs beside your sim on the same machine and does all the networking
-  (the lobby, the connections to other workrooms). It listens on 127.0.0.1 only and needs a token.
-- **visit.js**: the library your page loads from visit-client. It talks only to visit-client, sends your
-  scene to your visitors and moves them with your hooks, draws the scene of the room you visit, captures input.
+- **`visit`**: one program that runs beside your sim on the same machine and does all the networking (the
+  lobby, the connections to other workrooms). It listens on 127.0.0.1 only and needs a token. Everything else
+  Visit needs is inside it: its database (a Postgres it runs itself), and, when your workroom wants them, its
+  sign-in ([../auth/INTEGRATING.md](../auth/INTEGRATING.md)) and its engine
+  ([../engine/INTEGRATING.md](../engine/INTEGRATING.md)). Nothing to install, and no Docker.
+- **visit.js**: the library your page loads from `visit`. It talks only to `visit`, sends your scene to your
+  visitors and moves them with your hooks, draws the scene of the room you visit, captures input.
 
-You write: a launcher step (start visit-client with a token), a way to hand the token to your page, your
+You write: a launcher step (start `visit` with a token), a way to hand the token to your page, your
 scene and two host hooks, a little UI (or use the ready-made panel), and a few lines in your drawing loop for
 the world. Your page never opens any connection to another machine itself.
 
@@ -44,7 +47,7 @@ take them unless your user asks for something else. The defaults are Visit's own
   everyone who can see you, whisper to one person (`/w name`), say it in your room's chat (`/room`: everyone in it
   and linked with it) or a linked friend's (`/room name`), or to the lobby (`/1`); Tab finishes a name, else moves on to the next of those (Shift+Tab: back); 🎙 a voice
   message; 📬 what came for your user while nobody looked (whispers, your room's chat, mentions), kept until read;
-  a whisper to someone away is kept by your visit-client until you are both in the lobby; 🎧 joins a
+  a whisper to someone away is kept by your `visit` until you are both in the lobby; 🎧 joins a
   room's voice (everyone in it hears everyone else), and a line over the box says who is in it; it fades when nobody has said anything for a while;
 - **mounts** (`visit.ride`, M, the panel's "your mount"): Visit carries them and puts them under their rider in
   the room they ride into; what they are (models, names, paces) is your room's to say (`visit.possessions`), and the
@@ -86,15 +89,18 @@ python3 ../Basedverse/bin/setup --env .env      # basedverse beside your project
 ```
 
 It asks them for the lobby (an address they have, or their own server, where it deploys one), the office's
-name, the sim's name and version, and the page's address; gets visit-client for this machine (downloaded
-from the newest release, or built); and writes `VISIT_LOBBY`, `VISIT_NAME`, `VISIT_SIM`, `VISIT_ORIGINS`,
-`VISIT_PORT`, `VISIT_MAX_VISITORS`, `VISIT_STATE_FILE` and `VISIT_CLIENT_PATH` into the `.env`, keeping its other lines (and
-adding it to `.gitignore` if they say so). Tell them what it will ask, wait until they say it is done, then
-read the `.env`. Run again, it offers what the `.env` already says.
+name, the sim's name and version, and the page's address; gets `visit` for this machine (downloaded from the
+newest release, or built); offers to make the owner's account, for the sign-in (`visit auth user add`: they type
+the password); and writes `VISIT_LOBBY`, `VISIT_NAME`, `VISIT_SIM`, `VISIT_ORIGINS`, `VISIT_PORT`,
+`VISIT_MAX_VISITORS`, `VISIT_DATA_DIR` and `VISIT_PATH` into the `.env`, keeping its other lines (and adding it to
+`.gitignore` if they say so). Tell them what it will ask, wait until they say it is done, then read the `.env`.
+Run again, it offers what the `.env` already says. Python 3.8 or later is all it needs, unless it builds `visit`
+(step 1).
 
 If they would rather answer you, ask them the same things and run it yourself with flags and `--yes`:
 `--lobby wss://… --name "…" --sim my-workroom/1.0 --page http://localhost:3000` (`--help` lists the rest;
-deploying a lobby, `--deploy user@host`, is best left to them, since ssh may ask them for a password).
+deploying a lobby, `--deploy user@host`, is best left to them, since ssh may ask them for a password; with
+`--yes` it makes no account: they make it later, in a terminal, with `visit auth user add <name>`).
 
 Without setup, by hand: [`../.env.example`](../.env.example) is the template. Copy its first section (the
 `VISIT_*` lines, with their comments) into your workroom's own settings, its `.env` if it has one (make one
@@ -104,90 +110,88 @@ from that section if not, and keep it out of version control), and fill in:
 - `VISIT_NAME`: the **office name** your user wants (1–24 letters, digits, space, `_ . -`, starting and
   ending with a letter or digit; in quotes if it has a space, so a shell can read the file too);
 - `VISIT_SIM`: your sim's **name and version**, e.g. `my-workroom/1.0`;
-- `VISIT_ORIGINS`: your page's **origin**, e.g. `http://localhost:3000` (step 2 says why).
-
-- `VISIT_STATE_FILE`: a file of the user's own (outside your repository, e.g.
-  `~/.local/state/basedverse/<office>.json`) where visit-client keeps whether your user has gone offline, so
-  a restart does not put them back in the lobby, and the office's key, door and guests, so friends stay
-  friends across restarts. It holds a secret key: never commit it, never copy it elsewhere. Friends'
-  landscapes (step 5) are kept beside it, in `landscapes/` (or where `VISIT_CACHE_DIR` says).
+- `VISIT_ORIGINS`: your page's **origin**, e.g. `http://localhost:3000` (step 2 says why);
+- `VISIT_DATA_DIR`: where your workroom **keeps everything**: its database (your user's chat, the pictures shared
+  in it, whom your room keeps out, the sign-in's accounts), its state file (whether your user has gone offline, so
+  a restart does not put them back in the lobby; the office's key, door and guests, so friends stay friends across
+  restarts) and friends' landscapes (step 5). A directory of the user's own, outside your repository, written out
+  in full: `/home/<them>/.local/share/basedverse/<office>` on Linux, say (`~/Library/Application
+  Support/basedverse/<office>` on macOS, `%LOCALAPPDATA%\basedverse\<office>` on Windows). Blank, `visit` uses that
+  very place, made from the office's name; set it, and a renamed office keeps its data. It holds secrets (the
+  office's key, the database's passwords): never commit it, never copy it elsewhere. A copy taken while `visit`
+  is stopped is a backup of the workroom;
+- `VISIT_PATH`: where `visit` is (step 1).
 
 The rest can stay blank, meaning their defaults (port 7401, 3 visitors at once). `VISIT_TOKEN_FILE` is
 for your launcher to set (step 2). Never put real values in `.env.example` itself: it is basedverse's
 template, and it is committed.
 
-## Step 1 — Get visit-client
+## Step 1 — Get `visit`
 
-If setup got it, it is at `VISIT_CLIENT_PATH`: go on to the check at the end of this step. Otherwise, put
-the `visit-client` binary for your machine somewhere your launcher can run it (beside the launcher, say,
-kept out of version control), and set `VISIT_CLIENT_PATH` to it. The quickest way is to download it: each
-release of basedverse (https://github.com/sarmiena/Basedverse/releases; `latest/download/<file>` is always
-the newest) has one file per machine:
+If setup got it, it is at `VISIT_PATH`: go on to the check at the end of this step. Otherwise, put the `visit`
+binary for your machine somewhere your launcher can run it (beside the launcher, say, kept out of version
+control), and set `VISIT_PATH` to it. The quickest way is to download it: each release of basedverse
+(https://github.com/sarmiena/Basedverse/releases; `latest/download/<file>` is always the newest) has one file per
+machine, about 150 MB (the Postgres and the Chrome it carries are most of it):
 
 | machine (`uname -sm`) | file |
 |---|---|
-| `Linux x86_64` | `visit-client-x86_64-unknown-linux-musl.tar.gz` (static: any distribution) |
-| `Linux aarch64` | `visit-client-aarch64-unknown-linux-musl.tar.gz` (static) |
-| `Darwin arm64` (Apple silicon) | `visit-client-aarch64-apple-darwin.tar.gz` |
-| `Darwin x86_64` (Intel) | `visit-client-x86_64-apple-darwin.tar.gz` |
-| Windows, x64 | `visit-client-x86_64-pc-windows-msvc.zip` |
+| `Linux x86_64` | `visit-x86_64-unknown-linux-musl.tar.gz` (any distribution with glibc 2.28 or newer: Debian 10+, Ubuntu 20.04+, RHEL 8+) |
+| `Linux aarch64` | `visit-aarch64-unknown-linux-musl.tar.gz` (the same) |
+| `Darwin arm64` (Apple silicon) | `visit-aarch64-apple-darwin.tar.gz` (macOS 11 or later) |
+| `Darwin x86_64` (Intel) | `visit-x86_64-apple-darwin.tar.gz` (macOS 11 or later) |
+| Windows, x64 | `visit-x86_64-pc-windows-msvc.zip` |
 
 ```sh
 # Linux or macOS: this machine's file from the newest release, into ./bin
-mkdir -p bin && curl -fsSL https://github.com/sarmiena/Basedverse/releases/latest/download/visit-client-x86_64-unknown-linux-musl.tar.gz | tar -xz -C bin visit-client
+mkdir -p bin && curl -fsSL https://github.com/sarmiena/Basedverse/releases/latest/download/visit-x86_64-unknown-linux-musl.tar.gz | tar -xz -C bin visit
 ```
 
 ```powershell
 # Windows (PowerShell; curl.exe and tar.exe come with Windows 10 and later)
-mkdir bin; curl.exe -fsSLo visit-client.zip https://github.com/sarmiena/Basedverse/releases/latest/download/visit-client-x86_64-pc-windows-msvc.zip; tar.exe -xf visit-client.zip -C bin visit-client.exe; del visit-client.zip
+mkdir bin; curl.exe -fsSLo visit.zip https://github.com/sarmiena/Basedverse/releases/latest/download/visit-x86_64-pc-windows-msvc.zip; tar.exe -xf visit.zip -C bin visit.exe; del visit.zip
 ```
 
 `SHA256SUMS`, in the same release, has every file's checksum. The macOS builds are not notarized: one
-downloaded with a browser (not curl) needs `xattr -d com.apple.quarantine visit-client` before it runs.
+downloaded with a browser (not curl) needs `xattr -d com.apple.quarantine visit` before it runs.
 
 Or build it, for a machine the releases do not cover or a checkout newer than the newest release:
 
-- **Linux:** `client/build` makes a static `client/bin/visit-client` in Docker (nothing to install).
-- **macOS or Windows:** with Rust installed (https://rustup.rs), `cargo build --release` in `client/` gives
-  `client/target/release/visit-client`. It has to run natively there: a container cannot listen on the
-  machine's own 127.0.0.1.
+- **Linux:** `client/build` makes a static `client/bin/visit` in Docker (nothing to install).
+- **macOS or Windows:** with Rust installed (https://rustup.rs), `cargo build --release -p visit` at basedverse's
+  root gives `target/release/visit`. It has to run natively there: a container cannot listen on the machine's own
+  127.0.0.1.
 
-**Its database.** visit-client needs Postgres beside it (Visit 0.20): it keeps its user's chat there, the pictures
-and links shared in it, and whom its room keeps out. Setup gives it one (it starts Postgres in Docker for it, or
-takes the URL of one you have) and writes `VISIT_DATABASE_URL` into the `.env`. By hand:
+A build carries the Postgres and the Chrome basedverse has pinned for that machine (`../deps/pinned.json`), each
+checked by its sha256 ([../deps/README.md](../deps/README.md)).
 
-```sh
-docker run -d --name visit-db --restart unless-stopped -e POSTGRES_USER=visit -e POSTGRES_PASSWORD=<a password> \
-  -e POSTGRES_DB=visit -v visit-db:/var/lib/postgresql/data -p 127.0.0.1:7432:5432 postgres:17-alpine
-# VISIT_DATABASE_URL=postgres://visit:<a password>@127.0.0.1:7432/visit in the .env
-```
+**Its database is inside it.** `visit` keeps its user's chat, the pictures and links shared in it, and whom its
+room keeps out in a Postgres it carries and runs itself, its data in `VISIT_DATA_DIR`: made at its first start,
+brought up to date by every start after an upgrade (SPEC.md 4.4). There is nothing to install, start or migrate,
+and no database address to give it.
 
-Then make it ready, **once now and again after every upgrade**, with the visit-client you will run (setup does it
-for you):
+**Check:** `visit --version` prints the `version` of `client/Cargo.toml` in your checkout (the visit.js it serves
+and the protocols it speaks are that version's), and the Postgres and Chrome it carries; with your `.env` loaded,
+`visit status` says where your workroom's data is; `visit --help` prints its flags. You do not need visit.js
+separately: `visit` serves it.
 
-```sh
-"$VISIT_CLIENT_PATH" migrate          # reads VISIT_DATABASE_URL; --status: where it is, changing nothing
-```
-
-visit-client will not start without one, nor against one not made ready by its own version (it says what to run).
-
-Check: `visit-client --version` prints the `version` of `client/Cargo.toml` in your checkout (the visit.js
-it serves and the protocols it speaks are that version's), and `visit-client --help` prints its flags. You
-do not need visit.js separately: visit-client serves it.
-
-## Step 2 — Start visit-client from your launcher
+## Step 2 — Start `visit` from your launcher
 
 Every time your sim starts:
 
 1. **Make a new token**: 32 random bytes from a cryptographically secure source, as 64 hex characters.
    Never a fixed string, never reused between runs.
 2. **Write it to a file only your user can read** (mode 0600), so it stays off the process list.
-3. **Start visit-client** with your settings, and keep it running while your sim runs.
-4. **Wait for its ready line** on stdout (`{"ready": true, …}`) before opening your page.
-5. **Stop it** when your sim stops.
+3. **Start `visit`** with your settings, and keep it running while your sim runs.
+4. **Wait for its ready line** on stdout (`{"ready": true, …}`) before opening your page. The first start takes
+   longer than the rest: it unpacks the Postgres and the Chrome it carries (once for every workroom of the user)
+   and makes your workroom's database.
+5. **Stop it** when your sim stops: SIGTERM (or Ctrl-C), and wait for it to exit. It leaves the lobby and stops
+   its Postgres before it does. One killed outright (SIGKILL; on Windows, a kill from another program) leaves its
+   Postgres running, until its next start stops it first.
 
-visit-client reads its settings from its environment, under the names in `.env.example`, so a launcher
-loads your `.env` and passes its environment on, adding only the token file:
+`visit` reads its settings from its environment, under the names in `.env.example`, so a launcher loads your
+`.env` and passes its environment on, adding only the token file:
 
 ```sh
 # a shell launcher; its settings in the workroom's .env (the VISIT_* lines of ../.env.example)
@@ -195,9 +199,9 @@ set -a; . ./.env; set +a
 umask 077
 export VISIT_TOKEN_FILE="${XDG_RUNTIME_DIR:-/tmp}/my-workroom-visit.token"
 head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$VISIT_TOKEN_FILE"
-"${VISIT_CLIENT_PATH:-visit-client}" &
+"${VISIT_PATH:-visit}" &
 VISIT_PID=$!
-trap 'kill $VISIT_PID' EXIT
+trap 'kill $VISIT_PID; wait $VISIT_PID' EXIT
 ```
 
 ```js
@@ -206,9 +210,9 @@ require("dotenv").config();   // or your own .env reader
 const { randomBytes } = require("crypto"), fs = require("fs"), { spawn } = require("child_process");
 const tokenFile = `${process.env.XDG_RUNTIME_DIR || "/tmp"}/my-workroom-visit.token`;
 fs.writeFileSync(tokenFile, randomBytes(32).toString("hex"), { mode: 0o600 });
-const visit = spawn(process.env.VISIT_CLIENT_PATH || "visit-client", [], { env: { ...process.env, VISIT_TOKEN_FILE: tokenFile },
+const visit = spawn(process.env.VISIT_PATH || "visit", [], { env: { ...process.env, VISIT_TOKEN_FILE: tokenFile },
                                           stdio: ["ignore", "pipe", "inherit"] });
-process.on("exit", () => visit.kill());
+process.on("exit", () => visit.kill());   // SIGTERM: it stops by itself, its Postgres with it
 ```
 
 ```python
@@ -217,38 +221,44 @@ import secrets, os, subprocess, atexit
 from dotenv import load_dotenv; load_dotenv()   # or your own .env reader
 token_file = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "my-workroom-visit.token")
 fd = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600); os.write(fd, secrets.token_hex(32).encode()); os.close(fd)
-visit = subprocess.Popen([os.environ.get("VISIT_CLIENT_PATH", "visit-client")], env=dict(os.environ, VISIT_TOKEN_FILE=token_file),
+visit = subprocess.Popen([os.environ.get("VISIT_PATH", "visit")], env=dict(os.environ, VISIT_TOKEN_FILE=token_file),
                          stdout=subprocess.PIPE)
-atexit.register(visit.terminate)
+atexit.register(lambda: (visit.terminate(), visit.wait(30)))
 ```
 
-Every setting is a flag too (`VISIT_LOBBY` is `--lobby`, `VISIT_ORIGINS` is `--origins`; `visit-client
---help` lists them), for a launcher that would rather pass them that way; a flag wins over the environment.
+Every setting is a flag too (`VISIT_LOBBY` is `--lobby`, `VISIT_ORIGINS` is `--origins`; `visit --help` lists
+them), for a launcher that would rather pass them that way; a flag wins over the environment.
 
 `VISIT_ORIGINS` is your page's origin (scheme, host and port, as the address bar shows them; list
-`http://127.0.0.1:…` too if your page is ever opened that way). visit-client then refuses any other site's
+`http://127.0.0.1:…` too if your page is ever opened that way). `visit` then refuses any other site's
 page, even one that got hold of the token. **Always set it**: blank lets any page with the token in.
 
-If your sim runs in a container, run visit-client on the host machine (or in the same network namespace
+**The sign-in and the engine are this same `visit`**, given more settings by the same launcher: `AUTH_TOKEN_FILE`
+turns on the sign-in API ([../auth/INTEGRATING.md](../auth/INTEGRATING.md) step 4), `VISIT_USER_TOKEN_FILE` and
+`ENGINE_ROOM_URL` the engine ([../engine/INTEGRATING.md](../engine/INTEGRATING.md) steps 3 and 5). Never a second
+program.
+
+If your sim runs in a container, run `visit` on the host machine (or in the same network namespace
 as the browser): it must be reachable at `127.0.0.1:<port>` **from the browser**, and must not be
 published on any other address.
 
 **Check:** `curl http://127.0.0.1:7401/health` answers `{"ok": true, …}`, and
-`curl http://<your LAN address>:7401/health` does not connect.
+`curl http://<your LAN address>:7401/health` does not connect. With your `.env` loaded, `visit status` says it
+runs.
 
 ## Step 3 — Hand the port and token to your page
 
 Your page needs `{ port, token }`. Give it by a route **other websites cannot read**. Pick the one that
 fits your sim:
 
-- **Your sim has a server** (the page is served by it): give the token only to the signed-in owner. With
-  auth-client ([../auth/INTEGRATING.md](../auth/INTEGRATING.md), from 0.21: a real sign-in for your server), a
+- **Your sim has a server** (the page is served by it): give the token only to the signed-in owner. With the
+  sign-in ([../auth/INTEGRATING.md](../auth/INTEGRATING.md): a real sign-in for your server, served by `visit`), a
   route behind its session check returns `POST /v1/visit`'s `{"port": 7401, "token": "…"}`. Without it, add a
   route that answers a same-origin request, e.g. `GET /api/visit` → `{"port": 7401, "token": "…"}`, read from
   the token file; send no CORS headers on it (that keeps other sites' pages from reading it), and answer it only
   when the request's `Host` header is `localhost` or `127.0.0.1` (any port). That `Host` check turns away
   DNS-rebinding sites, and nothing else: a program on your network can send any `Host` it likes. **What keeps
-  the network out is your server listening on `127.0.0.1`**, until it has a sign-in (auth-client).
+  the network out is your server listening on `127.0.0.1`**, until it has a sign-in.
 - **Your page is static files**: have the launcher write `visit.json` (`{"port", "token"}`) beside the
   page, mode 0600, and fetch it from the page. Do not commit it.
 - **Your launcher opens the browser**: put it in the URL fragment,
@@ -268,10 +278,10 @@ async function startVisit() {
   const { port, token } = await (await fetch("/api/visit", { cache: "no-store" })).json();   // your step 3
   await new Promise((ok, fail) => {
     const s = document.createElement("script");
-    s.src = `http://127.0.0.1:${port}/visit.js`; s.onload = ok; s.onerror = () => fail(new Error("visit-client is not running"));
+    s.src = `http://127.0.0.1:${port}/visit.js`; s.onload = ok; s.onerror = () => fail(new Error("visit is not running"));
     document.head.appendChild(s);
   });
-  // The token as a function: asked again whenever the library reconnects, so a visit-client restarted with a
+  // The token as a function: asked again whenever the library reconnects, so a visit restarted with a
   // new token (your launcher run again) is found again without reloading the page.
   const fresh = async () => (await (await fetch("/api/visit", { cache: "no-store" })).json()).token;
   const visit = await Visit.connect({ port, token: fresh, sim: { name: "my-workroom", version: "1.0" } });
@@ -280,8 +290,8 @@ async function startVisit() {
 }
 ```
 
-If visit-client is not running, your sim must still work: catch the failure, log it, and carry on
-without Visit. (Handing it the token as a plain string works too, but then a restarted visit-client means
+If `visit` is not running, your sim must still work: catch the failure, log it, and carry on
+without Visit. (Handing it the token as a plain string works too, but then a restarted `visit` means
 reloading the page.)
 
 **Check:** `visit.state` becomes `"online"`, `visit.office.name` is your office name, and `visit.offices`
@@ -534,9 +544,9 @@ whose `links` is false), `visit.answer(knockId, true | false)`, `visit.stepIn()`
   (and `inside` once they come in), with a way to end it (`visit.kick(id)`).
 - Escape all names and messages before putting them in HTML: they come from strangers.
 - Give your user a way to **go offline and back** (`leaveLobby()` / `joinLobby()`), and show when they
-  are: `visit.state === "away"`. Away, nobody sees them or can link, and their visits end; with
-  `VISIT_STATE_FILE` they stay away until they come back, restarts included. Do not stop visit-client for
-  this: it keeps your page connected while away, so the switch works.
+  are: `visit.state === "away"`. Away, nobody sees them or can link, and their visits end; they stay away
+  until they come back, restarts included (its state file keeps it). Do not stop `visit` for this: it keeps
+  your page connected while away, so the switch works.
 - If you offer guests, show which offices are guests, and whether the door is open; say plainly that a
   guest walks in without asking. A visitor let in that way has `guest: true` in `visit.visitors`.
 
@@ -545,14 +555,19 @@ a link, and go offline and back.
 
 ## Step 8 — Test it on one machine
 
-You need two workrooms. Run a second visit-client beside the first, with its own name, port and token,
-and open a second copy of your page pointed at it (add a development-only way to choose, such as
+You need two workrooms. Run a second `visit` beside the first, with its own name, port, token and data
+directory, and open a second copy of your page pointed at it (add a development-only way to choose, such as
 `?visit=2` selecting port 7402 and its token in your step 3 route):
 
 ```sh
-visit-client --lobby "$LOBBY" --name "Test A" --sim my-workroom/1.0 --port 7401 --token-file a.token &
-visit-client --lobby "$LOBBY" --name "Test B" --sim my-workroom/1.0 --port 7402 --token-file b.token &
+# each with a token file of its own, made as step 2 makes one; a flag wins over your .env's settings
+visit --lobby "$LOBBY" --name "Test A" --sim my-workroom/1.0 --port 7401 --token-file a.token --data-dir /tmp/visit-a &
+visit --lobby "$LOBBY" --name "Test B" --sim my-workroom/1.0 --port 7402 --token-file b.token --data-dir /tmp/visit-b &
 ```
+
+Each makes a database of its own in its data directory at its first start; two cannot run on one data directory
+(the second is refused, exit 5). With the sign-in or the engine on (`AUTH_TOKEN_FILE`, `ENGINE_ROOM_URL` in the
+environment), the second needs ports of its own for them too (`--auth-port`, `--engine-port`).
 
 Then, in order:
 
@@ -568,9 +583,9 @@ Then, in order:
 7. Turn both microphones on (🎙) with B in A's room: each hears the other (headphones on one, or the other
    page's speakers echo). Type a line in B's **Say** box: it shows over B's head in A's room, and in B's view.
 8. With your landscape marked (step 5), reload B's page while it is in A's room: A's walls and floor are there
-   again at once (B's visit-client kept them).
+   again at once (B's `visit` kept them).
 9. Set A's status to busy: B's link is refused.
-10. Stop B's visit-client: B disappears from A's lobby.
+10. Stop B's `visit`: B disappears from A's lobby.
 
 ## Step 9 — Your world: friends' plots round your room
 
@@ -607,7 +622,7 @@ walks onto your plot from their world may have no way back out.
    `world.render` draws your room clipped to your plot: anything of yours outside it (a sky dome, a huge ground)
    is cut there; use `scene.background` for a sky. A post-processing chain (`EffectComposer`) does not fit it.
 5. **Where they sit.** The panel's **Map** (`Visit.map(visit).open()`) shows your world from above: drag a
-   friend's room where you want it, turn it, or type where its middle goes; kept by visit-client, across reloads.
+   friend's room where you want it, turn it, or type where its middle goes; kept by `visit`, across reloads.
    Your layout is yours alone, nobody agrees to it: each friend is told only where their own room sits in it, and
    picking a friend on the Map shows their view of the two of you (where their world has your room). Nothing to
    do for that beyond `visit.world`. (In code: `visit.place`, `visit.seen`, `visit.on("seen", …)`.)
@@ -615,20 +630,20 @@ walks onto your plot from their world may have no way back out.
 **Check:** with step 8's two rooms, each starring the other in the panel, each sees the other's plot; walking
 onto it puts you in its room (its `visit.visitors` lists you), walking off brings you home; put flush against yours
 on the Map, walking out of your door goes straight into theirs; and picking the other on the Map shows where
-they have put you. With your landscapes marked: stop one visit-client, and the other's world keeps its plot,
+they have put you. With your landscapes marked: stop one `visit`, and the other's world keeps its plot,
 marked offline, walked into but not through its walls; start it again, and the plot is live.
 
 ## Checklist
 
 - [ ] Your settings live in your workroom's own `.env` (or config), written by setup or started from
       `../.env.example`; that `.env` is not committed, and `.env.example` keeps no real values.
-- [ ] visit-client starts with your launcher, with a new token each run, and stops with your sim.
+- [ ] `visit` starts with your launcher, with a new token each run, and stops with your sim (SIGTERM, waited for).
 - [ ] It listens on 127.0.0.1 only; the token is in a 0600 file, not on the command line or in `.env`;
       `VISIT_ORIGINS` names your page's origin.
 - [ ] Your page gets the token by a same-origin route (answering only `Host: localhost` or `127.0.0.1`), a
       fragment kept in `sessionStorage`, or a local file; no other origin can read it, and it never appears
       in a URL query or a log.
-- [ ] Your sim works as before when visit-client is not running.
+- [ ] Your sim works as before when `visit` is not running.
 - [ ] `visit.host` gets your `scene` (`root`, `three`, `renderer`, `near`, `far`) and `fov`, on every page
       load; nothing private is under `root`.
 - [ ] `spawn` puts visitors somewhere sensible; `move` keeps them out of walls and furniture; `walk` is
@@ -645,8 +660,8 @@ marked offline, walked into but not through its walls; start it again, and the p
       them); their own world shows them where your room has them.
 - [ ] Mounts: a visitor pressing M rides into your room on theirs, under them; your `move` lifts them, paces them and
       flies them as your room has it; your user's own (if you give any), at home, under their feet.
-- [ ] Its database: `visit-client migrate --status` says up to date; a restart keeps the chat (its last lines are
-      there again), and older lines come as the chat window's log is scrolled to its top.
+- [ ] Its data: `VISIT_DATA_DIR` set (setup writes it), outside your repository; a restart keeps the chat (its last
+      lines are there again), and older lines come as the chat window's log is scrolled to its top.
 - [ ] Pictures and links: a screenshot pasted into the chat box goes with the line, to a friend's room, and shows
       there; a link typed gets its preview; 🖼 lists what was shared.
 - [ ] Chat: Enter opens the chat window, bottom left; a line said shows over its speaker's head for everyone who
@@ -661,7 +676,7 @@ marked offline, walked into but not through its walls; start it again, and the p
       who is linked to you (kick, unlink), status and max visitors all work, with the rules of step 7; names
       and messages are escaped.
 - [ ] Your user can go offline and back (the panel, or `leaveLobby()` / `joinLobby()`), and stays offline
-      across a restart (`VISIT_STATE_FILE`).
+      across a restart (its state file).
 - [ ] Step 8 passes, reloads included.
 - [ ] Your world (step 9): your `plot` and `unit` are said, visitors can walk off your plot, `spawn` takes
       `at`, your user has a body of yours, you draw with `world.frame` and `world.render`, and step 9's check
@@ -671,15 +686,18 @@ marked offline, walked into but not through its walls; start it again, and the p
 
 | symptom | cause |
 |---|---|
-| `visit.js` fails to load | visit-client is not running, or on another port; check `curl http://127.0.0.1:<port>/health` |
+| `visit.js` fails to load | `visit` is not running, or on another port; check `curl http://127.0.0.1:<port>/health` |
 | connect fails before it opens (HTTP 403) | your page's origin is not in `VISIT_ORIGINS` (`--origins`): compare the address bar's scheme, host and port with it |
-| visit-client exits at once (exit code 2) | a setting it cannot use; its stderr names it. Check your `.env` against `.env.example` (and a value with a space needs quotes for a shell to load it) |
-| connect closes with 4401 | the token your page sent is not the one visit-client was started with: a stale `visit.json`, two launchers, or visit-client restarted while the page kept its old token (hand `connect` a token function, step 4) |
+| `visit` exits at once (exit code 2) | a setting it cannot use; its stderr names it. Check your `.env` against `.env.example` (and a value with a space needs quotes for a shell to load it) |
+| `visit` exits at once with code 5 | its stderr says why: `this workroom's visit is running already` (another launcher, or one left running: `visit status`); `Postgres did not start` (its log is `postgres/data/start.log` in the data directory: run as root, which Postgres refuses, or a full disk); the sign-in API or the engine (a token file, a port taken, `ENGINE_ROOM_URL`) |
+| the first start takes a while | it unpacks the Postgres and the Chrome it carries (once for every workroom of the user), and makes your workroom's database (once) |
+| `visit` says what is inside it "is not the one it was built with" | the file is damaged: download it again, and check it against `SHA256SUMS` |
+| connect closes with 4401 | the token your page sent is not the one `visit` was started with: a stale `visit.json`, two launchers, or `visit` restarted while the page kept its old token (hand `connect` a token function, step 4) |
 | connect closes with 4409 | another page of yours connected after this one; only the newest page is live |
-| visit-client exits at once with code 4, its log saying `proto_unsupported` | the lobby is older than this visit-client (Visit 0.5 needs the lobby's version 3): update the lobby (`bin/deploy-lobby`) |
+| `visit` exits at once with code 4, its log saying `proto_unsupported` | the lobby is older than this `visit` (Visit 0.5 needs the lobby's version 3): update the lobby (`bin/deploy-lobby`) |
 | your office never shows `ready`, and knocking says `not_hosting` | your page has not called `visit.host` (with a scene) since it loaded |
-| `state` stays `"offline"` | visit-client cannot reach the lobby: a wrong `VISIT_LOBBY`, or no network; its stderr says why |
-| you never become `ready` in the lobby | visit-client could not start its connection endpoint; its stderr says why |
+| `state` stays `"offline"` | `visit` cannot reach the lobby: a wrong `VISIT_LOBBY`, or no network; its stderr says why |
+| you never become `ready` in the lobby | `visit` could not start its connection endpoint; its stderr says why |
 | actions refused `away` | your user went offline (`visit.state` is `"away"`): `joinLobby()` brings them back |
 | knocks refused `not_ready` | you or the door have not published a link yet; wait a few seconds |
 | a visit ends `link_failed` | the two machines could not connect, even through the relay; check the relay is up |
@@ -700,11 +718,13 @@ marked offline, walked into but not through its walls; start it again, and the p
 
 basedverse's [../CHANGELOG.md](../CHANGELOG.md) lists every release: what changed, and **what an
 integration does about it**. To upgrade a workroom that works, read it from the version you have
-(`visit-client --version`) up to the newest, then:
+(`visit --version`; before 2.0, `visit-client --version`) up to the newest, then:
 
 1. Pull basedverse (`git pull` in its checkout).
-2. Get the new visit-client: run setup again (it keeps the `.env`'s answers; choose download), or step 1.
-   **Then bring its database up to date**: `"$VISIT_CLIENT_PATH" migrate` (setup does it), before you start it.
+2. Get the new `visit`: run setup again (it keeps the `.env`'s answers; choose download), or step 1. Stop the
+   old one and start the new one: its first start brings its database up to date by itself, with nothing to run.
+   From 1.x, the database is moved in once, before that start: `visit import` (setup offers it; the changelog's
+   v2.0.0, "Upgrading", says the rest).
 3. Do each "what an integration does" of the versions you skipped, in order, and add any new setting it
    names to the `.env` (setup adds its own).
 4. Run step 8 again, and step 9's check.
@@ -712,8 +732,10 @@ integration does about it**. To upgrade a workroom that works, read it from the 
 ## Don't
 
 - Don't open your own WebSocket, WebRTC or any other connection to the lobby or to other workrooms: Visit
-  does all of it, through visit-client.
-- Don't bind visit-client to anything but 127.0.0.1, or expose its port from a container.
+  does all of it, through `visit`.
+- Don't bind `visit` to anything but 127.0.0.1, or expose its port from a container.
+- Don't change what is in `VISIT_DATA_DIR` by hand, its database's tables included: `visit` keeps it. Back it up
+  by copying it while `visit` is stopped.
 - Don't reuse or hard-code the token, and don't put it anywhere another origin can read.
 - Don't keep anything under your scene's `root` that your user would not show a guest: visitors get all of it.
 - Don't trust names, messages or inputs from other workrooms: escape names and messages; Visit already
