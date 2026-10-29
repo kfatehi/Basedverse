@@ -85,7 +85,7 @@ On every start of `visit` ([../visit/INTEGRATING.md](../visit/INTEGRATING.md), s
 2. Give `visit` that file as `AUTH_TOKEN_FILE`: it then serves the sign-in's API too, on `AUTH_PORT` (7403) unless
    you say otherwise. For step 8 it uses its own page port and token file: nothing more to give it.
 3. Give your server the same `AUTH_TOKEN_FILE` and `AUTH_PORT`. It reads the token from the file once at its
-   start.
+   start: write the file before your server starts.
 4. It stops with `visit`.
 
 ```sh
@@ -97,27 +97,28 @@ head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$AUTH_TOKEN_FILE"
 A sign-in that cannot start (its token file missing or short, its port taken) stops `visit` before its ready line,
 exit 5, saying why.
 
-**Your server in a container** cannot reach this machine's `127.0.0.1` (`host.docker.internal` does not lead there
-on Linux or in WSL). Either run it on the host's network, where it reaches `visit` on `127.0.0.1` as it is, or run
-`visit` in a container of its own on your server's network: `AUTH_LISTEN=0.0.0.0` and `VISIT_LISTEN=0.0.0.0` (its
-container's own network), **no published port**, so nothing outside that network reaches it, and your server
-asking it by the service's name (`AUTH_HOST` below). What `visit` needs in a container (a user it knows, not root;
-a home it can write; `VISIT_DATA_DIR` on a volume) is in [../visit/SPEC.md](../visit/SPEC.md) 4.4. Either can then
-restart alone. (Not `network_mode: "service:<your server>"`: `visit` would be left in a network that is gone each
-time your server restarts, and every route would refuse until it restarted too.)
+**Where your server runs.** Best, on the machine beside `visit`, with no Docker: it asks the sign-in at
+`127.0.0.1:7403` as it is. A server kept in a container cannot reach the machine's `127.0.0.1`
+(`host.docker.internal` does not lead there on Linux or in WSL): give its container the host's network and bind the
+server to `127.0.0.1` itself (visit/INTEGRATING.md step 2, "Where your sim's own server runs"):
 
 ```yaml
 services:
   your-server:
+    network_mode: host              # the machine's network: visit on 127.0.0.1, as for a server on the machine
     environment:
-      AUTH_HOST: visit            # where your server asks the sign-in: visit's service name
-      AUTH_TOKEN_FILE: /auth/token
+      BIND: 127.0.0.1               # your server's own address setting, whatever it is called: never 0.0.0.0
+      AUTH_HOST: 127.0.0.1          # where your server asks the sign-in
+      AUTH_TOKEN_FILE: /auth/token  # the launcher's file, mounted
 ```
 
+(`visit` itself can run in a container, `AUTH_LISTEN` and `VISIT_LISTEN` `0.0.0.0` on that container's own
+network with no published port, for a workroom that insists: [../visit/SPEC.md](../visit/SPEC.md) 4.4 says what it
+needs there. Not the way to do it.)
+
 **Check:** `curl -s http://127.0.0.1:7403/health` answers `{"ok":true,"version":"…"}`; a call without the token,
-`curl -s -X POST http://127.0.0.1:7403/v1/check -d '{}'`, answers 401. In containers, the same from your server's
-(`http://visit:7403`), and nothing from this machine's own `curl` (no port published). Restart your server alone:
-it still signs you in.
+`curl -s -X POST http://127.0.0.1:7403/v1/check -d '{}'`, answers 401. Restart your server alone: it still signs
+you in.
 
 ## Step 5 — One check before every route
 

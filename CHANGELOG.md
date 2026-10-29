@@ -18,8 +18,7 @@ platform, about 150 MB (Linux x86_64 and ARM64 with glibc 2.28 or newer, macOS 1
 Intel, Windows x86_64). Nothing is downloaded as it runs, nothing is installed, and Visit needs no Docker any more:
 Docker is for building and testing basedverse, never for running Visit (a room's own server may keep its
 container, on the host's network). A workroom that ran four services (visit-client, auth-client, a Postgres, the
-engine's image) runs one program
-([visit/SPEC.md](visit/SPEC.md) 4).
+engine's image) runs one program ([visit/SPEC.md](visit/SPEC.md) 4).
 
 - **Its database is inside it** (visit/SPEC.md 4.4). `visit` runs its own Postgres as its child, on 127.0.0.1 at a
   port free at the moment, its data in the workroom's data directory, `VISIT_DATA_DIR` (by default

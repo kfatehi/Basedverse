@@ -54,8 +54,8 @@ which SPEC 11 step 2 splits into a server page and a client page beside it: copy
 Check these about the room you are integrating; if one is not true, stop and tell your user why.
 
 1. **Visit and auth are integrated and checked** (their checklists pass): one `visit`, with its sign-in on, and
-   your server beside it, on one machine's `127.0.0.1` (this guide's way), or, with your server in a container,
-   `visit` on that container network (SPEC 6.1 allows both; step 3).
+   your server beside it on the machine's `127.0.0.1`: on the machine too (no Docker, the default), or in a
+   container on the host's network (step 3).
 2. **Your room's code can run with nobody at the keyboard.** Read the page and list what it does with the
    owner's keyboard, mouse, microphone and screen. Each goes to the client page or becomes a visitor's input
    (`move`, `v.interactions`) with `who.owner`:
@@ -224,14 +224,14 @@ HUD works; nothing of your room's own UI is left in the server page.
    makes (`VISIT_TOKEN_FILE`), which is now the **host's**, `visit`'s alone (its engine takes it there), and a
    **user token** (`VISIT_USER_TOKEN_FILE`), for `visit` and your server. Your server never has the host token. The
    old `visit.json` that handed `/api/visit` its token goes away.
-2. **Where `visit` listens.** On one machine with your server, where it is: `127.0.0.1`. Your server reaches it
-   there, `127.0.0.1:7401` for the relay (step 4) and `127.0.0.1:7403` for the sign-in, and no browser reaches
-   either: a browser goes through your server. Your server in a container: `visit` in a container of its own on
-   that network (`VISIT_LISTEN=0.0.0.0`, `AUTH_LISTEN=0.0.0.0`, **no `ports:`**), reached by its service name, as
-   ../auth/INTEGRATING.md step 4 says; what it needs there is in visit/SPEC.md 4.4.
-3. `VISIT_ORIGINS` lists your server's origins: the local ones, the HTTPS proxy's, and `ENGINE_ROOM_URL`'s, which
-   is what the engine's page has (on one machine, the local one already; in containers, your server's name on the
-   network, `http://board:3001`).
+2. **Where `visit` listens: `127.0.0.1`, where it is.** Your server reaches it there, `127.0.0.1:7401` for the
+   relay (step 4) and `127.0.0.1:7403` for the sign-in, and no browser reaches either: a browser goes through your
+   server. Your server on the machine too (no Docker), or, kept in a container, on the host's network
+   (`network_mode: host`) and bound to `127.0.0.1` itself (visit/INTEGRATING.md step 2, "Where your sim's own
+   server runs"); a reverse proxy in a container likewise, `reverse_proxy 127.0.0.1:<port>`.
+3. `VISIT_ORIGINS` lists your server's origins: the local ones (`http://localhost:3001`, `http://127.0.0.1:3001`),
+   the HTTPS proxy's, and `ENGINE_ROOM_URL`'s, which is what the engine's page has: `http://127.0.0.1:3001`, among
+   the local ones already.
 4. Its database is inside it, as always: nothing to do.
 
 ```sh
@@ -240,9 +240,8 @@ export VISIT_USER_TOKEN_FILE="${XDG_RUNTIME_DIR:-/tmp}/my-workroom-user.token"
 head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$VISIT_USER_TOKEN_FILE"
 ```
 
-**Check:** `ss -ltnp` shows 7401 on `127.0.0.1` only (in containers: nothing on the host's 7401); from your server,
-`curl http://127.0.0.1:7401/health` (in containers, from its container, `http://visit:7401/health`) answers
-`{"ok": true, …}`.
+**Check:** `ss -ltnp` shows 7401 on `127.0.0.1` only; from your server (its container, too, on the host's network),
+`curl http://127.0.0.1:7401/health` answers `{"ok": true, …}`.
 
 ## Step 4 — Serve the library, and relay the person
 
@@ -261,7 +260,7 @@ A sketch in Python's standard library (the shape, not a library; your server's o
 ```python
 import base64, hashlib, json, os, selectors, socket, threading
 
-VISIT = ("127.0.0.1", int(os.environ.get("VISIT_PORT", "7401")))   # in containers: visit's service name
+VISIT = ("127.0.0.1", int(os.environ.get("VISIT_PORT", "7401")))   # visit, on the machine
 USER_TOKEN = open(os.environ["VISIT_USER_TOKEN_FILE"]).read().strip()
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 live = {}   # session hash -> the browser's socket, to replace a second connection's first
@@ -339,8 +338,8 @@ origin, or without a session, it does not open. `ss -ltnp`: 7401 on `127.0.0.1` 
 
 ## Step 5 — The engine, from your launcher
 
-1. **`ENGINE_ROOM_URL`** in your `.env`: your server page, `http://127.0.0.1:3001/room/server` (`?role=host` if one
-   page serves both roles; in containers, by your server's name on the network). Given it, `visit` hosts that page
+1. **`ENGINE_ROOM_URL`** in your `.env`: your server page on `127.0.0.1`, `http://127.0.0.1:3001/room/server`, or
+   `http://127.0.0.1:3001/room?role=host` if one page serves both roles. Given it, `visit` hosts that page
    in its engine at every start, and makes the engine an API key of its own (labelled `engine`, made new at each
    start, the one before it gone): there is no key to make, keep or pass on, and no other program to start.
 2. **The sign-in on**: `AUTH_TOKEN_FILE` given to `visit` (auth step 4), since your server checks the engine's key
@@ -390,7 +389,7 @@ Through the HTTPS proxy of auth step 10, on your LAN first, then from outside it
 4. the desk's tab and the laptop's at once: the newer replaces the older (4409), the room unmoved.
 
 **Check:** all four, from outside your LAN too; `ss -ltnp` on the office machine still shows 7401, 7403 and 7405 on
-`127.0.0.1` only (in containers, none of them on the host).
+`127.0.0.1` only.
 
 ## Checklist
 
@@ -400,9 +399,8 @@ Through the HTTPS proxy of auth step 10, on your LAN first, then from outside it
       `v.world`), the panel, the chat window, and your HUD, which talks to your server.
 - [ ] The owner is spawned and walked by your hooks (`who.owner`); their clicks reach your interactions as a
       visitor's do; cosmetic interactions only, unless agreed by name.
-- [ ] `visit` on `127.0.0.1` beside your server (or, your server in a container, `visit` on its network with
-      `VISIT_LISTEN` and `AUTH_LISTEN` `0.0.0.0` and no `ports:`); none of 7401, 7403, 7405 reachable from another
-      machine.
+- [ ] `visit` on the machine, on `127.0.0.1`; your server beside it (or its container on the host's network, bound
+      to `127.0.0.1`); none of 7401, 7403, 7405 reachable from another machine.
 - [ ] Two tokens each start, 0600: the host's to `visit` alone; the user's to `visit` and your server; neither in a
       page, a response, a URL or a log; `visit.json` and `/api/visit` gone.
 - [ ] `VISIT_ORIGINS` names the local origins, the proxy's, and `ENGINE_ROOM_URL`'s.
@@ -459,7 +457,7 @@ Through the HTTPS proxy of auth step 10, on your LAN first, then from outside it
 
 [../CHANGELOG.md](../CHANGELOG.md), as for Visit: from 2.0 the engine is inside `visit`, one version with the rest,
 nothing to migrate. From 1.x (an `engine` service beside visit-client, its key made with `auth-client key add
-engine`): the changelog's v2.0.0, "Upgrading", says what goes.
+engine`): [../visit/INTEGRATING.md](../visit/INTEGRATING.md), "Upgrading a 1.x room to 2.0", first.
 
 ### A room that hosts today: what the first one taught
 
@@ -533,8 +531,8 @@ change: a room on an older Visit visits you and is visited as before, so nobody 
 - Don't give the browser a Visit token, host or user, by any route: the relay puts the user token in, and the
   engine puts the host token into its own page.
 - Don't serve the server page to a session, or without the engine's key: it is your room's code.
-- Don't publish `visit`'s ports (the page's, the sign-in's, the engine's), or listen beyond `127.0.0.1` (or a
-  container's own network): your server relays.
+- Don't publish `visit`'s ports (the page's, the sign-in's, the engine's), or listen beyond `127.0.0.1`: your server
+  relays.
 - Don't keep anything of the person's in the server page (chat, name, avatar, mic), or anything of the room's
   truth in the client page (a client page that moves furniture is overwritten by the next delta).
 - Don't read pixels back in the server page: nothing is drawn there.
