@@ -1,20 +1,23 @@
 #!/usr/bin/env bash
-# Tests a Postgres archive from postgres/build the way visit uses it: unpacked somewhere new, initdb, started on
-# 127.0.0.1, a role signed in with a SCRAM password, LISTEN/NOTIFY, an advisory lock, JSONB and BYTEA, stopped.
-#   postgres/test <archive>
-# A Linux archive is tested on Ubuntu 20.04 in Docker (an older C library than the one it was built on would
-# fail here); macOS and Windows ones on this machine.
+# Tests a Postgres archive from deps/postgres/build the way visit uses it: unpacked somewhere new, initdb, started
+# on 127.0.0.1, a role signed in with a SCRAM password, LISTEN/NOTIFY, an advisory lock, JSONB and BYTEA, stopped.
+#   deps/postgres/test <archive>
+# A Linux archive is tested on each of LINUX_TEST_IMAGES in Docker, with nothing installed (an older C library
+# than the build's, and a current one); a macOS or Windows one on this machine.
 set -euo pipefail
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=versions.env
-source "$here/versions.env"
+what=postgres/test
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib.sh"
 archive="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
-case "$(basename "$archive")" in
+name="${DEPS_TEST_NAME:-$(basename "$archive")}"
+case "$name" in
   *-linux-*)
-    if [ "${POSTGRES_TEST_INSIDE:-}" != 1 ]; then
-      echo "postgres/test: on $LINUX_TEST_IMAGE" >&2
-      exec docker run --rm -e POSTGRES_TEST_INSIDE=1 -e POSTGRES_TEST_NAME="$(basename "$archive")" -v "$here":/postgres:ro -v "$archive":/a.tar.gz:ro "$LINUX_TEST_IMAGE" \
-        sh -c 'useradd -m pgtest && su pgtest -s /bin/bash -w POSTGRES_TEST_INSIDE,POSTGRES_TEST_NAME -c "bash /postgres/test /a.tar.gz"'
+    if [ "${DEPS_TEST_INSIDE:-}" != 1 ]; then
+      for image in $LINUX_TEST_IMAGES; do
+        say "on $image"
+        docker run --rm -e DEPS_TEST_INSIDE=1 -e DEPS_TEST_NAME="$name" -v "$deps":/deps:ro -v "$archive":/a.tar.gz:ro "$image" \
+          sh -c 'useradd -m pgtest && su pgtest -s /bin/bash -w DEPS_TEST_INSIDE,DEPS_TEST_NAME -c "bash /deps/postgres/test /a.tar.gz"'
+      done
+      exit 0
     fi ;;
 esac
 
@@ -35,6 +38,6 @@ got=$(q visit v "SELECT pg_advisory_lock(7401); SELECT (line->>'a') || encode(by
 heard=$(q visit v "LISTEN x; NOTIFY x;" 2>&1)
 version=$(q postgres superuser-pw "SHOW server_version" | tr -d '\r')
 "$pg/bin/pg_ctl" -D "$dir/data" -w stop >/dev/null
-[ "$got" = "1deadbeef" ] || { echo "postgres/test: FAILED (read back '$got')"; exit 1; }
-case "$heard" in *'notification "x" received'*) ;; *) echo "postgres/test: FAILED (NOTIFY not heard: '$heard')"; exit 1 ;; esac
-echo "postgres/test: ok, Postgres $version from ${POSTGRES_TEST_NAME:-$(basename "$archive")}"
+[ "$got" = "1deadbeef" ] || die "FAILED (read back '$got')"
+case "$heard" in *'notification "x" received'*) ;; *) die "FAILED (NOTIFY not heard: '$heard')" ;; esac
+say "ok, Postgres $version from $name"

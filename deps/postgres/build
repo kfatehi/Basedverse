@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# The Postgres built into visit, for one platform (deps/README.md):
+#   deps/postgres/build <linux-x86_64 | linux-aarch64 | macos-aarch64 | macos-x86_64 | windows-x86_64> [--no-test]
+# Linux: compiled from source in a manylinux_2_28 container (linux-inside.sh; Docker, on the machine that builds).
+# macOS: compiled from source on this Mac (macos.sh; the Intel build cross-compiled on Apple silicon or not).
+# Windows: theseus-rs' build of the same Postgres, checked against versions.env. Each is cut down to what visit
+# needs, then tested (deps/postgres/test) unless --no-test (a platform this machine can't run).
+# Out: deps/dist/postgresql-<version>-<build>-<platform>.tar.gz, one top directory of that name.
+set -euo pipefail
+what=postgres/build
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../lib.sh"
+here="$deps/postgres"
+platform="${1:?usage: deps/postgres/build <platform> [--no-test]}"
+platform_ok "$platform" || die "no platform $platform (one of: $PLATFORMS)"
+test=1; [ "${2:-}" = "--no-test" ] && test=0
+name="postgresql-$POSTGRES_VERSION-$POSTGRES_BUILD-$platform"
+work="$deps/.work/postgres-$platform"
+rm -rf "$work" && mkdir -p "$work" "$deps/dist"
+src="$deps/.work/postgresql-$POSTGRES_VERSION.tar.bz2"
+
+case "$platform" in
+  linux-*)
+    fetch "https://ftp.postgresql.org/pub/source/v$POSTGRES_VERSION/postgresql-$POSTGRES_VERSION.tar.bz2" "$src" "$POSTGRES_SHA256"
+    image="$LINUX_IMAGE_X86_64"; [ "$platform" = linux-aarch64 ] && image="$LINUX_IMAGE_AARCH64"
+    say "compiling in $image"
+    docker run --rm -e OWNER="$(id -u):$(id -g)" -v "$here":/postgres:ro -v "$src":/src.tar.bz2:ro \
+      -v "$work":/out "$image" bash /postgres/linux-inside.sh /src.tar.bz2 "/out/$name"
+    made="compiled from postgresql-$POSTGRES_VERSION.tar.bz2 (sha256 $POSTGRES_SHA256) in $image"
+    ;;
+  macos-*)
+    [ "$(uname -s)" = Darwin ] || die "a macOS build runs on a Mac (the deps workflow's macOS runner)"
+    fetch "https://ftp.postgresql.org/pub/source/v$POSTGRES_VERSION/postgresql-$POSTGRES_VERSION.tar.bz2" "$src" "$POSTGRES_SHA256"
+    arch=arm64; [ "$platform" = macos-x86_64 ] && arch=x86_64
+    say "compiling for $arch, macOS $MACOS_DEPLOYMENT_TARGET and later"
+    bash "$here/macos.sh" "$src" "$work/$name" "$arch" "$MACOS_DEPLOYMENT_TARGET"
+    made="compiled from postgresql-$POSTGRES_VERSION.tar.bz2 (sha256 $POSTGRES_SHA256) on macOS $(sw_vers -productVersion), for $arch"
+    ;;
+  windows-*)
+    file="postgresql-$THESEUS_RELEASE-x86_64-pc-windows-msvc.tar.gz"
+    fetch "https://github.com/theseus-rs/postgresql-binaries/releases/download/$THESEUS_RELEASE/$file" "$deps/.work/$file" "$THESEUS_SHA256_WINDOWS_X86_64"
+    tar -xzf "$deps/.work/$file" -C "$work"
+    mv "$work/postgresql-$THESEUS_RELEASE-x86_64-pc-windows-msvc" "$work/$name"
+    made="theseus-rs/postgresql-binaries $THESEUS_RELEASE ($file, sha256 $THESEUS_SHA256_WINDOWS_X86_64), cut down; its licenses kept"
+    ;;
+esac
+
+# What visit uses: the server, initdb and pg_ctl; psql and the dump/upgrade tools for the person (and for a
+# major upgrade later). Everything else of an installation (headers, static libraries, docs, PGXS) goes.
+say "cutting down to what visit needs"
+root="$work/$name"
+keep="postgres initdb pg_ctl psql pg_dump pg_dumpall pg_restore pg_upgrade pg_isready"
+for f in "$root"/bin/*; do
+  base=$(basename "$f"); base=${base%.exe}
+  case " $keep " in *" $base "*) continue ;; esac
+  case "$f" in *.dll) continue ;; esac   # Windows keeps its libraries beside the programs
+  rm -rf "$f"
+done
+rm -rf "$root"/include "$root"/doc "$root"/share/doc "$root"/share/man "$root"/lib/pkgconfig \
+  "$root"/lib/postgresql/pgxs "$root"/lib/pgxs "$root"/symbols "$root"/dependency-notices
+find "$root/lib" -name '*.a' -delete
+printf '%s\n' "Postgres $POSTGRES_VERSION for visit (basedverse), build $POSTGRES_BUILD, $platform." \
+  "${made}." "Made by deps/postgres/build in https://github.com/sarmiena/Basedverse." >"$root/BUILD.txt"
+
+archive="$deps/dist/$name.tar.gz"
+pack "$work" "$name" "$archive"
+if [ "$test" = 1 ]; then "$here/test" "$archive"; else say "not tested here (--no-test)"; fi
