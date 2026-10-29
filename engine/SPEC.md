@@ -115,7 +115,7 @@ with `ref: "frame"` said at most once a second. A page without a role may send t
 | `host`; its scene, edits and landscape as binary frames (5.4, bits 0, 1, 5); `pose` (its state for a visitor) | `input`, `point`, `keyframe`, `scene_resync` (for the rooms the person is in: home included, 4) | `max_visitors`, `door`, `guest_add`, `guest_remove` |
 | `avatar_want`, `possession_want` (asking visitors for their models) | the avatar and possessions (5.4, bits 2, 6), `avatar_clear`, `possessions` | `avatars`, `avatar_use` |
 | `voice_where` with `me`, `phone`, `visitors` (where the room has everyone in it, its owner among them) | `voice_where` with `world` (where the person's world has friends) | `ban`, `voice_kick` |
-| `phone` (the room has one, or no longer); `say_as` (a line one of the room's own figures says: a receptionist, a guide; visit/SPEC.md 8.9) | the microphone (5.4, bit 3), `voice_join`, `call`, `speaker` | `end` (a visit ended by either: a kick, or leaving) |
+| `phone` (the room has one, or no longer); `say_as` (a line one of the room's own figures says: a receptionist, a guide; visit/SPEC.md 8.9) | the microphone (5.4, bit 3), `voice_join`, `call`, `speaker` | `end` (a visit ended by either: a kick, or leaving); `bye` (the page going, kept by the browser) |
 | | `user` (the name), `say`, `attention`, `read`, `unhold`, `media_get`, pictures and voice messages (5.4, bit 7), `preview`, `history`, `shared` | `status`, `rename` |
 | | `world`, `enter`, `exit`, `place`, `unplace`, `seen`, `plot_keep`, `plot_load`, `plot_forget`, `link_where` | |
 | | `knock`, `answer`, `leave_lobby`, `join_lobby` | |

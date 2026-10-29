@@ -1206,7 +1206,7 @@ async def main():
         await asyncio.sleep(0.5)
         await b.key("KeyW", "w", 87, False)
         check("and back home: their room spawns them where they stepped in (at), and A's visitor is gone",
-              (await b.until("room.where === null && room.world.inside", 10), await hc.until("v.visitors.length === 1 && v.visitors[0].owner && spawns[spawns.length - 1].owner && !!spawns[spawns.length - 1].at && v.visitors[0].pose.x < 1.5", 10), await a.until("v.visitors.length === 0", 10)), (True, True, True))
+              (await b.until("room.where === null && room.world.inside", 10), await hc.until("v.visitors.length === 1 && v.visitors[0].owner && spawns[spawns.length - 1].owner && !!spawns[spawns.length - 1].at && spawns[spawns.length - 1].p.x < 1.5", 10), await a.until("v.visitors.length === 0", 10)), (True, True, True))
         await b.shot("c_user_back.png")
         await b.goto("about:blank")
         check("the person's page gone: the room's page has no owner, and no visitor", await hc.until("v.owner === null && v.visitors.length === 0", 10), True)

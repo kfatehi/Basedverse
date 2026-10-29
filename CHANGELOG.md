@@ -19,9 +19,15 @@ the room's user, each figure on a limit of its own (5 lines every 10 s). Page â†
 `chat` carry `npc`. On the engine it is the server page's to say (engine/SPEC.md 3.3; the client page's is refused
 `wrong_role`), and the owner has each line once.
 
+**Fixed: a page left for another stayed connected.** Chrome (148 on) keeps a page that a tab leaves, its sockets
+open, frozen, in its back/forward cache, and never closes them: visit-client went on having it, so a person who
+went to another page in the tab was still in their room, their visit up, their mailbox not filling. visit.js now
+says `bye` as the browser hides the page, and visit-client ends it as if it had closed (1001); back to it, it
+connects again. The browser test's "the person's page gone" check failed on CI, whose Chrome is newer, for this.
+
 **What an integration does about it:** nothing. A room with a figure that talks may name its object
 `visit:npc:<id>` and say its lines with `v.sayAs` (visit/INTEGRATING.md step 5) instead of drawing a bubble into its
-scene.
+scene. `bye` is visit.js's and visit-client's; a relay passes it on as anything else.
 
 ## v1.0.1 â€” 2026-10-29
 

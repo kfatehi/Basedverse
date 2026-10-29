@@ -760,6 +760,10 @@
       this._closed = false;
       this._fails = 0;
       this._loop = ticker(MOVE_MS, () => this._tick());
+      // A page the browser keeps as it goes (its back/forward cache) is frozen with its socket open, never closed:
+      // visit-client would have it there still. It says bye instead, and is gone; shown again, its socket's close
+      // comes, and it connects again as after a restart.
+      if (typeof addEventListener === "function") addEventListener("pagehide", e => { if (e.persisted && !this._closed) this._send({ type: "bye" }); });
     }
 
     // ---------- events ----------

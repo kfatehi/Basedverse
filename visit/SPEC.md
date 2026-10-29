@@ -183,6 +183,9 @@ why. The migrations are built into the binary: whoever has a visit-client has it
   again, and sends each visitor its whole scene.
 - **One page at a time.** A new authenticated page connection takes over from the old one, which is
   closed with code **4409** (`replaced`). This is what a reload looks like from the visit-client.
+- **A page the browser keeps as it goes** (its back/forward cache: Chrome's since 148 keeps one with a socket
+  open) is frozen, its socket open but silent: it says `bye` (5.2) as it is hidden, and is gone as a closed one
+  is, closed **1001**. Shown again, it gets that close, and connects again.
 - **The lobby connection** is given up when the lobby has been silent for a minute (it pings every 20 s:
   silence means a connection that died without a word, after a laptop's sleep, say). It reconnects by
   itself (1 s, 2 s, 4 s, … up to 30 s) and resumes its session
@@ -240,6 +243,7 @@ followed by a `lobby` snapshot and any pending `knock`s.
 |---|---|---|
 | `host` | `three` (the three.js revision, digits) | this page hosts the room's scene (`visit.host`): the office is now in the lobby to be visited, and may knock (4.2); sent again after each page load |
 | `status` | `status`: `"available"` \| `"busy"` | set the office's status (busy: no new knocks, visits carry on) |
+| `bye` | | this page is going, kept by the browser (4): gone now, as if closed, and closed 1001 |
 | `max_visitors` | `n` (0–8) | change how many visitors the office takes; lower than the current count ends no visit |
 | `rename` | `name` | ask the lobby for another name; taken (`name_taken`) or invalid, the office keeps its own |
 | `leave_lobby` | — | take the office out of the lobby, and keep it out (away, 4.2): nobody sees it or can knock; its visits end |
@@ -1322,7 +1326,7 @@ slowly while its tab is hidden.
 ## 11. Errors
 
 **Page connection refusals:** HTTP 403 before the WebSocket opens (an origin not in `--origins`); close
-codes 4400 bad `hello`, 4401 bad or missing token, 4409 replaced by a newer page.
+codes 4400 bad `hello`, 4401 bad or missing token, 4409 replaced by a newer page; 1001 after the page's `bye`.
 
 **`error` codes the page can get** (from the visit-client, or passed through from the lobby): those of
 section 6.4 (`not_found`, `self_knock`, `not_available`, `full`, `not_ready`, `already_visiting`,
