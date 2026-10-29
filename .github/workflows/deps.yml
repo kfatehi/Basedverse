@@ -8,7 +8,7 @@ name: deps
 on:
   push:
     branches: ["**"]
-    paths: ["deps/**", ".github/workflows/deps.yml"]
+    paths: ["deps/**", "!deps/pinned.json", ".github/workflows/deps.yml"]   # (a new pin is not a new build)
     tags: ["deps-*"]
   workflow_dispatch:
 
