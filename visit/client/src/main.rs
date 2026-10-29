@@ -123,7 +123,7 @@ struct Args {
     #[arg(long, env = "ENGINE_LOG")]
     engine_log: Option<String>,
     /// A test aid, never for a workroom: POST /debug/eval and /debug/crash on the engine's port.
-    #[arg(long, env = "ENGINE_DEBUG")]
+    #[arg(long, env = "ENGINE_DEBUG", action = clap::ArgAction::SetTrue, value_parser = clap::builder::FalseyValueParser::new())]
     engine_debug: bool,
 }
 
