@@ -10,7 +10,7 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
-## v2.0.0 — one program, `visit` ([#22](https://github.com/sarmiena/Basedverse/issues/22))
+## v2.0.0 — 2026-10-29 — one program, `visit` ([#22](https://github.com/sarmiena/Basedverse/issues/22))
 
 **`visit` is everything a workroom runs.** visit-client, auth-client and the engine's driver are one Rust program,
 `visit`, and a Postgres and a headless Chrome are inside it, each with every library it needs: one file per

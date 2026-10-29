@@ -1,0 +1,23 @@
+{
+  "release": "deps-1",
+  "postgres": {
+    "version": "18.6", "build": 1,
+    "files": {
+      "linux-x86_64": { "name": "postgresql-18.6-1-linux-x86_64.tar.gz", "url": "https://github.com/sarmiena/Basedverse/releases/download/deps-1/postgresql-18.6-1-linux-x86_64.tar.gz", "sha256": "dfabd4060352b7c053eb51ffba3130cd7296d036ce47d02c200720dc000f4fe6" },
+      "linux-aarch64": { "name": "postgresql-18.6-1-linux-aarch64.tar.gz", "url": "https://github.com/sarmiena/Basedverse/releases/download/deps-1/postgresql-18.6-1-linux-aarch64.tar.gz", "sha256": "da9f5d5af240a4d1cf3ec6ac6548f890c2d7db00522cf89470cbbbac63d2d06d" },
+      "macos-aarch64": { "name": "postgresql-18.6-1-macos-aarch64.tar.gz", "url": "https://github.com/sarmiena/Basedverse/releases/download/deps-1/postgresql-18.6-1-macos-aarch64.tar.gz", "sha256": "2d9b3f31791dbe20855bb8bdbb8a971a573ef0139deb9bdcc4bcc1cc7e60366a" },
+      "macos-x86_64": { "name": "postgresql-18.6-1-macos-x86_64.tar.gz", "url": "https://github.com/sarmiena/Basedverse/releases/download/deps-1/postgresql-18.6-1-macos-x86_64.tar.gz", "sha256": "7018ddcee8f879ab5c96deb9640c434831ea4c76a81886b4967a66101044c662" },
+      "windows-x86_64": { "name": "postgresql-18.6-1-windows-x86_64.tar.gz", "url": "https://github.com/sarmiena/Basedverse/releases/download/deps-1/postgresql-18.6-1-windows-x86_64.tar.gz", "sha256": "903bc6798acef425355dfdb7560d25f71360e3166a7cf2d0092922f90e31b699" }
+    }
+  },
+  "chrome": {
+    "version": "156.0.8078.73", "build": 1,
+    "files": {
+      "linux-x86_64": { "name": "chrome-156.0.8078.73-1-linux-x86_64.tar.gz", "url": "https://github.com/sarmiena/Basedverse/releases/download/deps-1/chrome-156.0.8078.73-1-linux-x86_64.tar.gz", "sha256": "d915e45ef40bdb7b2be012ebe83f1c1d6bbded1337ca48b52b6f25d931685ad9" },
+      "linux-aarch64": { "name": "chrome-156.0.8078.73-1-linux-aarch64.tar.gz", "url": "https://github.com/sarmiena/Basedverse/releases/download/deps-1/chrome-156.0.8078.73-1-linux-aarch64.tar.gz", "sha256": "fff97eae22f22cefe52ce47413770deb57d72076f7645823f0127a90e19cb1c1" },
+      "macos-aarch64": { "name": "chrome-156.0.8078.73-1-macos-aarch64.tar.gz", "url": "https://github.com/sarmiena/Basedverse/releases/download/deps-1/chrome-156.0.8078.73-1-macos-aarch64.tar.gz", "sha256": "bde6ca308f1d7b31ccb93ad5ccdc812aff711149d7a17134b73969e42a3c0b38" },
+      "macos-x86_64": { "name": "chrome-156.0.8078.73-1-macos-x86_64.tar.gz", "url": "https://github.com/sarmiena/Basedverse/releases/download/deps-1/chrome-156.0.8078.73-1-macos-x86_64.tar.gz", "sha256": "bef1c9e8568a87ac8d0d3a877014a9ebb501deaf3f87c352754bcb3e5aaef58a" },
+      "windows-x86_64": { "name": "chrome-156.0.8078.73-1-windows-x86_64.tar.gz", "url": "https://github.com/sarmiena/Basedverse/releases/download/deps-1/chrome-156.0.8078.73-1-windows-x86_64.tar.gz", "sha256": "71bf8d0bd69e129cb4bf660ffb5f4473c3b7900762609e1e9e984d5f63297930" }
+    }
+  }
+}
