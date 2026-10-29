@@ -31,8 +31,10 @@ case "$platform" in
       -v "$work":/out "$image" bash /postgres/linux-inside.sh /src.tar.bz2 "/out/$name"
     ;;
   macos-aarch64 | macos-x86_64 | windows-x86_64)
-    triple=$(case "$platform" in macos-aarch64) echo aarch64-apple-darwin ;; macos-x86_64) echo x86_64-apple-darwin ;;
-             windows-x86_64) echo x86_64-pc-windows-msvc ;; esac)
+    # (not a case inside $(): macOS' bash 3.2 can't read one)
+    triple=aarch64-apple-darwin
+    [ "$platform" = macos-x86_64 ] && triple=x86_64-apple-darwin
+    [ "$platform" = windows-x86_64 ] && triple=x86_64-pc-windows-msvc
     file="postgresql-$THESEUS_RELEASE-$triple.tar.gz"
     url="https://github.com/theseus-rs/postgresql-binaries/releases/download/$THESEUS_RELEASE/$file"
     say "fetching $file"
