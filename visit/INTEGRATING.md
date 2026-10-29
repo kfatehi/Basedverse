@@ -423,7 +423,10 @@ visit.host({
   redraw (`texture.needsUpdate = true`: encoded again in the background and sent at most once a second, so mark one
   changed only when its picture did), the background and the fog. **What does not**: custom shaders (a
   `ShaderMaterial` is code: it arrives plain grey), HTML overlays, post-processing (an `EffectComposer`), and
-  anything drawn outside the scene.
+  anything drawn outside the scene. **A primitive travels as its parameters**: a `BoxGeometry`, an
+  `IcosahedronGeometry` and the rest go as what made them (`toJSON`), so corners you pulled on one arrive as
+  the primitive, unpulled. A geometry whose vertices you edit must be a plain one: `new
+  THREE.BufferGeometry().copy(new THREE.IcosahedronGeometry(1, 1))`, then edit.
 - **What it costs you**: under 1 ms of your page's time 30 times a second while you have visitors (Visit reads
   the scene for changes, your landscape aside), and the whole scene once as each visitor starts (`toJSON`: some
   tens of ms for a room of a few hundred objects; your landscape apart, once, to visitors who do not have it).
