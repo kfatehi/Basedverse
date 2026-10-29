@@ -203,6 +203,13 @@ let me = { x: 5, y: 0, z: 3, yaw: 0, pitch: 0 };
 `world.room` is the home scene's root, for a camera to follow something in it; never change it (the host owns it,
 and the next delta would put it back).
 
+**Settings.** Anything a person may change about the room (its look, a door, what is open) is a room setting,
+and lives on your server: the client page posts it to a route of yours (with the session), your server keeps it
+and tells the server page the way it tells it everything else (its poll, its feed), and the server page rebuilds.
+The Sweatshop's environment dropdown works like that (`POST /api/room {env}`; `room.env` in its board's
+snapshot). A setting kept in `localStorage` or in the address (`?env=`) changes one browser's idea of a room that
+is drawn elsewhere: the engine's page never sees it.
+
 ### One page, two roles
 
 One file can serve both: the engine loads it with `?role=host` (your `ENGINE_ROOM_URL` says so), a person loads

@@ -1710,7 +1710,7 @@
       const row = { t: Date.now(), fps: Math.round(gaps.length / secs), frame_p95_ms: gaps.length ? r1(gaps[Math.floor(gaps.length * 0.95)]) : null,
         frame_max_ms: gaps.length ? r1(gaps[gaps.length - 1]) : null, long_tasks: long.length, long_max_ms: long.length ? r1(Math.max(...long)) : 0, parts,
         counts: { visitors: [...this._hosted.values()].filter(h => h.inside).length, watchers: [...this._hosted.values()].filter(h => h.watch && !h.inside).length,
-          plots: w ? w.plots.length : 0, offline: w ? w.plots.filter(x => x.offline).length : 0, objects: sync ? sync.objs.size : 0,
+          plots: w ? w.plots.filter(x => !x.home).length : 0, offline: w ? w.plots.filter(x => x.offline).length : 0, objects: sync ? sync.objs.size : 0,
           landscape: sync ? sync.statics.length : 0, voices: this.voices.length, visiting: !!(this.visiting && this.visiting.inside) } };
       p.rows.push(row); if (p.rows.length > 120) p.rows.shift();
       p.cur = {}; p.at = now;
@@ -4064,7 +4064,8 @@
       // Your mount (8.11), once your room gives one: which one M gets you on, and on or off.
       if (v.mounts.length) rows.push(`<div class="row"><span class="grow">${v.riding ? "riding" : "your mount"}</span><select data-v="mount" title="the one M gets you on" style="max-width: 9em">${v.mounts.map(m =>
         `<option value="${esc(m.id)}"${m.id === v.mount ? " selected" : ""}>${esc(m.name)}${m.fly ? " (flies)" : ""}</option>`).join("")}</select><button data-v="ride" class="${v.riding ? "go" : ""}" title="M: on your mount, or off">${v.riding ? "Get off" : "Ride"}</button></div>`);
-      if (v._world && v.state === "online") rows.push(`<div class="row"><span class="grow">your world: ${v._world.plots.length} ${v._world.plots.length === 1 ? "room" : "rooms"} round yours${(n => n ? ` (${n} offline)` : "")(v._world.plots.filter(p => p.offline).length)}</span><button data-v="map" title="where your friends' rooms sit round yours, from above">Map</button></div>`);
+      const roundYours = v._world ? v._world.plots.filter(p => !p.home) : [];   // (a user page's own room is a plot too)
+      if (v._world && v.state === "online") rows.push(`<div class="row"><span class="grow">your world: ${roundYours.length} ${roundYours.length === 1 ? "room" : "rooms"} round yours${(n => n ? ` (${n} offline)` : "")(roundYours.filter(p => p.offline).length)}</span><button data-v="map" title="where your friends' rooms sit round yours, from above">Map</button></div>`);
       // People: one row each, whoever is in the lobby and whoever you are linked with, either way, linked first. A
       // linked one says where you two stand (in your room, in theirs, linked); click it for the rest: where each sees
       // the other, Go there or Put in my world, how they look in your room, Kick, Unlink. One not linked: Link.
@@ -4080,7 +4081,7 @@
       for (const l of v.links) person(l.host, p => p.links.push(l));
       for (const x of v.visitors) person(x.visitor, p => { p.visit = x; });
       for (const x of v.watchers) if (!x.inside) person(x.visitor, p => p.watches.push(x));
-      for (const w of v._watches.values()) if (!w.link) person(w.host, p => { p.plot = w; });
+      for (const w of v._watches.values()) if (!w.link && !w.home) person(w.host, p => { p.plot = w; });   // (home is your own room)
       if (v.visiting && !v.visiting.link) person(v.visiting.host, p => { p.there = true; });
       const linked = p => !!(p.links.length || p.visit || p.watches.length || p.plot || p.there);
       const more = p => {   // a linked one, opened: where each sees the other (beyond its row's own word), what you can do

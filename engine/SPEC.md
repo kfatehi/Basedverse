@@ -382,6 +382,11 @@ The sim, as visit/INTEGRATING.md step 5 has it, with these rules:
 - It **owns the truth of the room** and nothing of the person: no chat window, no panel, no name, no avatar.
   A room that wants its owner's say on something (an edit, a door) takes it through its own server.
 - It is served **to the engine's key only** (5.1, point 1), never without a session: it is the room's code.
+- Its **settings are the room's**, not a browser's: the look of the room, what is open, whatever a person may
+  change about it lives on the workroom's server, set from the client page through that server's own routes
+  (with the session) and read by this page the way it reads the rest of its data (its poll, its feed). Nothing
+  of them in a browser: this page's `localStorage` is the engine's, which no person reaches, and a `?setting=`
+  on the person's address changes only that browser's idea of a room drawn elsewhere.
 
 ### 8.2 The client page
 
@@ -393,6 +398,8 @@ What a person loads, with a session:
   sessions, keys, ../auth/INTEGRATING.md step 5). It never holds the scene's truth: what it draws came from the
   host.
 - Its own keys ignore text boxes and wait while `v.viewFocused` (visit/INTEGRATING.md step 6), as today.
+- A setting it offers (a dropdown, a switch) goes to the server (8.1), never into its own scene: what it draws
+  came from the host, and changes when the host's does.
 
 ### 8.3 One page, two roles
 
