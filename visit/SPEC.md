@@ -147,7 +147,7 @@ visit --lobby wss://lobby.example/ --name "Magic Room" --sim my-sim/1.0 \
 
 | flag | env | default | meaning |
 |---|---|---|---|
-| `--lobby` | `VISIT_LOBBY` | — (required) | the lobby's `wss://` (or, for a local test, `ws://127.0.0.1:…`) URL |
+| `--lobby` | `VISIT_LOBBY` | none: no lobby | the lobby's `wss://` (or, for a local test, `ws://127.0.0.1:…`) URL. None: the office keeps to itself (4.2) |
 | `--name` | `VISIT_NAME` | — (required) | the office's name: 1–24 letters, digits, space, `_ . -`, starting and ending with a letter or digit |
 | `--sim` | `VISIT_SIM` | `unknown/0` | `name/version` of the sim, shown to others |
 | `--port` | `VISIT_PORT` | 7401 | the port for the page |
@@ -164,7 +164,7 @@ visit --lobby wss://lobby.example/ --name "Magic Room" --sim my-sim/1.0 \
 | `--auth-token-file` | `AUTH_TOKEN_FILE` | none: no sign-in API | the sign-in API's service token (../auth/SPEC.md 3): given, `visit` serves the API |
 | `--auth-port`, `--auth-listen`, `--auth-idle`, `--auth-max-age` | `AUTH_PORT`, `AUTH_LISTEN`, `AUTH_IDLE`, `AUTH_MAX_AGE` | 7403, `127.0.0.1`, `7d`, `30d` | the sign-in API's (../auth/SPEC.md 8) |
 | `--engine-room-url` | `ENGINE_ROOM_URL` | none: no engine | the room's server page: given, `visit` hosts it in its engine (../engine/SPEC.md 5) |
-| `--engine-port`, `--engine-tick-idle`, `--engine-memory-max`, `--engine-window`, `--engine-log`, `--engine-debug` | `ENGINE_PORT`, `ENGINE_TICK_IDLE`, `ENGINE_MEMORY_MAX`, `ENGINE_WINDOW`, `ENGINE_LOG`, `ENGINE_DEBUG` | 7405, 10, 1024, `1280x720`, `info`, off | the engine's (../engine/SPEC.md 5.2) |
+| `--engine-port`, `--engine-tick-idle`, `--engine-memory-max`, `--engine-window`, `--engine-log`, `--engine-debug` | `ENGINE_PORT`, `ENGINE_TICK_IDLE`, `ENGINE_MEMORY_MAX`, `ENGINE_WINDOW`, `ENGINE_LOG`, `ENGINE_DEBUG` | 7405, 10, 1024, `1280x720`, `info`, off | the engine's (../engine/SPEC.md 5.2); `ENGINE_DEBUG`, a test aid never left on in a workroom, takes `1`, `yes`, `true` (on) or `0`, `no`, `false` (off) |
 
 A flag wins over its environment variable, and a variable set but blank counts as unset (its default), as a
 `.env` file has it. [`../.env.example`](../.env.example) is the template of them all. There is no setting for a
@@ -194,6 +194,9 @@ a run (`visit auth …`, `visit import`, `visit psql`, `visit status`) are in 4.
 - **Starting.** Postgres first (made at the first start, brought up to date at every one: 4.4), then the page's
   port, the lobby, the sign-in API and the engine (each when asked for), then the ready line (4.1). A first start
   takes longer: it unpacks what is inside `visit` and makes the database.
+- **Without a lobby** (no `--lobby`), the office keeps to itself: it joins no lobby, so nobody visits, links or
+  knocks, and it knocks on nobody; its pages, its sign-in and its engine run all the same. A room can have its
+  sign-in, or its engine, before it has a lobby.
 - **Hosting.** The office is in the lobby to be visited, and can knock, only while a page hosts its scene
   (`host`, 5.2): the visit-client publishes its link to the lobby then (6.1), and withdraws it when the page
   goes; visits under way carry on.

@@ -252,9 +252,10 @@ in Python), beside visit-client.
 An impossible setting is exit 2, and an `ENGINE_ROOM_URL` that is not `http://` or `https://`, or an
 `ENGINE_PORT` taken, exit 5, before `visit` is ready. The engine takes visit-client's port, the host token and its
 key from `visit` itself (5.1): gone with the image are `ENGINE_KEY_FILE`, `VISIT_HOST` and its `VISIT_TOKEN_FILE`,
-and its flags have the prefix now (`--room-url` is `--engine-room-url`). `ENGINE_DEBUG=1` (`--engine-debug`) turns
-on a test aid, `POST /debug/eval` (the body run in the page, its value as JSON) and `POST /debug/crash`, on
-`ENGINE_PORT`: for the tests, never part of the contract, 404 without it.
+and its flags have the prefix now (`--room-url` is `--engine-room-url`). `ENGINE_DEBUG=1` (`--engine-debug`; `1`,
+`yes` or `true` on, `0`, `no` or `false` off) turns on a test aid, never left on in a workroom: `POST /debug/eval`
+(the body run in the page, its value as JSON) and `POST /debug/crash`, on `ENGINE_PORT`, for the tests, never part
+of the contract, 404 without it.
 
 ### 5.3 What it is made of, and holds
 
