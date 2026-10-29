@@ -658,8 +658,15 @@
   }
 
   class Client {
-    constructor(port, token, sim, { threeBase = null } = {}) {
-      Object.assign(this, { port, token, sim, _threeBase: threeBase });
+    constructor(port, token, sim, { threeBase = null, url = null, role = null } = {}) {
+      // Where visit-client is (SPEC 7): a URL (ws:// or wss://), a path on this page's own origin (a workroom's
+      // server's relay, "/visit/ws"), or, as before, a port on 127.0.0.1. And which role this page is: the room
+      // ("host"), the person ("user"), or both (null: every page before the engine).
+      if (role != null && role !== "host" && role !== "user") throw new Error('Visit.connect: role is "host", "user", or none');
+      const where = url ? (/^wss?:\/\//.test(url) ? url : (location.protocol === "https:" ? "wss://" : "ws://") + location.host + (url.startsWith("/") ? url : "/" + url)) : `ws://127.0.0.1:${port}/ws`;
+      Object.assign(this, { port, token, sim, _threeBase: threeBase, url: where, role, _wantRole: role });
+      this.home = null;        // the user's: their own room as a visit (engine/SPEC.md 4): { id, channel, paused }, while the room is up
+      this.owner = null;       // the host's: the person in it, as a visitor of its own: { id, channel }, while they are here
       this.state = "connecting";   // then "online", "offline" (the lobby out of reach), or "away" (left on purpose)
       this.office = null;
       this.status = "available";
@@ -752,10 +759,10 @@
     async _open() {
       const token = typeof this.token === "function" ? await this.token() : this.token;
       return new Promise((resolve, reject) => {
-        const ws = this._ws = new WebSocket(`ws://127.0.0.1:${this.port}/ws`);
+        const ws = this._ws = new WebSocket(this.url);
         ws.binaryType = "arraybuffer";
         let ready = false;
-        ws.onopen = () => ws.send(JSON.stringify({ type: "hello", proto: PROTO, token, sim: this.sim }));
+        ws.onopen = () => ws.send(JSON.stringify({ type: "hello", proto: PROTO, sim: this.sim, ...(token ? { token } : {}), ...(this._wantRole ? { role: this._wantRole } : {}) }));
         ws.onmessage = e => {
           if (typeof e.data !== "string") return this._frame(e.data);
           let m;
@@ -768,7 +775,7 @@
           if (ws !== this._ws) return;
           this._dropAll();
           if (!ready) {
-            const err = new Error(e.code === 4401 ? "visit-client refused the token" : `visit-client is not running on 127.0.0.1:${this.port}, or refused this page`);
+            const err = new Error(e.code === 4401 ? "visit-client refused the token" : e.code === 4400 ? "visit-client refused this page's hello" : `visit-client is not running at ${this.url}, or refused this page`);
             err.code = e.code;
             return reject(err);
           }
@@ -797,6 +804,9 @@
 
     _ready(m) {
       this.state = m.away ? "away" : m.online ? "online" : "offline";
+      this.role = m.role === "host" || m.role === "user" ? m.role : null;
+      this.home = isObj(m.home) ? { id: String(m.home.id), channel: Number(m.home.channel), paused: m.home.paused === true } : null;
+      this.owner = isObj(m.owner) ? { id: String(m.owner.id), channel: Number(m.owner.channel) } : null;
       this.office = m.office && m.office.id ? m.office : null;
       this.status = m.status; this.maxVisitors = m.max_visitors;
       this.key = typeof m.key === "string" ? m.key : null;
@@ -931,6 +941,7 @@
         case "visit_started": this._started(m); break;
         case "visit_ended": this._ended(m); break;
         case "host_paused": case "host_resumed":
+          if (this.home && this.home.channel === m.channel) this.home.paused = m.type === "host_paused";
           if (this.visiting && this._viewer && this._viewer.channel === m.channel) this.visiting.paused = m.type === "host_paused";
           if (this._watches.has(m.channel)) this._watches.get(m.channel).paused = m.type === "host_paused";
           if (this._links.has(m.channel)) this._links.get(m.channel).paused = m.type === "host_paused";
@@ -954,14 +965,23 @@
     }
 
     // ---------- actions ----------
+    // What is the room's to do, and what the person's (engine/SPEC.md 7): a page of the other role is refused here, as
+    // its visit-client would refuse it (`wrong_role`).
+    _as(role, what) {
+      if (this.role && this.role !== role) {
+        const e = new Error(`visit.${what}: the ${role === "host" ? "room's" : "person's"} to do, and this page is the ${this.role === "host" ? "room" : "person"}`);
+        e.code = "wrong_role";
+        throw e;
+      }
+    }
     setStatus(status) { this._send({ type: "status", status }); }
     setMaxVisitors(n) { this._send({ type: "max_visitors", n }); }
     rename(name) { this._send({ type: "rename", name }); }
     // A knock: to walk into their room as soon as they let you in. A link (8.5; to an office whose `links` is
     // true): let in, you see their room in a corner (the stage's), from above, and choose: go there (stepIn), put it
     // in your world (toWorld), or not (unlink). To an older office a link is a knock.
-    knock(officeId, message = "") { this._send({ type: "knock", to: officeId, message }); }
-    link(officeId, message = "") { this._send({ type: "knock", to: officeId, message, link: true }); }
+    knock(officeId, message = "") { this._as("user", "knock"); this._send({ type: "knock", to: officeId, message }); }
+    link(officeId, message = "") { this._as("user", "link"); this._send({ type: "knock", to: officeId, message, link: true }); }
     answer(knockId, accept, message = "") { this.knocks = this.knocks.filter(k => k.id !== knockId); this._send({ type: "answer", knock: knockId, accept, message }); this._changed(); }
     leave() { if (this.visiting) this._send({ type: "end", visit: this.visiting.id }); }   // a link: unlinked
     // Your links (by visit id; the corner's, by default). Into its room, as a visit is (its host's spawn says where),
@@ -1014,6 +1034,7 @@
     // { cosmetic, agreed, label (what a visitor sees), who ("everyone" | "guests"), reach (scene units), run }, run
     // getting { id, visitor, type, object, point, distance }. Called again, it replaces them all.
     interactions(types) {
+      this._as("host", "interactions");
       const map = new Map();
       for (const [type, t] of Object.entries(types || {})) {
         if (!/^[\w.-]{1,40}$/.test(type)) throw new Error(`visit.interactions: "${type}" is not a type (letters, digits, _ . -, at most 40)`);
@@ -1032,6 +1053,7 @@
     // room that would show you as yourself asks for it (null: none). And whose look your visitors have in your room:
     // their own avatars ("theirs"), or your models ("mine"), by default and for a friend (null: the default).
     avatar(object, { unit } = {}) {
+      this._as("user", "avatar");
       if (object == null) { this._avatarOwn = null; this._send({ type: "avatar_clear" }); return; }
       if (!object.isObject3D) throw new Error("visit.avatar: a three.js object (or null)");
       const u = Number(unit) > 0 ? Number(unit) : this._unit();
@@ -1061,6 +1083,7 @@
     // are in decides: one may keep mounts out (`mounts: false`) or anyone from flying (`fly: false`); one that says
     // nothing lets them ride, and a mount that flies, fly.
     possessions(list) {
+      this._as("user", "possessions");
       if (!Array.isArray(list) || list.length > POSSESSIONS) throw new Error(`visit.possessions: a list of at most ${POSSESSIONS}`);
       const ids = new Set(), num = (x, d, lo, hi) => x != null && Number.isFinite(Number(x)) ? Math.min(hi, Math.max(lo, Number(x))) : d;
       const own = list.map(p => {
@@ -1132,6 +1155,7 @@
     // Host side: ask each visitor whose own look this room shows for its avatar, once a visit; and tell each how it is
     // drawn here now (its look changed: their model, or ours).
     _avatarWants() {
+      if (this.role === "user") return;   // the room's visits, seen, not served
       for (const h of this._hosted.values()) {
         if (!h.avatarAsked && h.visitor.key && this.avatarUse(h.visitor.key) === "theirs") {
           h.avatarAsked = true;
@@ -1146,6 +1170,7 @@
     // "theirs": its own model, which Visit draws, its eyes that model's) or as this room's model ("mine": the room draws
     // it, its eyes the room's `eye`); and why not as itself, if this room would show it so (`problem`).
     _bodyTell(h) {
+      if (h.mirror) return;
       const want = !!h.visitor.key && this.avatarUse(h.visitor.key) === "theirs", look = want && h.avatar ? "theirs" : "mine";
       const problem = want && !h.avatar ? (h.modelProblem || null) : null;
       h.look = look;
@@ -1258,14 +1283,16 @@
     // This room's plot ({ center, size } in its units: as host() said, or what its scene covers), and in metres.
     _plot() {
       const hk = this._hooks;
-      if (!hk) return null;
+      if (!hk) { const hs = this._homeScene(); return hs ? hs.plot : (this.role === "user" ? { center: [0, 0], size: [10, 10] } : null); }
       if (this._plotFrom !== hk) { this._plotFrom = hk; this._plotIs = plotOf(hk.plot, hk.scene.root, hk.scene.three); }
       return this._plotIs;
     }
-    _unit() { return this._hooks && Number(this._hooks.unit) > 0 ? Number(this._hooks.unit) : 1; }
+    _unit() { const hs = !this._hooks && this._homeScene(); return hs ? hs.unit || 1 : this._hooks && Number(this._hooks.unit) > 0 ? Number(this._hooks.unit) : 1; }
+    // A user page's own room, as its host sends it (engine/SPEC.md 4), once it has arrived.
+    _homeScene() { const w = this.home && this._watches.get(this.home.channel); return w && w.scene ? w.scene : null; }
     _plotMetres() { const p = this._plot(); return p ? p.size.map(x => x * this._unit()) : [10, 10]; }
     // Your friends' plots around your room, and walking onto them (../../WORLD.md): see World.
-    world(opts = {}) { if (this._world) this._world.release(); return new World(this, opts); }
+    world(opts = {}) { this._as("user", "world"); if (this._world) this._world.release(); return new World(this, opts); }
     _guests(m) {
       this.door = m.door === "closed" ? "closed" : "open";
       this.guests = (Array.isArray(m.guests) ? m.guests : []).map(g => ({ key: String(g.key), name: String(g.name || "") }));
@@ -1285,19 +1312,28 @@
       if (m.role === "host") {
         // A watcher (../../WORLD.md) sees this room's plot from outside it: sent the scene, never spawned, until it
         // steps in (`enter`).
-        const h = { id: m.id, channel: m.channel, visitor: m.peer || {}, guest: m.guest === true, watch: m.watch === true, link: m.link === true, inside: m.watch !== true || m.inside === true,
+        // The owner's visit (engine/SPEC.md 4): the person in their own room, a watch of its plot by its owner, whom
+        // the room spawns and walks as it does anyone (who.owner says who). To a user page, the room's visits are to
+        // see (the panel's rows), never to serve: a mirror, with nothing sent for it.
+        const owner = m.owner === true, mirror = this.role === "user";
+        const h = { id: m.id, channel: m.channel, visitor: Object.assign({}, m.peer || {}, owner ? { owner: true } : {}), owner, mirror, guest: m.guest === true, watch: m.watch === true, link: m.link === true,
+          inside: m.watch !== true || m.inside === true,
           pose: null, yaw0: 0, input: null, inputAt: 0, keyNext: true, fails: 0, sceneSent: false, posed: null, sharedAdds: m.shared_adds === true,
           landscapes: m.landscapes === true, since: performance.now(), possessions: possessionsFrom(m.possessions), models: new Map(), wanted: new Set(), ride: null };
         if (m.state && m.state.pose && h.inside) { h.pose = m.state.pose; h.yaw0 = m.state.yaw0 || 0; }   // back after this page reloaded
         this._hosted.set(m.channel, h);
-        if (h.inside) this._spawn(h);
+        if (owner) this.owner = { id: m.id, channel: m.channel };
+        if (h.inside && !mirror) this._spawn(h);
         this._avatarWants();
       } else if (m.watch) {
-        // A plot watched (the world's), or a link (8.5): the corner's if it is free, else aside, waiting for it.
-        const w = { id: m.id, channel: m.channel, host: m.peer || {}, watch: true, link: m.link === true, plot: m.link !== true, where: m.link ? "aside" : null,
-          inside: false, paused: false, count: 0, scene: null, sceneQ: null, since: performance.now(), loading: false, failed: false };
+        // A plot watched (the world's), or a link (8.5): the corner's if it is free, else aside, waiting for it. Or home
+        // (engine/SPEC.md 4): the person's own room, a watch they are in, drawn by their world as its own plot.
+        const home = m.home === true;
+        const w = { id: m.id, channel: m.channel, host: m.peer || {}, watch: true, link: m.link === true, plot: m.link !== true, home, where: m.link ? "aside" : null,
+          inside: home && m.inside === true, paused: false, count: 0, scene: null, sceneQ: null, since: performance.now(), loading: false, failed: false };
         if (w.link) this._links.set(m.channel, w); else this._watches.set(m.channel, w);
-        if (m.inside) this._send({ type: "exit", channel: m.channel });   // this page lost where it was: it starts at home
+        if (home) { this.home = { id: m.id, channel: m.channel, paused: false }; if (this._world) this._world.listAt = -1; }
+        if (m.inside && !home) this._send({ type: "exit", channel: m.channel });   // this page lost where it was: it starts at home
         if (w.link && m.where === "world") { w.wantWorld = true; if (this._world) this.toWorld(w.id); }   // where it was put, before a reload
         else if (w.link && this._world && this.isGuest(w.host.key)) this.toWorld(w.id);   // a guest's: its plot (_guestLinksToWorld)
         else if (w.link && !this._viewer) this._toCorner(w);
@@ -1314,6 +1350,8 @@
 
     _ended(m) {
       this._nearBy.delete(m.channel);
+      if (this.home && this.home.id === m.id) this.home = null;
+      if (this.owner && this.owner.id === m.id) this.owner = null;
       const h = this._hosted.get(m.channel);
       if (h && h.id === m.id) { this._avatarDrop(h); this._rideDrop(h); this._hosted.delete(m.channel); this._visitorsList(); }
       const w = this._watches.get(m.channel);
@@ -1343,10 +1381,10 @@
 
     _visitorsList() {
       const hs = [...this._hosted.values()];
-      this.visitors = hs.filter(h => h.inside).map(h => ({ id: h.id, visitor: h.visitor, guest: h.guest, pose: h.pose, link: h.link,
+      this.visitors = hs.filter(h => h.inside).map(h => ({ id: h.id, visitor: h.visitor, guest: h.guest, pose: h.pose, link: h.link, owner: !!h.owner,
         look: h.look || "mine", eyes: h.eyes || this._eyeRoom(), problem: h.modelProblem || null, avatar: null,
         riding: h.ride ? { id: h.ride.id, name: h.ride.name, fly: h.ride.fly } : null }));
-      this.watchers = hs.filter(h => h.watch).map(h => ({ id: h.id, visitor: h.visitor, inside: h.inside, link: h.link }));
+      this.watchers = hs.filter(h => h.watch && !h.owner).map(h => ({ id: h.id, visitor: h.visitor, inside: h.inside, link: h.link }));
       this.links = [...this._links.values()].map(w => ({ id: w.id, host: w.host, where: w.where, inside: w.inside }));
     }
 
@@ -1430,6 +1468,10 @@
       }
       const h = this._home, k = this._unit(), ears = h && { x: h.x * k, y: h.y * k + 1.6, z: h.z * k, yaw: h.yaw };
       const wd = this._world, w = wd && wd.inside && this._watches.get(wd.in);
+      if (w && w.scene && w.home) {   // the person at home, their room a plot their world has them in (engine/SPEC.md 4): heard from where its host has them
+        const s = w.scene, ks = s.unit || 1;
+        return { kind: "home", w, s, k: ks, ears: { x: s.pose.x * ks, y: (s.pose.y + s.vis.y) * ks, z: s.pose.z * ks, yaw: wd.look.yaw } };
+      }
       if (w && w.scene) return { kind: "plot", w, s: w.scene, k, ears };
       return { kind: "home", k, ears };
     }
@@ -1448,7 +1490,9 @@
     _near(r) {
       const out = new Map();
       if (r.kind === "home") {
-        for (const h of this._hosted.values()) if (h.inside && h.pose && h.visitor.key) out.set(h.visitor.key, { key: h.visitor.key, name: h.visitor.name || "", channel: h.channel,
+        if (r.s) {   // a user page: its visitors where their bodies are in the room's scene (as the room marks them)
+          for (const h of this._hosted.values()) if (h.inside && h.visitor.key && !h.owner) { const b = this._body(r.s, h.id); if (b) out.set(h.visitor.key, Object.assign({ key: h.visitor.key, name: h.visitor.name || "", channel: h.channel }, this._where(r.s, b, r.k))); }
+        } else for (const h of this._hosted.values()) if (h.inside && h.pose && h.visitor.key && !h.owner) out.set(h.visitor.key, { key: h.visitor.key, name: h.visitor.name || "", channel: h.channel,
           x: h.pose.x * r.k, y: (Number(h.pose.y) || 0) * r.k, z: h.pose.z * r.k });
         for (const x of this._worldNear()) if (!out.has(x.key)) out.set(x.key, x);
         return out;
@@ -1529,9 +1573,13 @@
     // it changes, at most ten times a second.
     _voiceWhere(r) {
       const k = this._unit(), q = x => Math.round(x * 10) / 10, pa = this._phoneAt;
-      const where = { me: r.kind === "home" && r.ears ? [q(r.ears.x), q(r.ears.y), q(r.ears.z)] : null, phone: pa ? [q(pa.x * k), q((pa.y || 0) * k), q(pa.z * k)] : null,
-        visitors: [...this._hosted.values()].filter(h => h.inside && h.pose).map(h => [h.channel, q(h.pose.x * k), q((Number(h.pose.y) || 0) * k), q(h.pose.z * k)]),
-        world: r.kind === "home" ? this._worldNear().map(x => [x.key, q(x.x), q(x.y), q(x.z)]) : [] };
+      // The room says where everyone in it is, its owner among them (engine/SPEC.md 3.3: the owner is a visitor of its
+      // own; their ears, their eyes); the person says where their world has their friends; a page that is both, both.
+      const o = this.owner && this._hosted.get(this.owner.channel), ownerAt = o && o.inside && o.pose ? [q(o.pose.x * k), q(((Number(o.pose.y) || 0) + (o.eyes || 0)) * k), q(o.pose.z * k)] : null;
+      const where = this.role === "user" ? { world: r.kind === "home" ? this._worldNear().map(x => [x.key, q(x.x), q(x.y), q(x.z)]) : [] }
+        : { me: this.role === "host" ? ownerAt : r.kind === "home" && r.ears ? [q(r.ears.x), q(r.ears.y), q(r.ears.z)] : null, phone: pa ? [q(pa.x * k), q((pa.y || 0) * k), q(pa.z * k)] : null,
+          visitors: [...this._hosted.values()].filter(h => h.inside && h.pose).map(h => [h.channel, q(h.pose.x * k), q((Number(h.pose.y) || 0) * k), q(h.pose.z * k)]),
+          world: this.role !== "host" && r.kind === "home" ? this._worldNear().map(x => [x.key, q(x.x), q(x.y), q(x.z)]) : [] };
       const sig = JSON.stringify(where), now = performance.now();
       if (sig === this._whereTold.sig || now - this._whereTold.at < 100 || !this._ws || this._ws.readyState !== 1) return;
       Object.assign(this._whereTold, { sig, at: now });
@@ -1696,6 +1744,7 @@
     // over heads still showing. Visit draws those in the views it draws (your world, and another's room); a room
     // without a world draws its own (Visit.bubble). Visit.chat, the chat window (the panel's), shows them all.
     say(text, to, { media = [], links = [] } = {}) {
+      this._as("user", "say");
       const t = [...String(text == null ? "" : text).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim()].slice(0, CHAT_LEN).join("").trim(), now = Date.now();
       const scope = to == null || to === "here" ? "say" : to === "lobby" ? "lobby" : isObj(to) && to.whisper != null ? "whisper" : "sim";
       const target = to === "room" ? { key: this.key || "", name: this.office ? this.office.name : "" }
@@ -1736,6 +1785,7 @@
     // The name your user goes by (1 to 24 characters; null: your office's), shown to others with what they say, over
     // their voice, in a room's voice, and in their panel: told to everyone linked with you, now and as they link.
     setName(name) {
+      this._as("user", "setName");
       const n = name == null ? null : [...String(name).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim()].slice(0, 24).join("").trim() || null;
       if (n === this._userName) return;
       this._userName = n;
@@ -2004,6 +2054,7 @@
     // keeps you out of its voice). Whoever you also hear another way (in person, or on a call) you hear that way only.
     // The "room_voice" event: the one you are in now (null: none; `out`, why you are out: "kicked", "banned", "gone").
     joinVoice(key) {
+      this._as("user", "joinVoice");
       const k = key === "room" || key === true ? this.key : key == null ? null : String(key);
       if (!this._ws || this._ws.readyState !== 1 || (k && !this.key)) return false;
       if (k && k !== this.key && (!this.chatTargets.some(o => o.key === k) || this.bannedBy.some(b => b.key === k && b.voice))) return false;
@@ -2123,6 +2174,7 @@
     // lifts them above the floor its `move` gives. Without it, a visitor that came in high (from a world, in the air)
     // floats gently down to that floor. It is read at every move, so a room may change it.
     host(hooks) {
+      this._as("host", "host");
       if (!hooks || typeof hooks.spawn !== "function" || typeof hooks.move !== "function") throw new Error("visit.host needs spawn and move functions");
       const sc = hooks.scene;
       if (!sc || !(sc.root && sc.root.isObject3D && sc.three && sc.three.REVISION)) {
@@ -2394,20 +2446,21 @@
     // A plot watched (../../WORLD.md), read with this page's own three.js, to be drawn in its world (World.render)
     // where its layout puts it: its plot (or what its scene covers) and its units, lit as this page lights.
     async _watchStart(w, e) {
-      const hk = this._hooks;
-      if (!hk) throw new Error("a plot is drawn with this page's own three.js: v.host first");
+      const hk = this._hooks, wd = this._world;
+      if (!hk && !wd) throw new Error("a plot is drawn with this page's own three.js: v.host first (or, the person's page, v.world({ three, renderer }))");
       this._sceneDrop(w);
-      const T = hk.scene.three, s = this._sceneRead(T, e, w.id);
+      const T = hk ? hk.scene.three : wd.T, renderer = hk ? hk.scene.renderer : wd.renderer, s = this._sceneRead(T, e, w.id);
       s.plot = plotOf(e.plot, s.root, T);
       s.unit = Number(e.unit) > 0 ? Math.min(1000, Number(e.unit)) : 1;
       s.pose = { x: 0, y: 0, z: 0 }; s.yaw0 = 0; s.hostPose = null;
-      s.relight = [legacyLights(Number(e.three), isObj(e.renderer) ? e.renderer : null), legacyLights(Number(T.REVISION), hk.scene.renderer)];
+      s.relight = [legacyLights(Number(e.three), isObj(e.renderer) ? e.renderer : null), legacyLights(Number(T.REVISION), renderer)];
       relight(s.root, ...s.relight);
       this._sceneOwn(s);
       w.scene = s;
       this._landAttach(w);
+      if (w.home && wd) wd.listAt = -1;   // home has arrived: the world's own plot is known
       const key = w.host && w.host.key;
-      if (key && this.isGuest(key)) {   // a guest's plot: kept to draw while they are away (8.10), here and by visit-client
+      if (key && this.isGuest(key) && !w.home) {   // a guest's plot: kept to draw while they are away (8.10), here and by visit-client
         const k = this._kept.get(key) || { key, json: null, asked: false, built: null };
         if (!k.plot || JSON.stringify(k.plot) !== JSON.stringify(s.plot) || k.unit !== s.unit) this._send({ type: "plot_keep", key, name: w.host.name || "", plot: s.plot, unit: s.unit });
         this._kept.set(key, Object.assign(k, { name: w.host.name || "", plot: s.plot, unit: s.unit }));
@@ -2835,7 +2888,9 @@
       for (const w of this._watches.values()) if (!w.scene && !w.loading && !w.failed && now - (w.askedAt || w.since) > 3000) { w.askedAt = now; this._sceneResync(w); }
       if (now - (this._voiceAt || 0) >= 33) {   // voice: who is near, where each is heard from; and this room's own user's mark
         this._voiceAt = now;
-        const m = this._mark, h = this._home, away = this._inRoom() || (this._world && this._world.inside);
+        const o = this.role === "host" && this.owner && this._hosted.get(this.owner.channel);   // a host page: its owner, a visitor of its own, is who stands here
+        const m = this._mark, h = this.role === "host" ? (o && o.inside && o.pose ? { x: o.pose.x, y: Number(o.pose.y) || 0, z: o.pose.z } : null) : this._home;
+        const away = this.role !== "host" && (this._inRoom() || (this._world && this._world.inside));
         if (m) { m.visible = !!h && !away; if (h && !away) m.position.set(h.x, h.y + 1.5 / this._unit(), h.z); }
         const pm = this._phoneMark, pa = this._phoneAt;
         if (pm) { pm.visible = !!(this._phone && pa); if (pa) pm.position.set(pa.x, pa.y, pa.z); }
@@ -2872,7 +2927,7 @@
       let p;
       try {
         const turned = Object.assign({}, h.pose, { yaw: h.yaw0 + (input.yaw || 0), pitch: input.pitch || 0 });
-        const r = h.ride, who = { id: h.id, visitor: h.visitor, riding: r ? { id: r.id, name: r.name, fly: r.fly, speed: r.speed, lift: r.lift } : null };
+        const r = h.ride, who = { id: h.id, visitor: h.visitor, owner: !!h.owner, riding: r ? { id: r.id, name: r.name, fly: r.fly, speed: r.speed, lift: r.lift } : null };
         p = Object.assign({}, this._hooks.move(turned, input, dt, who) || turned);
         h.fails = 0;
       } catch (e) { return this._hookFailed(h, "move", e); }
@@ -3463,15 +3518,18 @@
   // and your page draws them itself, from v.chats); and a 🔊 over each one your user hears speaking (8.7; speaking:
   // false, and your page draws its own, from v.voices).
   class World {
-    constructor(v, { scene, renderer, ground = 0x30363d, gap = WORLD_GAP, clipOwn = true, bubbles = true, speaking = true } = {}) {
+    // A host page's world: its scene (clipped to its plot) and its renderer, friends' plots round it. A user page's
+    // (engine/SPEC.md 7): no scene of its own, its room comes from its host and is drawn as its own plot; `three` (any
+    // release this visit.js knows) and `renderer` are the page's.
+    constructor(v, { scene, renderer, three, ground = 0x30363d, gap = WORLD_GAP, clipOwn = true, bubbles = true, speaking = true } = {}) {
       const hk = v._hooks;
-      if (!hk) throw new Error("visit.world: v.host first (the world is drawn with your three.js, round your plot)");
-      this.v = v; this.T = hk.scene.three;
-      this.scene = scene || (hk.scene.root.isScene ? hk.scene.root : null);
-      this.renderer = renderer || hk.scene.renderer;
-      if (!this.scene || !this.renderer) throw new Error("visit.world needs { scene, renderer }: your whole scene, and the renderer that draws it");
+      if (!hk && !(v.role === "user" && three && three.REVISION && renderer)) throw new Error(v.role === "user" ? "visit.world needs { three, renderer }: the three.js this page draws with, and its renderer (its room comes from its host)" : "visit.world: v.host first (the world is drawn with your three.js, round your plot)");
+      this.v = v; this.T = hk ? hk.scene.three : three;
+      this.scene = hk ? scene || (hk.scene.root.isScene ? hk.scene.root : null) : null;
+      this.renderer = renderer || (hk && hk.scene.renderer);
+      if ((hk && !this.scene) || !this.renderer) throw new Error("visit.world needs { scene, renderer }: your whole scene, and the renderer that draws it");
       Object.assign(this, { gap: Number(gap) >= 0 ? Number(gap) : WORLD_GAP, clipOwn: clipOwn !== false, in: null, home: null, bounce: null, yHome: null, me: null,
-        bubbles: bubbles === false && speaking === false ? null : new Bubbles(hk.scene.three), showLines: bubbles !== false, showSpeaking: speaking !== false,
+        bubbles: bubbles === false && speaking === false ? null : new Bubbles(this.T), showLines: bubbles !== false, showSpeaking: speaking !== false,
         refused: new Map(), holders: new Map(), sent: { at: 0, sig: "" }, look: { yaw: 0, pitch: 0 }, list: [], listAt: -1, plots: [], told: new Map() });
       const T = this.T;
       this.commons = new T.Scene();   // the ground between plots
@@ -3495,7 +3553,15 @@
       const v = this.v, mine = v._plot(), unit = v._unit(), taken = [], out = [], wait = [];
       taken.push([mine.center[0] - mine.size[0] / 2, mine.center[1] - mine.size[1] / 2, mine.center[0] + mine.size[0] / 2, mine.center[1] + mine.size[1] / 2]);
       const xs = [];
-      for (const w of v._watches.values()) if (w.scene && w.host.key) xs.push({ key: w.host.key, name: w.host.name || "", w, plot: w.scene.plot, k: w.scene.unit / unit });
+      for (const w of v._watches.values()) {
+        if (!(w.scene && w.host.key)) continue;
+        if (w.home) {   // the person's own room (engine/SPEC.md 4): its own plot, where its scene has it, as it is
+          const x = { key: w.host.key, name: w.host.name || "", w, plot: w.scene.plot, k: 1, home: true, at: { x: w.scene.plot.center[0], z: w.scene.plot.center[1], turn: 0 } };
+          x.rect = this._rect(x); out.push(x);
+          continue;
+        }
+        xs.push({ key: w.host.key, name: w.host.name || "", w, plot: w.scene.plot, k: w.scene.unit / unit });
+      }
       for (const k of v._kept.values()) {   // a guest's plot while they are away (8.10): its last landscape, where it was
         if (xs.some(x => x.key === k.key) || !isObj(k.plot) || !v.isGuest(k.key)) continue;
         if (!k.json) { if (!k.asked) { k.asked = true; v._send({ type: "plot_load", key: k.key }); } continue; }
@@ -3520,7 +3586,7 @@
         taken.push(x.rect); out.push(x);
       }
       this.list = out; this.listAt = now;
-      this.plots = out.map(x => ({ key: x.key, name: x.name, at: x.at, rect: x.rect, inside: !!(x.w && x.w.inside), offline: !!x.kept }));
+      this.plots = out.map(x => ({ key: x.key, name: x.name, at: x.at, rect: x.rect, inside: !!(x.w && x.w.inside), offline: !!x.kept, home: !!x.home }));
       const psig = this.plots.map(p => p.key + (p.offline ? "~" : "")).join();
       if (psig !== this.plotSig) { this.plotSig = psig; queueMicrotask(() => v._changed()); }   // a plot came, went, or is kept while its office is away
       this._tell(out, mine, unit);
@@ -3533,6 +3599,7 @@
     _tell(out, mine, unit) {
       const v = this.v, r = x => Math.round(x * 100) / 100, size = v._plotMetres().map(r), now = new Set();
       for (const x of out) {
+        if (x.home) continue;   // (not a friend's)
         const at = { dx: r((x.at.x - mine.center[0]) * unit), dz: r((x.at.z - mine.center[1]) * unit), turn: x.at.turn, size }, sig = JSON.stringify(at);
         now.add(x.key);
         if (this.told.get(x.key) !== sig) { this.told.set(x.key, sig); v._send({ type: "seen", key: x.key, at }); }
@@ -3652,6 +3719,7 @@
       if (this.bounce) { const b = this.bounce; this.bounce = null; this.home = b; return Object.assign({}, b, { yaw: me.yaw, pitch: me.pitch, in: null }); }
       const list = this._layout();
       v._home = null;   // said below, where they end up
+      const user = v.role === "user", onto = (px, pz) => list.find(y => y.w && y.w.scene && !y.w.home && !y.w.inside && (this.refused.get(y.w.channel) || 0) <= now && within(y.rect, px, pz));
       let x = this.in != null ? list.find(y => y.w && y.w.channel === this.in) : null;
       if (x && !(x.w.inside && x.w.scene)) x = null;
       if (!x) {
@@ -3659,7 +3727,11 @@
         // came with, not one its host had us at, which a page that keeps the y it is given would otherwise keep.
         if (this.yHome != null) { me.y = this.yHome; this.yHome = null; }
         this.in = null;
-        x = list.find(y => y.w && y.w.scene && !y.w.inside && (this.refused.get(y.w.channel) || 0) <= now && within(y.rect, me.x, me.z));
+        x = onto(me.x, me.z);
+        if (!x && user) {   // a user page (engine/SPEC.md 4): home is a plot too, its host walks them; into it where they are
+          x = list.find(y => y.w && y.w.home && y.w.scene);
+          if (!x) { this.home = me; return Object.assign({}, me, { in: null }); }   // their room not here yet: nowhere to be
+        }
         if (!x) { me = this._walls(list, me); this.home = me; v._home = { x: me.x, y: me.y, z: me.z, yaw: me.yaw }; this._homeRide(me, dt); return Object.assign({}, me, { in: null }); }
         this._enter(x, me, now);
       }
@@ -3673,6 +3745,18 @@
       this._input(w, inp, yaw, me.pitch, now);
       const hp = s.hostPose, pl = s.plot, margin = 0.3 / x.k;
       if (!hp && now - s.inAt > ENTER_WAIT) { this._refused(w, "no answer"); return this._frame(0, me, {}); }   // its host never had us: back out
+      if (w.home) {   // at home, walked by its room: onto a friend's plot where the room has them on one; never off home by its edge
+        const at = new T.Vector3(s.pose.x + s.vis.x, 0, s.pose.z + s.vis.z).applyMatrix4(h.place.matrix), y = hp ? this._feet(x, s, h) : me.y;
+        const other = hp ? onto(at.x, at.z) : null;
+        if (other) {
+          const me2 = { x: at.x, y, z: at.z, yaw: me.yaw, pitch: me.pitch, air: me.air };
+          this._enter(other, me2, now);
+          return Object.assign({}, me2, { in: { key: other.key, name: other.name } });
+        }
+        this.home = { x: at.x, y, z: at.z, yaw: me.yaw, pitch: me.pitch };
+        v._home = { x: at.x, y, z: at.z, yaw: me.yaw };
+        return { x: at.x, y, z: at.z, yaw: me.yaw, pitch: me.pitch, in: null };
+      }
       if (hp && (Math.abs(hp.x - pl.center[0]) > pl.size[0] / 2 + margin || Math.abs(hp.z - pl.center[1]) > pl.size[1] / 2 + margin)) {
         this._exit(w);   // its host has us off its plot: home again, walking on from there
         const out = new T.Vector3(hp.x, 0, hp.z).applyMatrix4(h.place.matrix);
@@ -3699,6 +3783,7 @@
 
     _enter(x, me, now) {
       const w = x.w, s = w.scene, h = this._holder(x), p = new this.T.Vector3(me.x, 0, me.z).applyMatrix4(h.inverse), yaw = me.yaw - x.at.turn * Math.PI / 2;
+      if (this.in != null && this.in !== w.channel) { const was = this.v._watches.get(this.in); if (was) { was.inside = false; if (was.scene) was.scene.hostPose = null; } }   // out of the one before (its host told by visit-client)
       this.v._send({ type: "enter", channel: w.channel, pose: { x: p.x, y: me.y / x.k, z: p.z, yaw, air: me.air / x.k } });
       w.inside = true; this.in = w.channel;
       Object.assign(s, { pose: { x: p.x, y: 0, z: p.z }, yaw0: 0, hist: [], vis: { x: 0, y: 0, z: 0 }, hostPose: null, inAt: now });
@@ -3760,15 +3845,16 @@
         // ground between plots; then the rooms farthest first, the nearest last, so that each one's see-through things
         // (a name over a head, a window) land on what is behind them, not under a farther room drawn after it.
         const mask = camera.layers.mask, su = r.shadowMap.autoUpdate;
+        const hx = !this.scene && list.find(x => x.home), sky = this.scene || (hx ? hx.w.scene.root : this.commons);   // a user page: its room's sky
         r.clippingPlanes = []; r.shadowMap.autoUpdate = false; camera.layers.set(31);
-        try { r.render(this.scene, camera); } finally { camera.layers.mask = mask; r.shadowMap.autoUpdate = su; }
+        try { r.render(sky, camera); } finally { camera.layers.mask = mask; r.shadowMap.autoUpdate = su; }
         r.autoClear = false;
-        this.commons.fog = this.scene.fog || null;
+        this.commons.fog = sky.fog || null;
         r.render(this.commons, camera);
         const eye = camera.getWorldPosition(this._eye || (this._eye = new this.T.Vector3()));
         const far = q => Math.hypot(Math.max(q[0] - eye.x, 0, eye.x - q[2]), Math.max(q[1] - eye.z, 0, eye.z - q[3]));
         const home = [mine.center[0] - mine.size[0] / 2, mine.center[1] - mine.size[1] / 2, mine.center[0] + mine.size[0] / 2, mine.center[1] + mine.size[1] / 2];
-        const passes = [{ x: null, d: far(home) }, ...list.filter(x => x.kept || (x.w && x.w.scene)).map(x => ({ x, d: far(x.rect) }))].sort((a, b) => b.d - a.d);
+        const passes = [...(this.scene ? [{ x: null, d: far(home) }] : []), ...list.filter(x => x.kept || (x.w && x.w.scene)).map(x => ({ x, d: far(x.rect) }))].sort((a, b) => b.d - a.d);
         for (const { x } of passes) {
           if (!x) {   // your own room (its sky already drawn)
             const bg = this.scene.background;
@@ -3795,7 +3881,9 @@
     _bubbles(camera, list) {
       const v = this.v, b = this.bubbles, u = v._unit(), hk = v._hooks, me = this.me, x = this.in != null && list.find(p => p.w && p.w.channel === this.in);
       const mine = () => me ? { x: me.x, y: (Number(me.y) || 0) + 2.4 / u, z: me.z } : null;
-      if (!this.homeBodies || this.homeBodies.root !== hk.scene.root) this.homeBodies = { root: hk.scene.root, bodiesAt: 0 };   // your scene's bodies, looked for once a second
+      const homeRoot = hk ? hk.scene.root : (v._homeScene() || {}).root;   // your scene's bodies (a user page's: its room's, from its host), looked for once a second
+      if (!homeRoot) return;
+      if (!this.homeBodies || this.homeBodies.root !== homeRoot) this.homeBodies = { root: homeRoot, bodiesAt: 0 };
       const over = (h, up, gap) => b.over(v._body(this.homeBodies, h.id), up, gap) || (h.pose ? { x: h.pose.x, y: (Number(h.pose.y) || 0) + (h.eyes || 0) + gap * 2, z: h.pose.z } : null);
       let items = v._chatsIn("home", c => {
         if (c.mine) return mine();
@@ -3892,6 +3980,7 @@
   }
 
   function panel(element, v, { chat: withChat = true } = {}) {
+    v._as("user", "panel");
     if (!document.getElementById("visit-panel-css")) {
       const st = document.createElement("style"); st.id = "visit-panel-css"; st.textContent = PANEL_CSS; document.head.appendChild(st);
     }
@@ -4254,6 +4343,7 @@
   }
 
   function chat(v, { element = document.body, fade = CHAT_FADE, sound = true } = {}) {
+    v._as("user", "chat");
     if (!document.getElementById("visit-chat-css")) {
       const st = document.createElement("style"); st.id = "visit-chat-css"; st.textContent = CHAT_CSS; document.head.appendChild(st);
     }
@@ -4855,6 +4945,7 @@
   // sits. Pick a friend to see their view of the two of you (`v.seen`). What you place is kept by visit-client
   // (with VISIT_STATE_FILE, across reloads and restarts). { element, open(), close(), release() }
   function map(v, { parent = document.body } = {}) {
+    v._as("user", "map");
     if (!document.getElementById("visit-map-css")) {
       const st = document.createElement("style"); st.id = "visit-map-css"; st.textContent = MAP_CSS; document.head.appendChild(st);
     }
@@ -5075,6 +5166,7 @@
   // world" (with v.world) and "Unlink". Gone when the visit or link ends. { element, big, shrink(), grow(),
   // release() }
   function stage(v, { parent = document.body } = {}) {
+    v._as("user", "stage");
     if (!document.getElementById("visit-stage-css")) {
       const st = document.createElement("style"); st.id = "visit-stage-css"; st.textContent = STAGE_CSS; document.head.appendChild(st);
     }
@@ -5134,8 +5226,10 @@
     version: VERSION,
     // `threeBase`: where to fetch three.js from instead of the CDN ("{r}" the revision; the same files, checked
     // against the same hashes).
-    connect({ port, token, sim = {}, threeBase = null }) {
-      const c = new Client(port, token, sim, { threeBase });
+    // `url`: where visit-client is, a URL or a path on this origin (a workroom's server's relay), in place of `port`;
+    // `role`: "host" (the room) or "user" (the person) (engine/SPEC.md 7); neither: as before.
+    connect({ port, token, url = null, role = null, sim = {}, threeBase = null }) {
+      const c = new Client(port, token, sim, { threeBase, url, role });
       return c._open().then(() => c, e => { c.close(); throw e; });
     },
     walk,

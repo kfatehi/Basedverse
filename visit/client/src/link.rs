@@ -111,6 +111,90 @@ pub enum LinkCmd {
     Close(String),
 }
 
+/// The owner's visit (../../engine/SPEC.md 4): the two sides of a visit of this office's own, with no link between
+/// them. Each side's commands become the events the other side's link would have raised, checked as a link's are
+/// (a scene edit, an avatar, a possession unpacked with the same limits), in order. Returns (the host side's sender,
+/// the user side's sender).
+pub fn local_pair(core: mpsc::UnboundedSender<Ev>, host: String, user: String) -> (mpsc::Sender<LinkCmd>, mpsc::Sender<LinkCmd>) {
+    let (host_tx, host_rx) = mpsc::channel::<LinkCmd>(LOCAL_QUEUE);
+    let (user_tx, user_rx) = mpsc::channel::<LinkCmd>(LOCAL_QUEUE);
+    tokio::spawn(local_host_side(host_rx, user.clone(), core.clone()));
+    tokio::spawn(local_user_side(user_rx, host, user, core));
+    (host_tx, user_tx)
+}
+
+/// How many commands may wait between the two sides (a page behind loses deltas, as over a link).
+const LOCAL_QUEUE: usize = 256;
+
+/// The host's side of the owner's visit: what the room sends its owner, as the events the owner's side hears.
+async fn local_host_side(mut rx: mpsc::Receiver<LinkCmd>, to: String, core: mpsc::UnboundedSender<Ev>) {
+    while let Some(cmd) = rx.recv().await {
+        let sent = match cmd {
+            LinkCmd::Ctl(v) if v.get("bye").is_some() => break,
+            LinkCmd::Ctl(v) => core.send(Ev::LinkCtl { visit: to.clone(), msg: v }),
+            LinkCmd::Frame(f) => core.send(Ev::LinkFrame { visit: to.clone(), frame: f }),
+            LinkCmd::Scene(gz) => match tokio::task::spawn_blocking(move || frames::unpack_scene(&gz)).await {
+                Ok(Ok(json)) => match String::from_utf8(json) {
+                    Ok(json) => core.send(Ev::LinkScene { visit: to.clone(), json }),
+                    Err(_) => core.send(Ev::SceneLost { visit: to.clone() }),
+                },
+                _ => core.send(Ev::SceneLost { visit: to.clone() }),
+            },
+            LinkCmd::Land(gz) => core.send(Ev::LinkLand { visit: to.clone(), gz }),
+            LinkCmd::Audio(data) => core.send(Ev::LinkAudio { visit: to.clone(), data }),
+            LinkCmd::Relay(data) => core.send(Ev::LinkRelay { visit: to.clone(), data }),
+            LinkCmd::Voice { up, data } => core.send(Ev::LinkVoice { visit: to.clone(), up, data }),
+            LinkCmd::Media { id, mime, bytes } => core.send(Ev::LinkMedia { visit: to.clone(), id, mime, bytes }),
+            LinkCmd::Input(_) | LinkCmd::Avatar(_) | LinkCmd::Possession(..) => Ok(()),   // not a host's to send
+            LinkCmd::Close(_) => break,
+        };
+        if sent.is_err() {
+            break;
+        }
+    }
+}
+
+/// The owner's side of their visit: what the person sends their room, as the events the room's side hears; and the
+/// link's numbers, once a second (no link: direct, no round trip).
+async fn local_user_side(mut rx: mpsc::Receiver<LinkCmd>, to: String, own: String, core: mpsc::UnboundedSender<Ev>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    loop {
+        let sent = tokio::select! {
+            cmd = rx.recv() => match cmd {
+                Some(LinkCmd::Ctl(v)) if v.get("bye").is_some() => break,
+                Some(LinkCmd::Ctl(v)) => core.send(Ev::LinkCtl { visit: to.clone(), msg: v }),
+                Some(LinkCmd::Input(v)) => core.send(Ev::LinkInput { visit: to.clone(), msg: v }),
+                Some(LinkCmd::Avatar(gz)) => match tokio::task::spawn_blocking(move || frames::unpack_json(&gz, frames::MAX_AVATAR_JSON)).await {
+                    Ok(Ok(json)) => match String::from_utf8(json) {
+                        Ok(json) => core.send(Ev::LinkAvatar { visit: to.clone(), json }),
+                        Err(_) => { warn!("the owner's avatar is not UTF-8"); Ok(()) }
+                    },
+                    Ok(Err(e)) => { warn!("the owner's avatar is not what it should be: {e:#}"); Ok(()) }
+                    Err(e) => { warn!("{e}"); Ok(()) }
+                },
+                Some(LinkCmd::Possession(id, gz)) => match tokio::task::spawn_blocking(move || frames::unpack_json(&gz, frames::MAX_AVATAR_JSON)).await {
+                    Ok(Ok(json)) => match String::from_utf8(json) {
+                        Ok(json) => core.send(Ev::LinkPossession { visit: to.clone(), id, json }),
+                        Err(_) => { warn!("one of the owner's possessions is not UTF-8"); Ok(()) }
+                    },
+                    Ok(Err(e)) => { warn!("one of the owner's possessions is not what it should be: {e:#}"); Ok(()) }
+                    Err(e) => { warn!("{e}"); Ok(()) }
+                },
+                Some(LinkCmd::Audio(data)) => core.send(Ev::LinkAudio { visit: to.clone(), data }),
+                Some(LinkCmd::Relay(data)) => core.send(Ev::LinkRelay { visit: to.clone(), data }),
+                Some(LinkCmd::Voice { up, data }) => core.send(Ev::LinkVoice { visit: to.clone(), up, data }),
+                Some(LinkCmd::Media { id, mime, bytes }) => core.send(Ev::LinkMedia { visit: to.clone(), id, mime, bytes }),
+                Some(LinkCmd::Frame(_)) | Some(LinkCmd::Scene(_)) | Some(LinkCmd::Land(_)) => Ok(()),   // not a visitor's to send
+                Some(LinkCmd::Close(_)) | None => break,
+            },
+            _ = tick.tick() => core.send(Ev::LinkStats { visit: own.clone(), relay: false, rtt_ms: 0.0 }),
+        };
+        if sent.is_err() {
+            break;
+        }
+    }
+}
+
 /// Which relays the endpoint uses: the lobby's (or iroh's own if it names none), or none at all.
 pub enum Relays {
     Default,

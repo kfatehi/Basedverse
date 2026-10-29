@@ -1,6 +1,7 @@
 //! visit-client: Visit's local client (../SPEC.md). One per workroom per machine. It owns all networking
 //! (the lobby session, the links to other visit-clients, the visits), keeps them across page reloads,
-//! and serves the workroom's page on 127.0.0.1 only, behind a token. What it keeps, it keeps in its database
+//! and serves the workroom's pages (the room's, the person's: engine/SPEC.md 3) on 127.0.0.1 only, or on a
+//! container's own network, behind a token. What it keeps, it keeps in its database
 //! beside it (Postgres, ../SPEC.md 8.12), whose schema `visit-client migrate` makes.
 mod core;
 mod db;
@@ -33,15 +34,27 @@ struct Args {
     /// The sim, as name/version, shown to others.
     #[arg(long, env = "VISIT_SIM", default_value = "unknown/0")]
     sim: String,
-    /// The port on 127.0.0.1 for the page.
+    /// The port for the page.
     #[arg(long, env = "VISIT_PORT", default_value_t = 7401)]
     port: u16,
-    /// The page token (at least 32 hex characters, new each run). Prefer --token-file.
+    /// The address it answers the page on: 127.0.0.1, or, in a container, 0.0.0.0 (its container's own network,
+    /// where the workroom's server and the engine reach it by name; its port never published). Nothing else.
+    #[arg(long, env = "VISIT_LISTEN", default_value = "127.0.0.1")]
+    listen: std::net::IpAddr,
+    /// The page token (at least 32 hex characters, new each run): the host's, and a page without a role (engine/SPEC.md
+    /// 6.2). Prefer --token-file.
     #[arg(long, env = "VISIT_TOKEN", hide_env_values = true)]
     token: Option<String>,
     /// A file holding the page token.
     #[arg(long, env = "VISIT_TOKEN_FILE")]
     token_file: Option<PathBuf>,
+    /// The user token (as the page token: new each run, at least 32 hex characters, another one): what the workroom's
+    /// server relays a person with (engine/SPEC.md 6.3). Without one, no user connection is taken. Prefer --user-token-file.
+    #[arg(long, env = "VISIT_USER_TOKEN", hide_env_values = true)]
+    user_token: Option<String>,
+    /// A file holding the user token.
+    #[arg(long, env = "VISIT_USER_TOKEN_FILE")]
+    user_token_file: Option<PathBuf>,
     /// How many visitors the office takes at once (0-8).
     #[arg(long, env = "VISIT_MAX_VISITORS", default_value_t = 3)]
     max_visitors: u8,
@@ -157,6 +170,25 @@ async fn run() -> ExitCode {
     if token.len() < 32 || !token.bytes().all(|c| c.is_ascii_hexdigit()) {
         return bad_flags("the token must be at least 32 hex characters");
     }
+    let user_token = match (&a.user_token, &a.user_token_file) {
+        (_, Some(f)) => match std::fs::read_to_string(f) {
+            Ok(t) => Some(t.trim().to_string()),
+            Err(e) => return bad_flags(&format!("--user-token-file {}: {e}", f.display())),
+        },
+        (Some(t), None) => Some(t.trim().to_string()),
+        (None, None) => None,
+    };
+    if let Some(t) = &user_token {
+        if t.len() < 32 || !t.bytes().all(|c| c.is_ascii_hexdigit()) {
+            return bad_flags("the user token must be at least 32 hex characters");
+        }
+        if ct_eq(t, &token) {
+            return bad_flags("the user token must not be the page token: each opens its own role");
+        }
+    }
+    if !(a.listen.is_loopback() || a.listen.is_unspecified()) || a.listen.is_ipv6() {
+        return bad_flags("--listen: 127.0.0.1 (this machine only), or 0.0.0.0 (a container's own network, its port never published)");
+    }
     if !name_ok(&a.name) {
         return bad_flags("--name: 1-24 letters, digits, space, _ . -, starting and ending with a letter or digit");
     }
@@ -175,11 +207,12 @@ async fn run() -> ExitCode {
     let (name, version) = a.sim.split_once('/').unwrap_or((a.sim.as_str(), ""));
     let sim = json!({ "name": name, "version": version });
 
-    // 127.0.0.1 and nothing else: the page's side is never reachable from another machine.
-    let listener = match TcpListener::bind(("127.0.0.1", a.port)).await {
+    // 127.0.0.1, or a container's own network (--listen 0.0.0.0, its port never published): the page's side is never
+    // reachable from another machine.
+    let listener = match TcpListener::bind((a.listen, a.port)).await {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("visit-client: 127.0.0.1:{}: {e}", a.port);
+            eprintln!("visit-client: {}:{}: {e}", a.listen, a.port);
             return ExitCode::from(3);
         }
     };
@@ -203,7 +236,7 @@ async fn run() -> ExitCode {
     let hello = lobby::Hello { name: a.name.clone(), sim, status: "available".into(), max_visitors: a.max_visitors };
     tokio::spawn(lobby::run(a.lobby.clone(), hello, lobby_rx, core_tx.clone(), away));
     let origins: Vec<String> = a.origins.split(',').map(|o| o.trim().trim_end_matches('/').to_string()).filter(|o| !o.is_empty()).collect();
-    let state = page::PageState::new(token, origins, core_tx.clone());
+    let state = page::PageState::new(token, user_token, origins, core_tx.clone());
     tokio::spawn(async move {
         if let Err(e) = page::serve(listener, state).await {
             error!("the page server stopped: {e}");

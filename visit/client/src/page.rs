@@ -1,6 +1,7 @@
-//! The page side (../SPEC.md sections 3, 4.3 and 5): HTTP on 127.0.0.1 only. `/visit.js` (the library,
-//! built into this binary) and `/health` are public; `/ws` is the page connection, which must give the
-//! token in its first message, and, when `--origins` names the sim's own, come from one of them.
+//! The page side (../SPEC.md sections 3, 4.3 and 5; ../../engine/SPEC.md 3 and 6): HTTP on 127.0.0.1, or on a
+//! container's own network. `/visit.js` (the library, built into this binary) and `/health` are public; `/ws` is a
+//! page connection, which must give its role's token in its first message (`hello`, or a relay's preface before
+//! it), and, when `--origins` names the sim's own, come from one of them.
 use std::{
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -27,7 +28,7 @@ use tokio::{net::TcpListener, sync::mpsc};
 use tracing::{info, warn};
 
 use crate::{
-    core::{Ev, PageOut},
+    core::{Ev, PageOut, PageRole},
     ct_eq, VERSION,
 };
 
@@ -38,7 +39,9 @@ pub const FRAME_QUEUE: usize = 256;
 const LIBRARY: &str = include_str!("../web/visit.js");
 
 pub struct PageState {
+    /// The host's token (and a page without a role's), and the user's (none: no user connection is taken).
     pub token: String,
+    pub user_token: Option<String>,
     /// The pages' origins allowed to connect (`--origins`); empty: any, the token alone deciding.
     pub origins: Vec<String>,
     pub core: mpsc::UnboundedSender<Ev>,
@@ -46,8 +49,8 @@ pub struct PageState {
 }
 
 impl PageState {
-    pub fn new(token: String, origins: Vec<String>, core: mpsc::UnboundedSender<Ev>) -> Arc<PageState> {
-        Arc::new(PageState { token, origins, core, next_id: AtomicU64::new(1) })
+    pub fn new(token: String, user_token: Option<String>, origins: Vec<String>, core: mpsc::UnboundedSender<Ev>) -> Arc<PageState> {
+        Arc::new(PageState { token, user_token, origins, core, next_id: AtomicU64::new(1) })
     }
 }
 
@@ -85,29 +88,72 @@ async fn close(sock: &mut WebSocket, code: u16, why: &'static str) {
     let _ = sock.send(Message::Close(Some(CloseFrame { code, reason: why.into() }))).await;
 }
 
-async fn page(mut sock: WebSocket, st: Arc<PageState>) {
-    let hello = match tokio::time::timeout(Duration::from_secs(5), sock.recv()).await {
+/// The first text message within 5 s, as JSON (null: none, or not JSON).
+async fn first_text(sock: &mut WebSocket) -> Value {
+    match tokio::time::timeout(Duration::from_secs(5), sock.recv()).await {
         Ok(Some(Ok(Message::Text(t)))) => serde_json::from_str::<Value>(t.as_str()).unwrap_or(Value::Null),
         _ => Value::Null,
-    };
+    }
+}
+
+/// A wrong token: said, and closed 4401 after a moment (guessing is hopeless anyway, at 256 bits; slower still).
+async fn wrong_token(sock: &mut WebSocket, what: &str) {
+    warn!("a page gave a wrong {what}");
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    close(sock, 4401, "wrong token").await
+}
+
+async fn page(mut sock: WebSocket, st: Arc<PageState>) {
+    // A relay's preface first (engine/SPEC.md 6.3): the user token and the role are its; the page's hello follows,
+    // read for its proto and sim only. Else the page's hello, with its role's token (3.1).
+    let mut first = first_text(&mut sock).await;
+    let mut relayed: Option<PageRole> = None;
+    if first.get("type").and_then(Value::as_str) == Some("relay") {
+        if first.get("role").and_then(Value::as_str) != Some("user") {
+            return close(&mut sock, 4400, "a relay's role is \"user\"").await;
+        }
+        match &st.user_token {
+            Some(t) if ct_eq(first.get("token").and_then(Value::as_str).unwrap_or(""), t) => {}
+            _ => return wrong_token(&mut sock, "user token (a relay's)").await,
+        }
+        relayed = Some(PageRole::User);
+        first = first_text(&mut sock).await;
+    }
+    let hello = first;
     if hello.get("type").and_then(Value::as_str) != Some("hello") || hello.get("proto").and_then(Value::as_str) != Some(PROTO) {
         return close(&mut sock, 4400, "say hello, basedverse-visit-local/2").await;
     }
-    if !ct_eq(hello.get("token").and_then(Value::as_str).unwrap_or(""), &st.token) {
-        warn!("a page gave a wrong token");
-        tokio::time::sleep(Duration::from_millis(250)).await;   // guessing is hopeless anyway (256 bits); slower still
-        return close(&mut sock, 4401, "wrong token").await;
-    }
+    let role = match relayed {
+        Some(r) => r,
+        None => {
+            let role = match hello.get("role") {
+                None | Some(Value::Null) => PageRole::Both,
+                Some(Value::String(r)) if r == "host" => PageRole::Host,
+                Some(Value::String(r)) if r == "user" => PageRole::User,
+                _ => return close(&mut sock, 4400, "role is \"host\", \"user\", or none").await,
+            };
+            let given = hello.get("token").and_then(Value::as_str).unwrap_or("");
+            let ok = match role {
+                PageRole::User => st.user_token.as_deref().is_some_and(|t| ct_eq(given, t)),
+                PageRole::Host | PageRole::Both => ct_eq(given, &st.token),
+            };
+            if !ok {
+                return wrong_token(&mut sock, if role == PageRole::User { "user token" } else { "token" }).await;
+            }
+            role
+        }
+    };
     let id = st.next_id.fetch_add(1, Ordering::SeqCst);
     let (text_tx, mut text_rx) = mpsc::unbounded_channel::<PageOut>();
     let (frames_tx, mut frames_rx) = mpsc::channel::<Bytes>(FRAME_QUEUE);
-    if st.core.send(Ev::PageOpen { id, text: text_tx, frames: frames_tx }).is_err() {
+    let closer = text_tx.clone();
+    if st.core.send(Ev::PageOpen { id, role, text: text_tx, frames: frames_tx }).is_err() {
         return;
     }
     let sim = hello.get("sim").cloned().unwrap_or(Value::Null);
-    info!(id, %sim, "page connected");
+    info!(id, ?role, %sim, "page connected");
     let (mut sink, mut stream) = sock.split();
-    let writer = tokio::spawn(async move {
+    let mut writer = tokio::spawn(async move {
         loop {
             let sent = tokio::select! {
                 biased;   // what the page is told goes before the next frame
@@ -130,9 +176,18 @@ async fn page(mut sock: WebSocket, st: Arc<PageState>) {
             }
         }
     });
+    let mut closing = false;
     while let Some(Ok(m)) = stream.next().await {
         let ev = match m {
-            Message::Text(t) => Ev::PageMsg { id, msg: serde_json::from_str(t.as_str()).unwrap_or(Value::Null) },
+            Message::Text(t) => {
+                let msg: Value = serde_json::from_str(t.as_str()).unwrap_or(Value::Null);
+                if msg.get("type").and_then(Value::as_str) == Some("relay") {   // a preface out of place (6.3): closed 4400
+                    let _ = closer.send(PageOut::Close(4400, "a relay's preface comes first, once"));
+                    closing = true;
+                    break;
+                }
+                Ev::PageMsg { id, msg }
+            }
             Message::Binary(b) => Ev::PageBin { id, data: b },
             Message::Close(_) => break,
             _ => continue,
@@ -143,5 +198,8 @@ async fn page(mut sock: WebSocket, st: Arc<PageState>) {
     }
     let _ = st.core.send(Ev::PageClosed { id });
     info!(id, "page gone");
+    if closing {   // the close frame out first
+        let _ = tokio::time::timeout(Duration::from_millis(250), &mut writer).await;
+    }
     writer.abort();
 }
