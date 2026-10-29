@@ -9,6 +9,27 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v1.0.1 — 2026-10-29
+
+**The tests on every push, on a GPU** ([#19](https://github.com/sarmiena/Basedverse/pull/19), Keyvan's). A workflow
+(`.github/workflows/ci.yml`) runs the README's tests (the lobby, both unit suites, both end-to-end suites, and the
+browser test) on every push and pull request, on a self-hosted runner with a GPU, so the browser test's Chromes
+draw on it and never in software; its screenshots and logs are kept with the run. A fork's pull request runs there
+too, once a maintainer approves it.
+
+**Fixed in the browser test:** the chat checks counted every bubble over a speaker, and a fake microphone's tone (a
+beep every 500 ms) could put a 🔊 mark over someone at any moment, failing them now and then. They count the lines
+said.
+
+**Fixed: chat lines from before the page, in time order.** A line from before the page (one kept for you, one from
+another day) went just above the chat window's first note, after any others from before the page, newer ones
+included: a line from two days ago that came after one from a moment ago was drawn under it, and under the wrong
+day. Each now goes where its time puts it, and the days over the log follow. The browser test's check for it failed
+now and then for this reason (on CI first); it now makes that order on purpose.
+
+**What an integration does about it:** nothing. The protocols are 1.0.0's; the fix is in visit.js's chat window,
+which comes with visit-client.
+
 ## v1.0.0 — 2026-10-29 — the engine ([#17](https://github.com/sarmiena/Basedverse/issues/17))
 
 **Your room runs in the engine, a headless Chromium beside visit-client, and your browser is one more client of it**

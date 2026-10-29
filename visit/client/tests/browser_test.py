@@ -1039,12 +1039,19 @@ async def main():
         await a.js("cw2.release()")
         check("each line: when it came, dim before it (the time as this browser writes one)", await a.js(
             f"(l => l.dataset.time === new Date(Number(l.dataset.at)).toLocaleTimeString([], {{ hour: 'numeric', minute: '2-digit' }}) && getComputedStyle(l, '::before').content !== 'none')({cw}.querySelector('.log').lastChild)"), True)
+        # Two lines from before this page, the newer first (a line kept for B, then one from another day): each goes
+        # where its time puts it, not where it came; a day over each day's first line.
+        await b.js("v._chatMsg({ type: 'chat', scope: 'lobby', id: 'o-late', key: 'k-old', name: 'Old', text: 'from a moment ago', at: Date.now() - 5000 }, true)")
         await b.js("v._chatMsg({ type: 'chat', scope: 'lobby', id: 'o-old', key: 'k-old', name: 'Old', text: 'from two days ago', at: Date.now() - 2 * 86400000 }, true)")
         check("a line from another day: its day over it, and today's over the next", await b.until(
-            f"(c => (d => !!d && [d.previousElementSibling.className, d.previousElementSibling.textContent === new Date(Number(d.dataset.at)).toLocaleDateString([], {{ weekday: 'short', month: 'short', day: 'numeric' }}),"
-            f" (n => !!n && n.previousElementSibling.className === 'day' && n.previousElementSibling.textContent === new Date().toLocaleDateString([], {{ weekday: 'short', month: 'short', day: 'numeric' }}))"
+            "(dayName => "   # as the window writes a day: its year too, when not this year's
+            "(c => (d => !!d && [d.previousElementSibling.className, d.previousElementSibling.textContent === dayName(Number(d.dataset.at)),"
+            f" (n => !!n && n.previousElementSibling.className === 'day' && n.previousElementSibling.textContent === dayName(Date.now()))"
             f"([...c.querySelectorAll('.log .line[data-at]')].find(x => Number(x.dataset.at) > Number(d.dataset.at)))])"
-            f"([...c.querySelectorAll('.log .line')].find(x => x.textContent.endsWith('from two days ago'))))({cw})"), ["day", True, True])
+            f"([...c.querySelectorAll('.log .line')].find(x => x.textContent.endsWith('from two days ago'))))({cw})"
+            ")(at => (x => x.toLocaleDateString([], Object.assign({ weekday: 'short', month: 'short', day: 'numeric' }, x.getFullYear() !== new Date().getFullYear() ? { year: 'numeric' } : {})))(new Date(at)))"), ["day", True, True])
+        check("...and the two in time order, whichever came first", await b.js(
+            f"(l => l.indexOf('from two days ago') >= 0 && l.indexOf('from two days ago') < l.indexOf('from a moment ago'))([...{cw}.querySelectorAll('.log .line')].map(x => x.textContent.endsWith('from two days ago') ? 'from two days ago' : x.textContent.endsWith('from a moment ago') ? 'from a moment ago' : ''))"), True)
         await a.shot("a_chat.png")
         await b.shot("b_chat.png")
         check("six lines at once: the sixth not said (5 every 10 s)", await a.js("(r => r[5])(Array.from({ length: 6 }, (_, i) => v.say('n' + i)))"), False)
