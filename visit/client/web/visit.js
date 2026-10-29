@@ -4974,7 +4974,7 @@
         if (l && Math.abs(l.x - p.x) < 1e-6 && Math.abs(l.z - p.z) < 1e-6 && (l.turn | 0) === p.turn) pending.delete(key);
       }
       const mp = v._plot(), mine = [mp.center[0] - mp.size[0] / 2, mp.center[1] - mp.size[1] / 2, mp.center[0] + mp.size[0] / 2, mp.center[1] + mp.size[1] / 2];
-      const list = w.list.map(x => {
+      const list = w.list.filter(x => !x.home).map(x => {   // (a user page's own room is in the world's list as a plot too: "my room" here)
         const at = drag && drag.key === x.key ? drag.at : pending.get(x.key) || x.at;
         return { key: x.key, name: x.name, at, rect: w._rect({ at, plot: x.plot, k: x.k }), plot: x.plot, k: x.k, offline: !!x.kept,
           placed: pending.has(x.key) || v.layout.some(p => p.key === x.key) };
