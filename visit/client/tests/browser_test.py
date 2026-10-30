@@ -18,6 +18,7 @@ import math
 import os
 import re
 import secrets
+import socket
 import sys
 import tempfile
 import threading
@@ -30,7 +31,21 @@ import websockets  # noqa: E402
 from websockets.asyncio.server import serve  # noqa: E402
 
 BIN, CDP_A, CDP_B, OUT = sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4]
-LOBBY_PORT, WEB_PORT, PORT_A, PORT_B, PORT_C = 18770, 18771, 7421, 7422, 7423
+
+
+def free_ports(n):
+    """Ports nothing on this machine listens on now, n apart: the test runs on the host's network (a CI runner's too),
+    where a fixed one may be taken."""
+    socks = [socket.socket() for _ in range(n)]
+    for s in socks:
+        s.bind(("127.0.0.1", 0))
+    ports = [s.getsockname()[1] for s in socks]
+    for s in socks:
+        s.close()
+    return ports
+
+
+LOBBY_PORT, WEB_PORT, PORT_A, PORT_B, PORT_C = free_ports(5)
 TMP = tempfile.mkdtemp()
 fails = 0
 
@@ -514,14 +529,17 @@ async def main():
         await walk(a, await a.js("room.me.x"), await a.js("room.me.z"), 3.14159 / 2, 2.0, "room.where === null")   # turned round: back out west
         check("A walks back off B's plot: home again, and B's visitor gone", (await a.until("room.where === null && room.world.in === null"), await b.until("v.visitors.length === 0")), (True, True))
         check("A ends up west of B's plot, walking on in its own world", await a.js("room.me.x") < r[0], True)
-        await b.js("window.highest = 0; window.highT = setInterval(() => { for (const x of v.visitors) if (x.pose) highest = Math.max(highest, x.pose.y); }, 5)")
+        # B's height for A read where B takes it in (its spawn), as well as every 5 ms: a busy runner's timers are late,
+        # and B floats A down from the moment it is in.
+        await b.js("window.highest = 0; window.highT = setInterval(() => { for (const x of v.visitors) if (x.pose) highest = Math.max(highest, x.pose.y); }, 5);"
+                   " v._hostEnter = m => { Object.getPrototypeOf(v)._hostEnter.call(v, m); for (const x of v.visitors) if (x.pose) highest = Math.max(highest, x.pose.y); }")
         await a.js("Object.assign(room.me, { y: 4, air: 4 })")   # A flying at home, 4 m up, crosses onto B's plot (no flying there)
         await walk(a, r[0] - 1.0, midz, -3.14159 / 2, 1.5, "!!room.where")
         await a.js("room.me.air = 0")
         k = await a.js("room.world._layout().find(p => p.key === %s).k" % json.dumps(await a.js("v.offices.find(o => o.name === 'B').key")))
         check("A crosses onto B's plot in the air: B has it 4 m above its floor (in B's units)", await b.until("v.visitors.length === 1 && Math.abs(highest - 4 / %f) < 0.05" % k), True)
         check("and floats it down to its floor, as A's world shows", (await b.until("v.visitors.length === 1 && Math.abs(v.visitors[0].pose.y) < 0.01", 15), await a.until("Math.abs(room.atY) < 0.05", 15)), (True, True))
-        await b.js("clearInterval(highT)")
+        await b.js("clearInterval(highT); delete v._hostEnter")
         await walk(a, await a.js("room.me.x"), await a.js("room.me.z"), 3.14159 / 2, 2.0, "room.where === null")
         check("and A walks off again, home on the ground (not back up where it crossed)", (await b.until("v.visitors.length === 0"), abs(await a.js("room.me.y")) < 0.05), (True, True))
         await a.js("room.me.y = 0")   # on the ground again whatever the case above found, so what follows starts as it always has
@@ -1125,7 +1143,7 @@ async def main():
         await a.js("v.unlink()")
         await b.until("v.watchers.length === 0")
 
-        engine_port = int(os.environ.get("ENGINE_PORT") or 0)
+        engine_port = free_ports(1)[0] if os.environ.get("ENGINE", "1") != "0" else 0
         print("\nthe room and the person apart (engine/SPEC.md 3, 4, 7): C's room %s, C's person on a page of its own" % ("in the engine" if engine_port else "on a page of its own"))
         engine_flags = ("--engine-room-url", "http://127.0.0.1:%d/room.html?role=host&three=160&world=1" % WEB_PORT, "--engine-port", str(engine_port),
                         "--engine-debug") if engine_port else ()
