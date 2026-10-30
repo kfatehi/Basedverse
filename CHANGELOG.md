@@ -10,13 +10,18 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
-## v2.1.1 — 2026-10-30 — the wheel on interactions; interactions for the owner alone; the engine's pipe on Windows
+## v2.1.1 — 2026-10-30 — the wheel on interactions; interactions for the owner alone; the engine's pipe on Windows; visit as a library
 
 - **The engine on Windows speaks to its Chrome over a pipe**, as on Linux and macOS
   ([#26](https://github.com/sarmiena/Basedverse/issues/26), [engine/SPEC.md](engine/SPEC.md) 5.3), in place of a
   devtools port on 127.0.0.1 that any program on the machine could reach, and with it the room's page (its host
   token, the engine's key). Chrome inherits its two pipes and nothing else, a stop asks it to close before it is
   killed, and a `visit` killed outright no longer leaves a Chrome behind with an open port. Nothing to do.
+- **visit as a library** ([#29](https://github.com/sarmiena/Basedverse/pull/29)): a workroom's own Rust server can
+  link visit, its sign-in and its engine into one program of its own, in place of running `visit` beside it.
+  `visit::run(args, stop)` is the whole run (`stop` any future), `visit::run_with(args, stop, started)` hands over
+  the workroom's Postgres once it is ready (its port and URLs), and `Args` and its subcommands are public. The
+  `visit` program is the same: its flags, subcommands and behaviour unchanged. Nothing to do.
 
 - **The wheel points** ([visit/SPEC.md](visit/SPEC.md) 8.3). An interaction type may take the mouse wheel too
   (`wheel: true` in `visit.interactions`): turned over something marked with it, the wheel sends a point with
