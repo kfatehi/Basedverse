@@ -123,6 +123,14 @@ fn origin(url: &str) -> Option<String> {
     Some(format!("{scheme}://{}", rest.split('/').next()?))
 }
 
+/// The room's origin, if a browser would not take it as a secure context: http://, and not loopback.
+fn insecure(origin: &str) -> Option<&str> {
+    let host = origin.strip_prefix("http://")?;
+    let host = host.rsplit_once(':').filter(|(h, p)| !h.is_empty() && p.chars().all(|c| c.is_ascii_digit())).map_or(host, |(h, _)| h);
+    let loopback = host == "localhost" || host.ends_with(".localhost") || host == "[::1]" || host.starts_with("127.");
+    (!loopback).then_some(origin)
+}
+
 struct Engine {
     cfg: Config,
     origin: String,
@@ -251,6 +259,12 @@ impl Engine {
                                          // and nothing it plays reaches the machine's speakers (its audio still runs, for voiceAt)
                                          "--mute-audio"].map(String::from).to_vec();
             args.push(format!("--window-size={w},{h}"));
+            // the room's page is a secure context wherever the room is served from (an http:// room by its name on a
+            // container network, say): WebCodecs and AudioWorklet, which a room's own voices need (visit/SPEC.md 8.7),
+            // exist only in one. Loopback is one already.
+            if let Some(o) = insecure(&self.origin) {
+                args.push(format!("--unsafely-treat-insecure-origin-as-secure={o}"));
+            }
             if self.no_sandbox {
                 args.push("--no-sandbox".into());
             }
@@ -523,4 +537,18 @@ fn memory_mib(pid: u32) -> u64 {
         todo.extend(sys.processes().iter().filter(|(_, c)| c.parent() == Some(p)).map(|(k, _)| *k));
     }
     total / (1024 * 1024)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::insecure;
+
+    #[test]
+    fn a_room_off_loopback_over_http_is_made_a_secure_context() {
+        assert_eq!(insecure("http://board:3001"), Some("http://board:3001"));
+        assert_eq!(insecure("http://192.168.1.5"), Some("http://192.168.1.5"));
+        for secure in ["https://board.example", "http://127.0.0.1:3001", "http://localhost:3001", "http://room.localhost", "http://[::1]:3001"] {
+            assert_eq!(insecure(secure), None, "{secure}");
+        }
+    }
 }

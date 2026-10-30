@@ -266,7 +266,9 @@ it brings its own libraries and fonts (DejaVu), set for its process alone (`LD_L
 so a bare machine draws the same text as any other; on macOS and Windows, the system's fonts. It is started with
 `--disable-gpu --enable-unsafe-swiftshader --disable-dev-shm-usage --no-first-run --no-default-browser-check
 --autoplay-policy=no-user-gesture-required --mute-audio --window-size=<ENGINE_WINDOW>` (the page's audio runs with no
-click, for the room's own voices, ../visit/SPEC.md 8.7, and nothing of it reaches the machine's speakers) and a profile of its own (`engine/profile/` in the workroom's data directory, made
+click, for the room's own voices, ../visit/SPEC.md 8.7, and nothing of it reaches the machine's speakers; and, for a
+room served over http:// from anywhere but loopback, `--unsafely-treat-insecure-origin-as-secure=<its origin>`: those
+voices need WebCodecs and AudioWorklet, which a page has only in a secure context) and a profile of its own (`engine/profile/` in the workroom's data directory, made
 new at each start of the browser), the page's metrics set to `ENGINE_WINDOW` through the devtools protocol.
 
 **The devtools protocol** goes over Chrome's pipe (`--remote-debugging-pipe`), which nothing else on the machine
