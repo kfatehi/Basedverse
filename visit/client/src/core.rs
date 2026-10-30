@@ -3345,11 +3345,17 @@ fn possessions_from(l: Option<&Value>) -> Option<Vec<Value>> {
 
 fn clamp_input(m: &Value) -> Value {
     let step = |k: &str| m.get(k).and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0, |x| x.round().clamp(-1.0, 1.0) as i64);
+    // How far ahead or aside (8.2): a key's whole step, or an analog stick's push between, in hundredths. A whole one goes
+    // as before (an integer), so a host that compares it with 1 still does.
+    let axis = |k: &str| {
+        let x = m.get(k).and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0.0, |x| (x.clamp(-1.0, 1.0) * 100.0).round() / 100.0);
+        if x.fract() == 0.0 { json!(x as i64) } else { json!(x) }
+    };
     let angle = |k: &str, lim: f64| m.get(k).and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0.0, |x| x.clamp(-lim, lim));
     // What the visitor rides (8.11): one of its possessions; the host decides.
     let riding = m.get("riding").and_then(Value::as_str).filter(|r| link::possession_id_ok(r));
     json!({
-        "forward": step("forward"), "strafe": step("strafe"), "up": step("up"), "run": m.get("run").and_then(Value::as_bool).unwrap_or(false),
+        "forward": axis("forward"), "strafe": axis("strafe"), "up": step("up"), "run": m.get("run").and_then(Value::as_bool).unwrap_or(false),
         "riding": riding,
         "yaw": angle("yaw", 1e6), "pitch": angle("pitch", 1.4),
         "t": m.get("t").and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0.0, |x| x.clamp(0.0, 1e12)),
@@ -3420,7 +3426,11 @@ mod tests {
     #[test]
     fn inputs_are_clamped() {
         let i = clamp_input(&json!({ "forward": 5, "strafe": -0.6, "up": 0.7, "run": "yes", "yaw": 3.0, "pitch": -9 }));
-        assert_eq!(i, json!({ "forward": 1, "strafe": -1, "up": 1, "run": false, "riding": null, "yaw": 3.0, "pitch": -1.4, "t": 0.0 }));
+        assert_eq!(i, json!({ "forward": 1, "strafe": -0.6, "up": 1, "run": false, "riding": null, "yaw": 3.0, "pitch": -1.4, "t": 0.0 }));
+        // an analog stick's push: kept between -1 and 1, in hundredths; a whole step still an integer
+        let a = clamp_input(&json!({ "forward": 0.4567, "strafe": -1.0 }));
+        assert_eq!((a["forward"].clone(), a["strafe"].clone()), (json!(0.46), json!(-1)));
+        assert_eq!(clamp_input(&json!({ "forward": -7.25, "strafe": f64::NAN }))["forward"], json!(-1));
         let j = clamp_input(&json!({ "t": 1234.5 }));
         assert_eq!(j, json!({ "forward": 0, "strafe": 0, "up": 0, "run": false, "riding": null, "yaw": 0.0, "pitch": 0.0, "t": 1234.5 }));
         assert_eq!(clamp_input(&json!({ "riding": "my-dragon.2" }))["riding"], json!("my-dragon.2"));

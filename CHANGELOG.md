@@ -10,6 +10,16 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## Unreleased — analog sticks
+
+- **A controller's left stick is analog** ([visit/SPEC.md](visit/SPEC.md) 8.2). `forward` and `strafe` may be any
+  value from −1 to 1 (a stick's push, in hundredths), where they were −1, 0 or 1: visit-client clamps them instead of
+  rounding, a user page's `world.frame` passes them on instead of their sign, and `Visit.walk` goes the push's own way
+  at the speed it is pushed (a whole push, a key or a diagonal of two keys as before). A person's page at home with a
+  controller walks as gently as the stick says, in any direction, not in one of eight at full speed. A whole step is
+  still sent as an integer. **What an integration does:** nothing; a room's `move` that reads only the sign of
+  `forward` and `strafe` may read the fraction for a stick's speed.
+
 ## v2.1.1 — 2026-10-30 — the wheel on interactions; interactions for the owner alone; the engine's pipe on Windows; visit as a library
 
 - **The engine on Windows speaks to its Chrome over a pipe**, as on Linux and macOS
