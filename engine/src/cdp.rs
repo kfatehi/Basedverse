@@ -1,7 +1,7 @@
-//! One headless Chrome, spoken to over its devtools protocol: on Unix its pipe (`--remote-debugging-pipe`: commands
-//! in on its fd 3, answers and events out on its fd 4, each JSON ended by a NUL), so nothing else on the machine can
-//! reach it; on Windows a port on 127.0.0.1 it picks (`--remote-debugging-port=0`, read back from its
-//! `DevToolsActivePort`). Commands may carry a sessionId (a page attached flat); events go to the channel given.
+//! One headless Chrome, spoken to over its devtools protocol on its pipe (`--remote-debugging-pipe`: commands in,
+//! answers and events out, each JSON ended by a NUL), so nothing else on the machine can reach it. On Unix the pipe's
+//! ends are its fds 3 and 4; on Windows two inherited handles, named to it by `--remote-debugging-io-pipes=<in>,<out>`.
+//! Commands may carry a sessionId (a page attached flat); events go to the channel given.
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -88,10 +88,17 @@ impl Browser {
             (child, reader, writer)
         };
         #[cfg(windows)]
-        let mut child = {
-            let _ = std::fs::remove_file(profile.join("DevToolsActivePort"));
-            cmd.arg("--remote-debugging-port=0").arg("--remote-debugging-address=127.0.0.1");
-            cmd.spawn()?
+        let (mut child, reader, writer) = {
+            // Chrome takes the pipe's ends as handles it inherits, named by their values (inherited handles keep them),
+            // and adopts each only if it is a pipe. Inheritable only for this spawn: dropped as soon as it is made.
+            let (to_r, to_w) = std::io::pipe()?;
+            let (from_r, from_w) = std::io::pipe()?;
+            let (r, w) = (inheritable(&to_r)?, inheritable(&from_w)?);
+            cmd.arg("--remote-debugging-pipe").arg(format!("--remote-debugging-io-pipes={r},{w}"));
+            let child = cmd.spawn();
+            drop(to_r);
+            drop(from_w);
+            (child?, from_r, to_w)
         };
         let pid = child.id().unwrap_or(0);
         let stderr: Arc<Mutex<VecDeque<String>>> = Arc::default();
@@ -114,18 +121,12 @@ impl Browser {
             tokio::spawn(write_pipe(writer, out_rx));
             tokio::spawn(read_pipe(reader, pending.clone(), gone.clone(), events));
         }
+        // An anonymous pipe on Windows has no overlapped I/O for tokio to wait on: a thread each way, blocking.
         #[cfg(windows)]
         {
-            let ws = match connect_port(profile, &mut child).await {
-                Ok(ws) => ws,
-                Err(e) => {
-                    let _ = child.kill().await;
-                    return Err(e);
-                }
-            };
-            let (sink, stream) = futures_util::StreamExt::split(ws);
-            tokio::spawn(write_ws(sink, out_rx));
-            tokio::spawn(read_ws(stream, pending.clone(), gone.clone(), events));
+            let (p, g) = (pending.clone(), gone.clone());
+            std::thread::Builder::new().name("cdp-write".into()).spawn(move || write_blocking(writer, out_rx))?;
+            std::thread::Builder::new().name("cdp-read".into()).spawn(move || read_blocking(reader, p, g, events))?;
         }
         Ok(Browser { child: Mutex::new(Some(child)), pid, out: out_tx, pending, next: AtomicU64::new(0), gone, stderr })
     }
@@ -235,55 +236,55 @@ async fn read_pipe(mut r: tokio::net::unix::pipe::Receiver, pending: Pending, go
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
-        buf.extend_from_slice(&chunk[..n]);
-        while let Some(i) = buf.iter().position(|&b| b == 0) {
-            deliver(&buf[..i], &pending, &events);
-            buf.drain(..=i);
-        }
+        frames(&mut buf, &chunk[..n], &pending, &events);
     }
     closed(&pending, &gone);
 }
 
-#[cfg(windows)]
-type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
-/// Chrome's port and path from its profile's `DevToolsActivePort` (written once it listens), connected to.
-#[cfg(windows)]
-async fn connect_port(profile: &Path, child: &mut Child) -> anyhow::Result<Ws> {
-    let file = profile.join("DevToolsActivePort");
-    for _ in 0..300 {
-        if let Ok(Some(_)) = child.try_wait() {
-            anyhow::bail!("it exited at start");
-        }
-        if let Ok(s) = std::fs::read_to_string(&file) {
-            let mut lines = s.lines();
-            if let (Some(port), Some(path)) = (lines.next(), lines.next()) {
-                let (ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{}{}", port.trim(), path.trim())).await?;
-                return Ok(ws);
-            }
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+/// Bytes read from the pipe: each whole message (up to its NUL) delivered, the rest kept for the next read.
+fn frames(buf: &mut Vec<u8>, read: &[u8], pending: &Pending, events: &mpsc::UnboundedSender<Value>) {
+    buf.extend_from_slice(read);
+    while let Some(i) = buf.iter().position(|&b| b == 0) {
+        deliver(&buf[..i], pending, events);
+        buf.drain(..=i);
     }
-    anyhow::bail!("its devtools port never came")
+}
+
+/// A pipe's end made inheritable, as the number Chrome reads from `--remote-debugging-io-pipes` (an inherited handle
+/// keeps its value in the child). The caller drops it right after the spawn, so another child started in that moment
+/// is the only other one that could inherit it. Windows handles hold 32 significant bits: the value fits Chrome's u32.
+#[cfg(windows)]
+fn inheritable(end: &impl std::os::windows::io::AsRawHandle) -> std::io::Result<u32> {
+    use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
+    let h = end.as_raw_handle();
+    // SAFETY: a handle this process owns, open for the call (the borrow), its inherit flag alone changed.
+    if unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    u32::try_from(h as usize).map_err(|_| std::io::Error::other("a handle's value over 32 bits"))
 }
 
 #[cfg(windows)]
-async fn write_ws(mut sink: futures_util::stream::SplitSink<Ws, tokio_tungstenite::tungstenite::Message>, mut rx: mpsc::UnboundedReceiver<String>) {
-    use futures_util::SinkExt;
-    while let Some(m) = rx.recv().await {
-        if sink.send(tokio_tungstenite::tungstenite::Message::Text(m.into())).await.is_err() {
+fn write_blocking(mut w: std::io::PipeWriter, mut rx: mpsc::UnboundedReceiver<String>) {
+    use std::io::Write;
+    while let Some(m) = rx.blocking_recv() {
+        if w.write_all(m.as_bytes()).is_err() || w.write_all(b"\0").is_err() {
             return;
         }
     }
 }
 
 #[cfg(windows)]
-async fn read_ws(mut stream: futures_util::stream::SplitStream<Ws>, pending: Pending, gone: Arc<AtomicBool>, events: mpsc::UnboundedSender<Value>) {
-    use futures_util::StreamExt;
-    while let Some(Ok(m)) = stream.next().await {
-        if let tokio_tungstenite::tungstenite::Message::Text(t) = m {
-            deliver(t.as_bytes(), &pending, &events);
-        }
+fn read_blocking(mut r: std::io::PipeReader, pending: Pending, gone: Arc<AtomicBool>, events: mpsc::UnboundedSender<Value>) {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    let mut chunk = vec![0u8; 1 << 16];
+    loop {
+        let n = match r.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        frames(&mut buf, &chunk[..n], &pending, &events);
     }
     closed(&pending, &gone);
 }
@@ -291,4 +292,24 @@ async fn read_ws(mut stream: futures_util::stream::SplitStream<Ws>, pending: Pen
 /// The browser's executable in the Chrome unpacked at `top` (deps/README.md).
 pub fn executable(top: &Path) -> PathBuf {
     top.join(if cfg!(windows) { "chrome-headless-shell.exe" } else { "chrome-headless-shell" })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frames_deliver_whole_messages_across_reads() {
+        let pending: Pending = Arc::default();
+        let (tx, mut rx) = oneshot::channel();
+        pending.lock().unwrap().insert(1, tx);
+        let (events, mut got) = mpsc::unbounded_channel();
+        let mut buf = Vec::new();
+        frames(&mut buf, br#"{"method":"A"}"#, &pending, &events);
+        assert!(got.try_recv().is_err(), "no NUL yet: nothing delivered");
+        frames(&mut buf, b"\0{\"id\":1,\"result\":{}}\0{\"meth", &pending, &events);
+        assert_eq!(got.try_recv().unwrap()["method"], "A");
+        assert_eq!(rx.try_recv().unwrap()["id"], 1);
+        assert_eq!(buf, br#"{"meth"#);
+    }
 }

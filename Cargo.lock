@@ -882,13 +882,12 @@ version = "2.0.0"
 dependencies = [
  "anyhow",
  "axum",
- "futures-util",
  "libc",
  "serde_json",
  "sysinfo",
  "tokio",
- "tokio-tungstenite 0.30.0",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
