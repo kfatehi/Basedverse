@@ -191,8 +191,11 @@ impl Browser {
         }
     }
 
-    /// Stops it: asked first (SIGTERM on Unix), killed after 5 s.
+    /// Stops it: asked first (SIGTERM on Unix, Browser.close over its pipe on Windows, which has no SIGTERM), killed
+    /// after 5 s.
     pub async fn stop(&self) {
+        #[cfg(windows)]
+        let _ = self.post("Browser.close", json!({}), None);
         self.gone.store(true, Ordering::Relaxed);
         let Some(mut child) = self.child.lock().unwrap().take() else { return };
         #[cfg(unix)]
