@@ -247,7 +247,9 @@ impl Engine {
             let mut args: Vec<String> = ["--disable-gpu", "--enable-unsafe-swiftshader", "--no-first-run", "--no-default-browser-check",
                                          "--disable-dev-shm-usage",
                                          // its audio runs with no click (a room's own voices, visit/SPEC.md 8.7: encoded, never played here)
-                                         "--autoplay-policy=no-user-gesture-required"].map(String::from).to_vec();
+                                         "--autoplay-policy=no-user-gesture-required",
+                                         // and nothing it plays reaches the machine's speakers (its audio still runs, for voiceAt)
+                                         "--mute-audio"].map(String::from).to_vec();
             args.push(format!("--window-size={w},{h}"));
             if self.no_sandbox {
                 args.push("--no-sandbox".into());
