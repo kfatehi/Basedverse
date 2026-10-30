@@ -1247,6 +1247,22 @@ async def main():
         check("the room's own voice near its owner: the person's page hears it from its mark at home, not silent, near", await b.until(
             "(s => !!s && s.frames > 50 && s.level > 0.01 && s.near)(v._voices.get('relay:at:radio'))", 20), True)
         await hc.js("v.voiceAt('radio', null, null).then(() => (radio.stop(), true))")
+        # the lines said in the room, on the room's page (8.9, roomChat): off by default, asked for, then off again
+        await hc.js("(window.heardC = [], v.on('chat', l => heardC.push(l)), true)")
+        await b.js("v.say('before the room asks')")
+        await asyncio.sleep(1.5)
+        check("the room's page has none of its owner's lines by default", await hc.js("heardC.some(l => l.text === 'before the room asks')"), False)
+        await hc.js("(v.roomChat(true), true)")
+        await asyncio.sleep(0.5)
+        await b.js("v.say('who is at the desk?')")
+        check("asked (roomChat): the room's page has its owner's line, as its owner's, in its room", await hc.until(
+            "(l => !!l && l.owner === true && l.room === 'home' && !l.mine && l.text)(heardC.find(l => l.text === 'who is at the desk?'))", 10), "who is at the desk?")
+        check("...and the person's own page has it once, as before", await b.js("v.chatLog.filter(l => l.text === 'who is at the desk?').length"), 1)
+        await hc.js("(v.roomChat(false), true)")
+        await asyncio.sleep(0.5)
+        await b.js("v.say('after the room stops')")
+        await asyncio.sleep(1.5)
+        check("off again: none", await hc.js("heardC.some(l => l.text === 'after the room stops')"), False)
         # The owner's wheel (SPEC 8.3): the spinner held east of them, clear of the desk, a type for the owner alone.
         await hc.js("room.frozen = true; room.spinner.position.set(7, 1.5, 4.5); v.interactions({ spin: { cosmetic: true, label: 'spin it', who: 'owner', wheel: true, "
                     "run: e => { window.spins.push({ type: e.type, owner: !!e.visitor.owner, wheel: e.wheel }); } } })")

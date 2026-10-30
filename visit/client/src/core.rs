@@ -302,6 +302,9 @@ pub struct Core {
     voice: VoiceRoom,
     /// Lines this office's page said in the current window (8.9).
     says: (Instant, u32),
+    /// The room's page takes the lines said in its room (8.9, `room_chat`): its visitors' and its own user's, as
+    /// `chat`, when it is a page of its own (a room split by the engine, ../../engine/SPEC.md 3); off when it goes.
+    room_chat: bool,
     /// Lines each of this room's own figures said (`say_as`, 8.9), by its id, in its current window.
     npc_says: HashMap<String, (Instant, u32)>,
     /// The chat this office's user has had (8.9), theirs too: the last CHAT_KEPT lines, each with when, for a page
@@ -390,6 +393,7 @@ impl Core {
             phone: false,
             voice: VoiceRoom::default(),
             says: (Instant::now(), 0),
+            room_chat: false,
             npc_says: HashMap::new(),
             chat: loaded.chat.into_iter().collect(),
             db,
@@ -479,6 +483,7 @@ impl Core {
                     self.tell_hosted(json!({ "paused": true }));
                     self.set_hosting(None);   // no page, no room to show: not to be visited until one hosts again
                     self.set_phone(false);    // nor a phone to answer: the other side's calls end
+                    self.room_chat = false;   // nor its room's lines asked for: the next page asks again
                     self.voice.me = None;     // nobody placed: nobody hears, nor is heard, in this room
                     self.voice.phone = None;
                     self.voice.visitors.clear();
@@ -970,6 +975,12 @@ impl Core {
                 }
             }
             // A phone (8.8): this room has one (or not), and a call on one of its visits: ring, answer, hang up.
+            // The room's page asks for the lines said in its room (8.9), or no longer: a page of its own, beside its
+            // person's, which has every line as before.
+            "room_chat" => match m.get("on").and_then(Value::as_bool) {
+                Some(on) => self.room_chat = on,
+                None => self.page_error("bad_message", "on must be true or false", Some("room_chat")),
+            },
             "phone" => match m.get("on").and_then(Value::as_bool) {
                 Some(on) => self.set_phone(on),
                 None => self.page_error("bad_message", "on must be true or false", Some("phone")),
@@ -1110,6 +1121,10 @@ impl Core {
                 } else {
                     let host = self.visiting().and_then(|v| v.peer.get("key").and_then(Value::as_str)).unwrap_or(&self.key).to_string();
                     mine["conversation"] = json!(format!("room:{host}"));
+                    if host == self.key {   // said in this office's own room: its room's page, if it asked (room_chat)
+                        let ch = self.visits.get(HOME_HOST).map(|v| v.channel);
+                        self.room_chat_out(owner_line(&line, ch, &host));
+                    }
                     self.say_out(line);
                 }
                 self.keep_chat(mine);
@@ -2229,7 +2244,20 @@ impl Core {
         let mut chat = line;
         chat["type"] = json!("chat");
         chat["channel"] = json!(from);
+        let mut room = chat.clone();
+        room["conversation"] = json!(format!("room:{}", self.key));
+        self.room_chat_out(room);
         self.to_page(chat);
+    }
+
+    /// A line said in this office's room, to its room's page as `chat`, if it asked (`room_chat`, 8.9) and is a page of
+    /// its own: a page that is both has it as the person's. Not kept again: the person's page's chat keeps it.
+    fn room_chat_out(&self, chat: Value) {
+        let (Some(h), true) = (&self.host_page, self.room_chat) else { return };
+        if self.user_page.as_ref().is_some_and(|u| u.id == h.id) {
+            return;
+        }
+        let _ = h.text.send(PageOut::Text(chat.to_string()));
     }
 
     /// A line said in this office's room's chat (8.9: by its own user, or into it from a linked office): to every office
@@ -3162,7 +3190,7 @@ fn page_for(v: &Value) -> PageRole {
 /// Whether a page of this role may send a message of this type (../../engine/SPEC.md 3.3). A page without a role
 /// may send them all.
 fn role_may(role: PageRole, t: &str) -> bool {
-    const HOST: &[&str] = &["host", "pose", "avatar_want", "possession_want", "phone", "body", "say_as"];
+    const HOST: &[&str] = &["host", "pose", "avatar_want", "possession_want", "phone", "body", "say_as", "room_chat"];
     const USER: &[&str] = &["input", "point", "keyframe", "scene_resync", "avatar_clear", "possessions", "user", "say", "attention", "read",
         "unhold", "media_get", "preview", "history", "shared", "voice_join", "call", "speaker", "world", "enter", "exit", "place", "unplace",
         "seen", "plot_keep", "plot_load", "plot_forget", "link_where", "knock", "answer", "leave_lobby", "join_lobby", "status", "rename"];
@@ -3326,6 +3354,17 @@ fn voices_at(v: Option<&Value>) -> HashMap<u16, (String, [f64; 3])> {
     out
 }
 
+/// This office's user's own line in its own room, as its room's page has it (`room_chat`): the owner's, on their
+/// visit's channel there (none: no owner's visit), in the room's conversation.
+fn owner_line(line: &Value, channel: Option<u16>, key: &str) -> Value {
+    let mut c = line.clone();
+    c["type"] = json!("chat");
+    c["owner"] = json!(true);
+    c["channel"] = channel.map_or(Value::Null, |ch| json!(ch));
+    c["conversation"] = json!(format!("room:{key}"));
+    c
+}
+
 /// A spot in a room, in metres: [x, y, z], each finite and within 100 km; null or anything else, none.
 fn spot(v: Option<&Value>) -> Option<[f64; 3]> {
     let a = v?.as_array().filter(|a| a.len() == 3)?;
@@ -3446,6 +3485,14 @@ mod tests {
         assert_eq!(voices_at(Some(&json!(many))).len(), frames::MAX_VOICES_AT as usize);
         let mut w = (Instant::now(), 0);
         assert_eq!((0..100).filter(|_| at_counted(&mut w)).count(), VOICE_AT_PACKETS as usize);
+    }
+
+    #[test]
+    fn a_rooms_page_asks_for_its_rooms_lines() {
+        assert!(role_may(PageRole::Host, "room_chat") && role_may(PageRole::Both, "room_chat") && !role_may(PageRole::User, "room_chat"));
+        let line = owner_line(&json!({ "key": "k1", "name": "Ann", "text": "who called?" }), Some(3), "k1");
+        assert_eq!(line, json!({ "type": "chat", "key": "k1", "name": "Ann", "text": "who called?", "owner": true, "channel": 3, "conversation": "room:k1" }));
+        assert_eq!(owner_line(&json!({ "text": "hi" }), None, "k1")["channel"], Value::Null);
     }
 
     #[test]

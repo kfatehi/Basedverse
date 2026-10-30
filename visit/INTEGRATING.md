@@ -438,7 +438,10 @@ visit.host({
   game's party), `/room name` in a linked friend's, `/1` to the whole lobby
   (`visit.say(text, to)` from code). Something of your room's own that talks (a receptionist, a guide; not a
   person): name its object `visit:npc:<id>` and say its lines with `visit.sayAs(id, name, text)`: in your room, over
-  it, in everyone's chat under its own name, never as your user (on the engine, from the server page). With a world (step
+  it, in everyone's chat under its own name, never as your user (on the engine, from the server page). If it answers
+  what is said to it, and your room is split by the engine, the server page asks for the room's lines:
+  `visit.host({ ..., roomChat: true })` (or `visit.roomChat(true)`); each visitor's line, and your user's with
+  `owner: true`, then comes to it as the `chat` event (`room: "home"`), as it does to your user's page. With a world (step
   9) Visit draws the bubbles in your room too; without one, draw them yourself from `visit.chats`
   (`Visit.bubble(THREE, text, unit)` makes one). Make sure your room's keys ignore a text box (WASD there is typing,
   not walking), and leave Enter and `/` to the chat window. Something of yours bottom left: move the window

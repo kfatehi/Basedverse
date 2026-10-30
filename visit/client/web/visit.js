@@ -2357,6 +2357,8 @@
       // it, from above its plot, going round.
       const pv = hooks.preview;
       if (pv != null && !(isObj(pv) && ["x", "y", "z", "yaw", "pitch"].every(k => Number.isFinite(pv[k])))) throw new Error("visit.host: preview is { x, y, z, yaw, pitch }");
+      if (hooks.roomChat != null && typeof hooks.roomChat !== "boolean") throw new Error("visit.host: roomChat is true or false (8.9)");
+      if (hooks.roomChat != null) this._roomChat = hooks.roomChat;   // the lines said in the room, on this page (roomChat)
       this._hooks = hooks;
       this._sync = null;
       this._plotFrom = null;
@@ -2376,7 +2378,16 @@
       for (const w of this._watches.values()) if (w.failed) Object.assign(w, { failed: false, since: performance.now(), askedAt: 0 });   // now it can read them
       this._sendHost();
     }
-    _sendHost() { this._send({ type: "host", three: String(this._hooks.scene.three.REVISION) }); }
+    _sendHost() { this._send({ type: "host", three: String(this._hooks.scene.three.REVISION) }); if (this._roomChat) this._send({ type: "room_chat", on: true }); }
+    // The lines said in your room, on your room's page (8.9: its visitors' and its own user's, as the "chat" event,
+    // `owner: true` for your user's), when it is a page of its own: a room split by the engine, whose person's page has
+    // every line as before. For something of the room's that answers what is said in it (a receptionist). Off by
+    // default; `host({ roomChat: true })` turns it on as the room hosts. Kept across visit-client's restarts.
+    roomChat(on = true) {
+      this._as("host", "roomChat");
+      this._roomChat = !!on;
+      this._send({ type: "room_chat", on: this._roomChat });
+    }
 
     // A watcher stepping in is spawned where it stepped (`at`, in this room's terms; spawn may put it elsewhere), and
     // its input's yaw is its look in this room's terms (yaw0 0): it walks in from a world, not from its arrival.

@@ -10,6 +10,18 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## Unreleased — a room's page hears its room (roomChat)
+
+- **The lines said in a room, on its room's page** ([visit/SPEC.md](visit/SPEC.md) 8.9). In a room split by the
+  engine, the room's page had none of the lines said in it: `chat` went to the person's page alone. Something of the
+  room's that answers what is said (a receptionist) could not hear anyone. Now the room's page may ask:
+  `v.roomChat(true)`, or `v.host({ ..., roomChat: true })` (page → visit-client `room_chat` {`on`}). Each visitor's
+  line (by their visit's id) and its own user's (`owner: true`, on their visit's channel) then come to it as `chat`
+  too, in the room's conversation, without being kept a second time. Off by default, and off when the page goes; a
+  page that is both (no engine) has every line as before.
+- **What an integration does**: nothing, unless the room's server page answers what is said in the room. Then give
+  `v.host` `roomChat: true`, and listen to `chat` there (`room === "home"`, `owner` for your user's line).
+
 ## Unreleased — analog sticks
 
 - **A controller's left stick is analog** ([visit/SPEC.md](visit/SPEC.md) 8.2). `forward` and `strafe` may be any
