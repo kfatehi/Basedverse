@@ -3267,14 +3267,16 @@
   }
 
   // First-person walking for a host's move(): forward and strafe in the direction it looks, at `speed`
-  // units a second (twice that running), sliding along whatever `blocked(x, z)` says is in the way.
+  // units a second (twice that running), sliding along whatever `blocked(x, z)` says is in the way. An analog
+  // stick's push (forward and strafe between -1 and 1, 8.2) goes its own way, as fast as it is pushed: a whole
+  // push (or a key, a diagonal of two keys too) at `speed`.
   // Pose: { x, y, z, yaw, pitch }, y up, yaw 0 looking toward -z, positive turning left.
   function walk(pose, input, dt, { speed = 2.5, blocked = null } = {}) {
-    const f = input.forward || 0, r = input.strafe || 0;
+    const f = Math.max(-1, Math.min(1, Number(input.forward) || 0)), r = Math.max(-1, Math.min(1, Number(input.strafe) || 0));
     if (!f && !r) return pose;
     const sin = Math.sin(pose.yaw || 0), cos = Math.cos(pose.yaw || 0);
     let dx = -sin * f + cos * r, dz = -cos * f - sin * r;
-    const len = Math.hypot(dx, dz), step = speed * (input.run ? 2 : 1) * dt;
+    const len = Math.hypot(dx, dz), step = speed * (input.run ? 2 : 1) * dt * Math.min(1, len);
     dx = dx / len * step; dz = dz / len * step;
     const ok = (x, z) => !blocked || !blocked(x, z);
     if (ok(pose.x + dx, pose.z + dz)) return Object.assign({}, pose, { x: pose.x + dx, z: pose.z + dz });
@@ -3785,7 +3787,8 @@
       }
       this._homeRide(null, dt);   // on a plot: its host draws your mount
       const w = x.w, s = w.scene, h = this._holder(x), yaw = me.yaw - x.at.turn * Math.PI / 2;
-      const inp = { forward: Math.sign(Number(input.forward) || 0), strafe: Math.sign(Number(input.strafe) || 0), up: Math.sign(Number(input.up) || 0), run: !!input.run };
+      const axis = x => Math.max(-1, Math.min(1, Math.round((Number(x) || 0) * 100) / 100));   // a key's step, or a stick's push (8.2)
+      const inp = { forward: axis(input.forward), strafe: axis(input.strafe), up: Math.sign(Number(input.up) || 0), run: !!input.run };
       if (s.walk && !w.paused) { const q = walk({ x: s.pose.x, z: s.pose.z, yaw }, inp, dt, v._rideWalk(s.walk)); s.pose.x = q.x; s.pose.z = q.z; }
       s.hist.push([now, s.pose.x, s.pose.z]);
       while (s.hist.length > 2 && now - s.hist[0][0] > 2000) s.hist.shift();
