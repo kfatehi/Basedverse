@@ -240,10 +240,20 @@ async def main():
         check("both rooms connect, host their scenes, and see each other, ready", (bool(await a.until(both, 30)), bool(await b.until(both, 30))), (True, True))
         check("the token left the address bar", "token" in (await a.js("location.href")), False)
 
+        check("A's panel: Visit's version at its foot, and no Enter to chat line", await a.js(
+            "(t => t.includes('Visit ' + Visit.version) && !t.includes('Enter to chat'))(document.querySelector('.visit-panel').textContent)"), True)
+        await a.js("document.querySelector('.visit-panel button[data-v=fold]').click()")
+        check("A folds its panel: its first line alone, remembered, the element given marked", await a.until(
+            "document.querySelectorAll('.visit-panel .row').length === 1 && localStorage.getItem('visit:panel') === 'folded' && document.querySelector('.visit-panel').parentElement.classList.contains('visit-folded')"), True)
+
         print("\nknocking and letting in")
         await b.js("v.knock(v.offices.find(o => o.name === 'A').id, 'can I look around?')")
         check("A's panel shows the knock", await a.until("document.querySelector('.visit-panel .knock') && document.querySelector('.visit-panel .knock').textContent.includes('can I look around?')"), True)
+        check("folded, it shows that alone (no status, no door)", await a.js("!document.querySelector('.visit-panel select[data-v=status]')"), True)
         await a.js("document.querySelector('.visit-panel .knock button.go').click()")
+        await a.js("document.querySelector('.visit-panel button[data-v=fold]').click()")
+        check("and opened again: all of it back", await a.until(
+            "!!document.querySelector('.visit-panel select[data-v=status]') && localStorage.getItem('visit:panel') === 'open' && !document.querySelector('.visit-panel').parentElement.classList.contains('visit-folded')"), True)
         check("B is in A's room", await b.until("v.visiting && v.visiting.host.name"), "A")
         check("A has B as its visitor", await a.until("v.visitors.length && v.visitors[0].visitor.name"), "B")
         check("and move() is told whose pose it moves", await a.until("window.movedFor === v.visitors[0].id"), True)
@@ -325,6 +335,8 @@ async def main():
         rep = await a.until("(r => r.length >= 2 && r[r.length - 1])(v.perfReport())", 10)
         check("…a row a second: frames, stalls, Visit's work by part (A has a visitor: its scene scanned), what it had to do",
               (rep["fps"] > 0, "scan" in rep["parts"], rep["counts"]["visitors"], "long_tasks" in rep), (True, True, 1, True)) if rep else check("a telemetry row", None, "a row")
+        check("…each row with Visit's version, and the corner says it", (rep and rep.get("visit"), await a.js("document.querySelector('.visit-perf').textContent.includes('Visit ' + Visit.version)")),
+              (await a.js("Visit.version"), True))
         await a.js("document.querySelector('.visit-perf button[data-p=off]').click()")
         check("and off again: the corner goes, remembered off", await a.until("!document.querySelector('.visit-perf') && localStorage.getItem('visit:perf') === 'off'"), True)
         await a.js("room.scene.background.setHex(0x334455)")
