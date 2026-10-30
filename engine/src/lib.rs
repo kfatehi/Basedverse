@@ -245,7 +245,9 @@ impl Engine {
             let _ = std::fs::remove_dir_all(&self.cfg.profile);
             let _ = std::fs::create_dir_all(&self.cfg.profile);
             let mut args: Vec<String> = ["--disable-gpu", "--enable-unsafe-swiftshader", "--no-first-run", "--no-default-browser-check",
-                                         "--disable-dev-shm-usage"].map(String::from).to_vec();
+                                         "--disable-dev-shm-usage",
+                                         // its audio runs with no click (a room's own voices, visit/SPEC.md 8.7: encoded, never played here)
+                                         "--autoplay-policy=no-user-gesture-required"].map(String::from).to_vec();
             args.push(format!("--window-size={w},{h}"));
             if self.no_sandbox {
                 args.push("--no-sandbox".into());

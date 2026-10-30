@@ -884,6 +884,20 @@ async def main():
               await a.until("v.voices.length === 0 && v._voiceTo === 0")), (True, True))
         await b.js("room.me.x = %f" % bx0)
         await a.until("v.voices.length === 1")
+        # one of B's room's own voices (voiceAt: a receptionist's, a radio's; never a person's), 3 m from B: heard there
+        heard = "(s => !!s && s.frames > 50 && s.level > 0.01 && s.near)(v._voices.get('relay:at:radio'))"
+        check("a bad id or source for a room's own voice is refused", await b.js(
+            "Promise.all([v.voiceAt('../x', { x: 0, y: 0, z: 0 }, new MediaStream()).then(() => 'taken', e => 'refused'), "
+            "v.voiceAt('radio', { x: 0, y: 0, z: 0 }, 'a tone').then(() => 'taken', e => 'refused')])"), ["refused", "refused"])
+        await b.js("window.radio = new OscillatorNode(v._audio(), { frequency: 440 }); radio.start(); "
+                   "v.voiceAt('radio', { x: room.me.x + 3, y: 1.5, z: room.me.z }, radio)")
+        check("B's room's radio (voiceAt): its mark in B's scene, and where it is said to B's visit-client", await b.until(
+            "!!room.scene.getObjectByName('visit:at:radio') && JSON.parse(v._whereTold.sig).at.map(a => a[1]).join()"), "radio")
+        check("A, in B's room, hears it, from its mark there", await a.until(heard), True)
+        check("and B, at home, from where it is", await b.until(heard), True)
+        check("it is not among the people A and B hear", (await a.js("v.voices.every(x => !x.key.includes('at:'))"), await b.js("v.voices.every(x => !x.key.includes('at:'))")), (True, True))
+        await b.js("v.voiceAt('radio', null, null); radio.stop()")
+        check("ended: its mark gone, nothing more said of it", await b.until("!room.scene.getObjectByName('visit:at:radio') && JSON.parse(v._whereTold.sig).at.length === 0"), True)
 
         print("\nchat: a line said, over its speaker's head, for everyone in the room")
         # A view's lines said, not its 🔊 marks (keyed speak:): the microphones are still on, and the fake one's tone

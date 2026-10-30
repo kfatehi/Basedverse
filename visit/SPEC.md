@@ -387,7 +387,7 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `say` | `text` (1 to 200 characters; may be empty with pictures or links), `to`? (none or `"here"`; `{"whisper"}`; `{"key"}`; `"room"`; `"lobby"`), `media`? (pictures shared, at most 4: [{`id`, `mime`, `size`}]; among them at most one voice message, with `secs`), `links`? (at most 2: [{`url`, `title`, `description`, `site`, `image`}]) | a line this office's user says (8.9). No `to`: to everyone who can see them (the room they are in, and those who see it from outside). `{"whisper": "<office id>"}`: to that office's user alone, through the lobby (its errors, `ref: "whisper"`: `not_found`, `not_supported`). `{"whisper": "<key>", "name"?}` (0.22.0): to whoever has that office in the lobby, if it takes whispers; else kept for them (`held`), text only (`no_link` with pictures or links; `too_many` past 20 for one person or 100 in all), and passed on once they and this office are both in the lobby. `{"key"}`: into the room of an office linked with this one, either way (`no_link` if none). `"lobby"`: to everyone in the lobby (`not_supported` if the lobby does not carry chat). Control characters become spaces; trimmed; at most 5 every 10 s, whatever their `to` (`rate_limited`) |
 | `say_as` | `id` (1 to 40 letters, digits, `_` `.` `-`), `name` (what it goes by, 1 to 24 characters), `text` (1 to 200 characters) | a line one of this office's room's own figures says (8.9: a receptionist, a guide; never a person): in this office's room, to everyone who can see it, and in its chat, as `said` with `npc`. Never as this office's user: control characters become spaces; trimmed; at most 5 every 10 s from each figure, apart from the user's own (`rate_limited`); a bad `id` or empty `name` or `text`: `bad_message` |
 | `speaker` | `channel`, `on` (bool) | a call on this office's phone's speaker (8.8), or back to the ear (`no_call` if none is on there) |
-| `voice_where` | `me` [x, y, z] \| null, `phone` [x, y, z] \| null, `visitors` [[`channel`, x, y, z], …], `world` [[`key`, x, y, z], …] (metres, this room's terms) | where everyone in this office's room is (8.7): its own user (null: not in it), its phone, each visitor in it; and where its world has each friend at home in their own room, a plot in it (by their key; Visit 0.20). Who hears whom in the room, and across its plot's sides, goes by it. Sent when it changes, at most 10 a second |
+| `voice_where` | `me` [x, y, z] \| null, `phone` [x, y, z] \| null, `visitors` [[`channel`, x, y, z], …], `world` [[`key`, x, y, z], …], `at` [[`slot`, `id`, x, y, z], …] (metres, this room's terms) | where everyone in this office's room is (8.7): its own user (null: not in it), its phone, each visitor in it; where its world has each friend at home in their own room, a plot in it (by their key; Visit 0.20); and where each of the room's own voices is (`v.voiceAt`: its slot, 0 to 7, as its frames' channel; its id, as a possession's; a bad entry left out, a slot or an id given twice keeps its first; none: no voices of its own). Who hears whom in the room, and across its plot's sides, goes by it. Sent when it changes, at most 10 a second |
 | `media_get` | `id` | a picture or a voice message (8.12) this page would show or play: sent as a binary message (5.4, bit 7) once this office has it (it asks the link the line came by, if it has not), or `media_none` |
 | `preview` | `url` (http or https), `req` | a link's preview (8.12), made by this visit-client (it fetches the page once): `preview` back, with `req` |
 | `history` | `before`? (ms since 1970; none: now), `limit`? (1–200, 50), `req` | the chat before then (8.12), from the database: `history` back, newest last |
@@ -468,7 +468,7 @@ Both directions, one scene delta (or, from the host's page, one scene edit) per 
 | bytes | field |
 |---|---|
 | 0–1 | `channel`, u16 big-endian |
-| 2 | flags: bit 0 = a key delta (everything that has moved, 8.1); bit 1 = a scene edit (host page to visit-client only, alone); bit 2 = this office's avatar (8.6: page to visit-client only, alone, its channel 0); bit 3 = a packet of voice (8.7: from the page, its own user's, its channel saying where it may go, added: 1 in person, 2 their calls, 4 the room voice they are in; to it, another office's, on the visit's channel); bit 4 = someone else's voice passed on (8.7, 8.8: to the page only, on the visit's channel it came by: who spoke, an id or an office's key, then the packet); bit 5 = this room's landscape (8.10: page to visit-client only, alone, its channel 0; gzipped JSON, at most 16 MiB); bit 6 = one of this office's possessions' models (8.11: page to visit-client only, alone, its channel its slot in the `possessions` list; gzipped JSON, at most 4 MiB); bit 7 = a picture shared in chat (8.12: from the page, one to keep, alone, its channel a slot the page picks, answered by `media_ready`; to it, one it asked for, its channel 0: who it is (a length byte, its id), its type (a length byte, its MIME type), then its bytes; never dropped, unlike a frame) |
+| 2 | flags: bit 0 = a key delta (everything that has moved, 8.1); bit 1 = a scene edit (host page to visit-client only, alone); bit 2 = this office's avatar (8.6: page to visit-client only, alone, its channel 0); bit 3 = a packet of voice (8.7: from the page, its own user's, its channel saying where it may go, added: 1 in person, 2 their calls, 4 the room voice they are in; to it, another office's, on the visit's channel); bit 4 = someone else's voice passed on (8.7, 8.8: to the page only, on the visit's channel it came by: who spoke, an id or an office's key, then the packet); bits 3 and 4 together = a packet of one of this room's own voices (8.7: from the room's page only, its channel the voice's slot in `voice_where`'s `at`); bit 5 = this room's landscape (8.10: page to visit-client only, alone, its channel 0; gzipped JSON, at most 16 MiB); bit 6 = one of this office's possessions' models (8.11: page to visit-client only, alone, its channel its slot in the `possessions` list; gzipped JSON, at most 4 MiB); bit 7 = a picture shared in chat (8.12: from the page, one to keep, alone, its channel a slot the page picks, answered by `media_ready`; to it, one it asked for, its channel 0: who it is (a length byte, its id), its type (a length byte, its MIME type), then its bytes; never dropped, unlike a frame) |
 | 3–10 | timestamp, u64 big-endian, microseconds: the host page's clock when it took the delta (unused for an edit). Voice to the page: byte 3 says how it came (8.7: 0 in person, 1 a call, 2 a room voice), the rest 0 |
 | 11… | the delta (8.1), or the edit, gzipped JSON |
 
@@ -974,6 +974,17 @@ chat, everyone in it hears everyone else, wherever they are.
   than starts): its own page, if its user is; and each visitor, the owner's as it is, another visitor's passed on
   (`relay`: who spoke, by their visit's id there, and their name). It tells each in the room who is near them
   (`voice_near`, `near`), so a page with nobody near encodes nothing.
+- **A room's own voices** (`v.voiceAt(id, at, source)`: a receptionist's, a radio's; never a person's). The room's
+  page makes the sound (a MediaStream, or an AudioNode), encodes it as a microphone's (below; never while it is
+  silent, nor while nobody is in the room), and sends it to its visit-client (5.4, bits 3 and 4, its channel the
+  voice's slot), saying where it is with everyone else (`voice_where`'s `at`). It keeps an empty object named
+  `visit:at:<id>` in its scene where the voice is. The room's visit-client sends it on to whoever is within 45 m
+  of that spot, plus the margin, as it passes on a visitor's (`relay`, its id `at:<id>`, no name): each visitor
+  near it, and its own user's page if they are (on their own room's channel, 3.2; 0 for a page that is both). Each
+  page plays it from that object, by distance, as it plays a voice (an older page finds no such object, and plays
+  nothing). In person only: never to a call, a room voice, or across a plot's side. At most 8 at once in a room,
+  each at most 75 packets a second (more are dropped), and none of a slot the room has not placed. They are not in
+  `v.voices` (people), and their speaking has no 🔊.
 - **Hearing.** A page plays each voice from where the speaker is (Web Audio's HRTF panner, linear to nothing at 45
   m): at home, its visitors where it has them; in another's room, its owner from `visit:me` and the voices passed on
   from their bodies. Visit marks each one heard speaking with a 🔊 over them (Visit 0.13), in the views it draws: a
@@ -1251,6 +1262,10 @@ v.mounts                    // what they can ride: [{ id, name, fly, speed, lift
 v.ride(id); v.riding; v.mount   // get on a mount (null: off); what they ride; the one M (the panel's) gets them on
 v.rideSpeed; v.rideLift; v.rideFly   // their mount's, for your own room at home: times walking pace, metres up, flies
 v.setMic(on); v.mic         // your microphone (8.7): on, those near your user hear them, and those in a room voice with them (remembered)
+v.voiceAt(id, at, source)   // a voice of your room's own (8.7: the room's page; a receptionist, never a person), coming from
+                            //   `at` ({ x, y, z } in your units, or an object in your scene, followed): source a MediaStream
+                            //   or an AudioNode (any AudioContext's), null to end it; heard near it, as a voice. At most 8.
+                            //   A promise; it throws a bad id, `at` or source, and past 8 (code "too_many")
 v.voices; v.voiceRange      // who your user can hear, near them (as the room's visit-client says; across a plot's side, too): [{ key, name,
                             //   distance (m), speaking }]; metres (45)
 v.share(blob)               // a picture to share (8.12): kept by visit-client; resolves to { id, mime, size } (a bigger one,
@@ -1454,6 +1469,7 @@ slowly while its tab is hidden.
 | watches | 8 watchers of a plot, 8 plots watched; 30 knocks to watch a minute; one declined tried again after 20 s |
 | world | a plot not said: what its scene covers, at most 200 units a side; 4 units between plots in a ring; out of a plot 0.3 units past it; stepping in answered within 3 s |
 | layout, seen | 256 each |
+| a room's own voices | 8 at once; each a microphone's (Opus, 24 kbps, 20 ms a packet), at most 75 packets a second taken |
 | chat | a line at most 200 characters; 5 lines every 10 s, from a page and from each visitor, whatever the scope (the lobby counts its own, lobby lines and whispers, too); shown over a head 4 to 12 s, by its length; the chat window keeps 100 lines, and fades 20 s after the last |
 | pictures, voice messages | a picture at most 8 MiB, 4 a line; a voice message at most 2 MiB and 60 s, one a line |
 | mailbox | the newest 100 unread lines shown (all counted); looking: the page shown and focused, used in the last 2 minutes |

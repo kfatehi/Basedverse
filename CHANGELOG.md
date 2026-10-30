@@ -20,6 +20,25 @@ keep the names, so offices on different versions still meet and visit each other
   still sent as an integer. **What an integration does:** nothing; a room's `move` that reads only the sign of
   `forward` and `strafe` may read the fraction for a stick's speed.
 
+## Unreleased — a room's own voices (voiceAt)
+
+- **A room's own voices** ([#13](https://github.com/sarmiena/Basedverse/issues/13)'s voice half;
+  [visit/SPEC.md](visit/SPEC.md) 8.7). `v.voiceAt(id, at, source)`, from the room's page: something of the room's
+  own that speaks (a receptionist, a radio; never a person) is heard in the room as a person is, from where it is,
+  by distance, within 45 m. `at` is a spot (`{ x, y, z }`, the room's units) or an object in the room's scene
+  (followed as it moves); `source` a MediaStream or an AudioNode (of any AudioContext); `null` ends it. The page
+  encodes it as a microphone (Opus, 24 kbps; nothing while it is silent or nobody is in the room) and sends it to
+  its visit-client as a new frame (5.4: bits 3 and 4 together, its channel the voice's slot), with where it is
+  (`voice_where`'s `at`), and keeps an empty object `visit:at:<id>` in its scene there. The room's visit-client
+  passes it on as it does a visitor's voice (`relay`, id `at:<id>`) to every visitor near it, and to its own
+  user's page if they are near it. At most 8 a room, each at most 75 packets a second. A visitor's older
+  visit-client passes it on unchanged; an older page plays nothing of it.
+- **The engine's Chrome** starts with `--autoplay-policy=no-user-gesture-required` (engine/SPEC.md 5): the server
+  page's audio runs without a click, for its voices. Nothing is played on it.
+- **What an integration does**: nothing, unless something of the room's own speaks aloud. Then, on the room's
+  page: `await visit.voiceAt(id, its head, source)` while it speaks (or for as long as it is there), and stop
+  playing it yourself on your user's page: they hear it through Visit (visit/INTEGRATING.md, "Voice").
+
 ## v2.1.1 — 2026-10-30 — the wheel on interactions; interactions for the owner alone; the engine's pipe on Windows; visit as a library
 
 - **The engine on Windows speaks to its Chrome over a pipe**, as on Linux and macOS

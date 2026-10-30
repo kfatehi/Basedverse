@@ -75,6 +75,9 @@
   // calls, or both (VOICE_ROOM, VOICE_CALLS: its frame's channel).
   const VOICE_RATE = 48000, VOICE_FRAME = 960, VOICE_BITRATE = 24000, VOICE_LEAD = 0.06, VOICE_LATE = 0.4, VOICE_RANGE = 45, VOICE_ROOM = 1, VOICE_CALLS = 2, VOICE_CHANNEL = 4;
   const ROUTE_CALL = 1, ROUTE_VOICE = 2;   // how a voice came (to the page: the frame's first timestamp byte): in person (0), a call, a room voice
+  // A room's own voices (SPEC 8.7, voiceAt): at most VOICES_AT at once, each a frame of AUDIO and RELAY together
+  // (VOICE_AT), its channel its slot; never sent while it is silent.
+  const VOICES_AT = 8, VOICE_AT = 8 | 16;
   // A phone (SPEC 8.8) rings this long, unanswered, then stops.
   const CALL_RING_MS = 30000;
   // Chat (SPEC 8.9): a line is at most CHAT_LEN characters, at most CHATS of them every CHAT_WINDOW ms (as visit-client
@@ -751,6 +754,9 @@
       this._phoneOn = new Set();  // channels whose other office's room has a phone
       this._phone = false;        // this room has one
       this._mic = null;
+      this._atVoices = new Map(); // your room's own voices (voiceAt), by id: { id, slot, at, pos, mark, ... }
+      this._atSlot = 0;           // the slot the next one takes (round the VOICES_AT, so a slot just freed is not reused at once)
+      this._heardAt = new Map();  // a room's own voices heard at home (yours, as your visit-client sends them): "at:<id>" -> { name, at }
       this._home = null;          // where your user is at home (your world's frame, or listener()), in your units
       this.visiting = null;    // the room in the stage: { id, host, paused, link, inside } (a link's: inside once you go there)
       this.visitors = [];      // { id, visitor, pose }
@@ -830,7 +836,7 @@
       });
     }
     _send(m) { if (this._ws && this._ws.readyState === 1) this._ws.send(JSON.stringify(m)); }
-    close() { this._closed = true; this._loop.stop(); this._micStop(); for (const k of [...this._calls.keys()]) this.hangUp(k); this._dropAll(); if (this._ws) this._ws.close(); }
+    close() { this._closed = true; this._loop.stop(); this._micStop(); for (const id of [...this._atVoices.keys()]) this._voiceAtStop(id); for (const k of [...this._calls.keys()]) this.hangUp(k); this._dropAll(); if (this._ws) this._ws.close(); }
 
     _ready(m) {
       this.state = m.away ? "away" : m.online ? "online" : "offline";
@@ -1462,10 +1468,7 @@
       this._micStarting = (async () => {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
         const ctx = this._audio();
-        if (!this._micModule) {
-          this._micModule = URL.createObjectURL(new Blob([MIC_WORKLET], { type: "text/javascript" }));
-          await ctx.audioWorklet.addModule(this._micModule);
-        }
+        await this._worklet(ctx);
         const src = ctx.createMediaStreamSource(stream), node = new AudioWorkletNode(ctx, "visit-mic"), hush = ctx.createGain();
         hush.gain.value = 0; src.connect(node); node.connect(hush); hush.connect(ctx.destination);   // pulled by the graph, heard by nobody here
         const enc = new AudioEncoder({ output: c => this._voiceOut(c), error: e => console.warn("visit: the voice encoder failed", e) });
@@ -1480,6 +1483,15 @@
         };
       })().finally(() => { this._micStarting = null; });
       return this._micStarting;
+    }
+    // The microphone's worklet (MIC_WORKLET), added to the audio once: the microphone and a room's own voices use it.
+    _worklet(ctx) {
+      if (this._workletCtx !== ctx) {
+        if (!this._micModule) this._micModule = URL.createObjectURL(new Blob([MIC_WORKLET], { type: "text/javascript" }));
+        this._workletCtx = ctx;
+        this._workletReady = ctx.audioWorklet.addModule(this._micModule);
+      }
+      return this._workletReady;
     }
     _micMaybeStop() { if (!this.mic && ![...this._calls.values()].some(c => c.state === "on")) this._micStop(); }
     _micStop() {
@@ -1497,6 +1509,85 @@
       const data = new Uint8Array(chunk.byteLength);
       chunk.copyTo(data);
       this._ws.send(frameOf(this._voiceTo, AUDIO, data));
+    }
+
+    // A voice of your room's own (8.7: a receptionist, a radio; never a person), from a spot in it: `id` names it (1 to
+    // 40 letters, digits, _ . or -), `at` is where it comes from (your units, { x, y, z }, or an object in your scene,
+    // followed as it moves), `source` what it says: a MediaStream, or an AudioNode (of any AudioContext). Encoded as a
+    // microphone is (Opus, 24 kbps) while anyone is in your room and it is not silent; your visit-client sends it to
+    // those in your room near that spot, your own user among them, and each hears it from there, the nearer the
+    // louder, as a voice. null (or no source) ends it. The room's: at most VOICES_AT at once. A promise.
+    async voiceAt(id, at, source) {
+      this._as("host", "voiceAt");
+      const i = String(id == null ? "" : id);
+      if (!/^[A-Za-z0-9_.-]{1,40}$/.test(i)) throw new Error("visit.voiceAt: id is 1 to 40 letters, digits, _ . or -");
+      this._voiceAtStop(i);
+      if (source == null) return;
+      const where = at && at.isObject3D ? at : isObj(at) ? { x: Number(at.x) || 0, y: Number(at.y) || 0, z: Number(at.z) || 0 } : null;
+      if (!where) throw new Error("visit.voiceAt: at is { x, y, z } or an object in your scene");
+      const isStream = typeof MediaStream !== "undefined" && source instanceof MediaStream, isNode = typeof AudioNode !== "undefined" && source instanceof AudioNode;
+      if (!isStream && !isNode) throw new Error("visit.voiceAt: source is a MediaStream or an AudioNode");
+      if (typeof AudioEncoder === "undefined") throw new Error("visit: this browser cannot encode voice (WebCodecs)");
+      const used = new Set([...this._atVoices.values()].map(a => a.slot));
+      if (used.size >= VOICES_AT) { const e = new Error(`visit.voiceAt: at most ${VOICES_AT} voices of the room's own at once`); e.code = "too_many"; throw e; }
+      let slot = this._atSlot;
+      while (used.has(slot)) slot = (slot + 1) % VOICES_AT;
+      this._atSlot = (slot + 1) % VOICES_AT;
+      const a = { id: i, slot, at: where, pos: null, mark: null, t: 0, src: null, node: null, hush: null, enc: null, bridge: null };
+      this._atVoices.set(i, a);
+      const ctx = this._audio();
+      await this._worklet(ctx);
+      if (this._atVoices.get(i) !== a) return;   // ended (or replaced) meanwhile
+      if (isStream) a.src = ctx.createMediaStreamSource(source);
+      else if (source.context === ctx) a.src = source;
+      else { a.bridge = source.context.createMediaStreamDestination(); source.connect(a.bridge); a.src = ctx.createMediaStreamSource(a.bridge.stream); a.from = source; }
+      a.node = new AudioWorkletNode(ctx, "visit-mic"); a.hush = ctx.createGain();
+      a.hush.gain.value = 0; a.src.connect(a.node); a.node.connect(a.hush); a.hush.connect(ctx.destination);   // pulled by the graph, heard by nobody here
+      a.enc = new AudioEncoder({ output: c => this._voiceAtOut(a, c), error: e => console.warn("visit: a voice of the room's could not be encoded", e) });
+      a.enc.configure({ codec: "opus", sampleRate: VOICE_RATE, numberOfChannels: 1, bitrate: VOICE_BITRATE });
+      a.node.port.onmessage = e => {
+        const pcm = e.data, t = a.t;
+        a.t += pcm.length * 1e6 / VOICE_RATE;
+        if (a.enc.state !== "configured" || !a.pos || !pcm.some(x => x !== 0)) return;   // silent, or not placed yet: nothing sent
+        if (this.role === "host" && ![...this._hosted.values()].some(h => h.inside)) return;   // nobody in the room to hear it
+        a.enc.encode(new AudioData({ format: "f32-planar", sampleRate: VOICE_RATE, numberOfFrames: pcm.length, numberOfChannels: 1, timestamp: t, data: pcm }));
+      };
+    }
+    _voiceAtOut(a, chunk) {
+      if (this._atVoices.get(a.id) !== a || !this._ws || this._ws.readyState !== 1) return;
+      const data = new Uint8Array(chunk.byteLength);
+      chunk.copyTo(data);
+      this._ws.send(frameOf(a.slot, VOICE_AT, data));
+    }
+    _voiceAtStop(id) {
+      const a = this._atVoices.get(id);
+      if (!a) return;
+      this._atVoices.delete(id);
+      if (a.node) a.node.port.onmessage = null;
+      for (const off of [() => a.src && a.node && a.src.disconnect(a.node), () => a.node && a.node.disconnect(), () => a.hush && a.hush.disconnect(), () => a.bridge && a.from.disconnect(a.bridge)]) {
+        try { off(); } catch (e) { /* gone */ }   // (the page's own node keeps whatever else it was connected to)
+      }
+      if (a.enc && a.enc.state !== "closed") a.enc.close();
+      if (a.mark && a.mark.parent) a.mark.parent.remove(a.mark);
+    }
+    // Where each of your room's own voices is (each tick): an empty object named "visit:at:<id>" in your scene, there,
+    // so a visitor hears it from there; `pos`, in your units, for your visit-client.
+    _voicesAtPlace() {
+      const sc = this._hooks && this._hooks.scene;
+      for (const a of this._atVoices.values()) {
+        if (sc && (!a.mark || a.mark.parent !== sc.root)) {
+          if (a.mark && a.mark.parent) a.mark.parent.remove(a.mark);
+          a.mark = new sc.three.Object3D();
+          a.mark.name = "visit:at:" + a.id; a.mark.visible = false;
+          sc.root.add(a.mark);
+        }
+        if (a.at.isObject3D) {
+          if (!a.mark || !sc) { a.pos = null; continue; }
+          a.at.updateWorldMatrix(true, false);
+          sc.root.worldToLocal(a.at.getWorldPosition(a.mark.position));
+        } else if (a.mark) a.mark.position.set(a.at.x, a.at.y, a.at.z);
+        a.pos = a.mark ? { x: a.mark.position.x, y: a.mark.position.y, z: a.mark.position.z } : a.at;
+      }
     }
 
     // Which room your user is in: their own (at home), one they went to (a visit, a link gone there), or a plot they
@@ -1537,6 +1628,12 @@
         } else for (const h of this._hosted.values()) if (h.inside && h.pose && h.visitor.key && !h.owner) out.set(h.visitor.key, { key: h.visitor.key, name: h.visitor.name || "", channel: h.channel,
           x: h.pose.x * r.k, y: (Number(h.pose.y) || 0) * r.k, z: h.pose.z * r.k });
         for (const x of this._worldNear()) if (!out.has(x.key)) out.set(x.key, x);
+        const s = r.s || this._homeScene() || (this._hooks && this._hooks.scene), k = r.s ? r.k : this._unit();   // your room's own voices, from their marks
+        for (const [id, x] of this._heardAt) {
+          if (performance.now() - x.at >= 2000) { this._heardAt.delete(id); continue; }
+          const o = s && s.root && s.root.getObjectByName("visit:" + id);
+          if (o) out.set("relay:" + id, Object.assign({ key: "relay:" + id, name: x.name, channel: this.home ? this.home.channel : 0, at: true }, this._where(r.s || { v: o.position.clone() }, o, k)));
+        }
         return out;
       }
       const m = r.s.mark || (r.s.mark = r.s.root.getObjectByName("visit:me")), host = r.w.host || (this.visiting && this.visiting.host) || {};
@@ -1544,8 +1641,9 @@
       for (let o = m; o && shown; o = o.parent) if (!o.visible) shown = false;
       if (shown && host.key) out.set(host.key, Object.assign({ key: host.key, name: host.name || "", channel: r.w.channel }, this._where(r.s, m, r.k)));
       for (const [id, x] of r.s.relayed || []) {
-        const b = id === "phone" || id.startsWith("phone:") ? r.s.root.getObjectByName("visit:phone") : this._body(r.s, id);   // a call on the room's speaker: from its phone
-        if (b && performance.now() - x.at < 2000) out.set("relay:" + id, Object.assign({ key: "relay:" + id, name: x.name, channel: r.w.channel }, this._where(r.s, b, r.k)));
+        const b = id === "phone" || id.startsWith("phone:") ? r.s.root.getObjectByName("visit:phone")   // a call on the room's speaker: from its phone
+          : id.startsWith("at:") ? r.s.root.getObjectByName("visit:" + id) : this._body(r.s, id);       // one of the room's own voices: from its mark
+        if (b && performance.now() - x.at < 2000) out.set("relay:" + id, Object.assign({ key: "relay:" + id, name: x.name, channel: r.w.channel, at: id.startsWith("at:") }, this._where(r.s, b, r.k)));
       }
       return out;
     }
@@ -1579,7 +1677,7 @@
       this.voices = told
         ? told.map(n => { const key = r.kind === "home" ? n.key : n.phone ? "relay:phone" : n.id ? "relay:" + n.id : n.key;
             return { key, name: n.name, distance: n.distance, speaking: n.phone ? [...this._voices.keys()].some(k => k.startsWith("relay:phone") && speaking(k)) : speaking(key) }; })
-        : [...near.values()].filter(p => p.distance <= range).map(p => ({ key: p.key, name: p.name, distance: Math.round(p.distance * 10) / 10, speaking: speaking(p.key) }));
+        : [...near.values()].filter(p => p.distance <= range && !p.at).map(p => ({ key: p.key, name: p.name, distance: Math.round(p.distance * 10) / 10, speaking: speaking(p.key) }));
       const room = this.mic && !!r.ears && (this.voices.length > 0 || (r.kind !== "home" && !told)), calls = [...this._calls.values()].some(c => c.state === "on");
       const rv = this.roomVoice, chan = this.mic && !!rv && !rv.joining && rv.members.some(x => x.key !== this.key);
       this._voiceTo = (room ? VOICE_ROOM : 0) | (calls ? VOICE_CALLS : 0) | (chan ? VOICE_CHANNEL : 0);
@@ -1621,7 +1719,8 @@
       const where = this.role === "user" ? { world: r.kind === "home" ? this._worldNear().map(x => [x.key, q(x.x), q(x.y), q(x.z)]) : [] }
         : { me: this.role === "host" ? ownerAt : r.kind === "home" && r.ears ? [q(r.ears.x), q(r.ears.y), q(r.ears.z)] : null, phone: pa ? [q(pa.x * k), q((pa.y || 0) * k), q(pa.z * k)] : null,
           visitors: [...this._hosted.values()].filter(h => h.inside && h.pose).map(h => [h.channel, q(h.pose.x * k), q((Number(h.pose.y) || 0) * k), q(h.pose.z * k)]),
-          world: this.role !== "host" && r.kind === "home" ? this._worldNear().map(x => [x.key, q(x.x), q(x.y), q(x.z)]) : [] };
+          world: this.role !== "host" && r.kind === "home" ? this._worldNear().map(x => [x.key, q(x.x), q(x.y), q(x.z)]) : [],
+          at: [...this._atVoices.values()].filter(a => a.pos).map(a => [a.slot, a.id, q(a.pos.x * k), q(a.pos.y * k), q(a.pos.z * k)]) };
       const sig = JSON.stringify(where), now = performance.now();
       if (sig === this._whereTold.sig || now - this._whereTold.at < 100 || !this._ws || this._ws.readyState !== 1) return;
       Object.assign(this._whereTold, { sig, at: now });
@@ -1649,6 +1748,13 @@
         return this._voiceDecode(s, data);
       }
       if (route === ROUTE_CALL) return call && call.state === "on" ? this._callVoice(call, "call:" + (relayed ? id : p.key), relayed ? name : p.name || "", data) : undefined;
+      if (relayed && id.startsWith("at:")) {   // one of a room's own voices (voiceAt): from where its scene has it
+        const r = this._voiceRoom, home = this.home ? this.home.channel : 0;
+        if (!r || (r.kind === "home" ? ch !== home : !r.w || r.w.channel !== ch)) return;
+        if (r.kind === "home") this._heardAt.set(id, { name, at: performance.now() });
+        else (r.s.relayed || (r.s.relayed = new Map())).set(id, { name, at: performance.now() });
+        return this._voiceDecode(this._voiceOf("relay:" + id), data);
+      }
       if (relayed) {
         const r = this._voiceRoom;
         if (!r || r.kind === "home" || r.w.channel !== ch) return;
@@ -2953,6 +3059,7 @@
         if (m) { m.visible = !!h && !away; if (h && !away) m.position.set(h.x, h.y + 1.5 / this._unit(), h.z); }
         const pm = this._phoneMark, pa = this._phoneAt;
         if (pm) { pm.visible = !!(this._phone && pa); if (pa) pm.position.set(pa.x, pa.y, pa.z); }
+        if (this._atVoices.size) this._voicesAtPlace();
         this._phoneTick(now);
         const t0 = this._perf ? performance.now() : 0;
         this._voiceTick();

@@ -414,6 +414,13 @@ visit.host({
   `visit.listener({ x, y, z, yaw })` each frame. Your visitors it takes from where your room has them. A
   page's Content-Security-Policy needs `blob:` for worklets too (as for the ticker's Worker), and the browser
   WebCodecs (Chrome, Edge, Safari, recent Firefox). Headphones keep your user's speakers out of their microphone.
+  Something of your room's own that speaks (a receptionist, a radio; not a person): `visit.voiceAt(id, at, source)`,
+  from the room's page (on the engine, the server page). `at` is where it speaks from (your units, `{ x, y, z }`,
+  or the object that speaks, followed as it moves: her head), `source` a MediaStream or an AudioNode of any
+  AudioContext (a buffer of speech your server made, played into it), and `visit.voiceAt(id, at, null)` ends it.
+  Everyone in your room near it hears it from there, your own user included, as they hear each other: don't also
+  play it yourself on your user's page, or they hear it twice. Visit plays it nowhere on the page that makes it.
+  Give it the same `id` as its figure's lines (`sayAs`), so its voice and its words are one.
 - **Your landscape** (recommended, the bigger your room the more): mark what never changes, its ground, walls,
   trees and furniture, with `obj.userData.visitStatic = true` (everything under it goes with it). Visit then sends
   it to each visitor once, who keeps it (by its hash: the same landscape is never sent twice, across visits and

@@ -115,7 +115,7 @@ with `ref: "frame"` said at most once a second. A page without a role may send t
 |---|---|---|
 | `host`; its scene, edits and landscape as binary frames (5.4, bits 0, 1, 5); `pose` (its state for a visitor) | `input`, `point`, `keyframe`, `scene_resync` (for the rooms the person is in: home included, 4) | `max_visitors`, `door`, `guest_add`, `guest_remove` |
 | `avatar_want`, `possession_want` (asking visitors for their models) | the avatar and possessions (5.4, bits 2, 6), `avatar_clear`, `possessions` | `avatars`, `avatar_use` |
-| `voice_where` with `me`, `phone`, `visitors` (where the room has everyone in it, its owner among them) | `voice_where` with `world` (where the person's world has friends) | `ban`, `voice_kick` |
+| `voice_where` with `me`, `phone`, `visitors` (where the room has everyone in it, its owner among them), `at` (its own voices, `v.voiceAt`; their packets, visit/SPEC.md 5.4 bits 3 and 4) | `voice_where` with `world` (where the person's world has friends) | `ban`, `voice_kick` |
 | `phone` (the room has one, or no longer); `say_as` (a line one of the room's own figures says: a receptionist, a guide; visit/SPEC.md 8.9) | the microphone (5.4, bit 3), `voice_join`, `call`, `speaker` | `end` (a visit ended by either: a kick, or leaving); `bye` (the page going, kept by the browser) |
 | | `user` (the name), `say`, `attention`, `read`, `unhold`, `media_get`, pictures and voice messages (5.4, bit 7), `preview`, `history`, `shared` | `status`, `rename` |
 | | `world`, `enter`, `exit`, `place`, `unplace`, `seen`, `plot_keep`, `plot_load`, `plot_forget`, `link_where` | |
@@ -265,7 +265,8 @@ with (`visit --version` names it), carried inside `visit` and unpacked once into
 it brings its own libraries and fonts (DejaVu), set for its process alone (`LD_LIBRARY_PATH`, `FONTCONFIG_FILE`),
 so a bare machine draws the same text as any other; on macOS and Windows, the system's fonts. It is started with
 `--disable-gpu --enable-unsafe-swiftshader --disable-dev-shm-usage --no-first-run --no-default-browser-check
---window-size=<ENGINE_WINDOW>` and a profile of its own (`engine/profile/` in the workroom's data directory, made
+--autoplay-policy=no-user-gesture-required --window-size=<ENGINE_WINDOW>` (the page's audio runs with no click, for
+the room's own voices: ../visit/SPEC.md 8.7) and a profile of its own (`engine/profile/` in the workroom's data directory, made
 new at each start of the browser), the page's metrics set to `ENGINE_WINDOW` through the devtools protocol.
 
 **The devtools protocol** goes over Chrome's pipe (`--remote-debugging-pipe`), which nothing else on the machine

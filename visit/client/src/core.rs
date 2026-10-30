@@ -194,6 +194,10 @@ struct VoiceRoom {
     world: HashMap<String, [f64; 3]>,
     world_told: HashSet<String>,
     world_heard: HashSet<String>,
+    /// The room's own voices (8.7, `voice_at`): by slot, its id and where it is; and the packets each sent in the
+    /// current second.
+    at: HashMap<u16, (String, [f64; 3])>,
+    at_sent: HashMap<u16, (Instant, u32)>,
 }
 
 /// The most control messages a link's other side may send a second; more are dropped (a peer flooding
@@ -209,6 +213,9 @@ const INPUTS_PER_SECOND: u32 = 120;
 /// their distances at most every NEAR_EVERY.
 const VOICE_RANGE: f64 = 45.0;
 const VOICE_MARGIN: f64 = 15.0;
+/// The most packets a second taken from each of a room's own voices (8.7: one every 20 ms, and some to spare for an
+/// encoder's bursts); more are dropped.
+const VOICE_AT_PACKETS: u32 = 75;
 const NEAR_EVERY: Duration = Duration::from_secs(1);
 /// Chat (8.9): a line said is at most SAY_LEN characters; each office says at most SAYS lines a SAY_WINDOW (its
 /// page, and each visitor in its room, apart).
@@ -475,6 +482,7 @@ impl Core {
                     self.voice.me = None;     // nobody placed: nobody hears, nor is heard, in this room
                     self.voice.phone = None;
                     self.voice.visitors.clear();
+                    self.voice.at.clear();    // and the room's own voices with it
                 }
                 if role != PageRole::Host {   // the person's page went
                     self.user_page = None;
@@ -1234,6 +1242,9 @@ impl Core {
                         let a = e.as_array().filter(|a| a.len() == 4)?;
                         Some((u16::try_from(a[0].as_u64()?).ok()?, spot(Some(&json!(a[1..])))?))
                     }).collect();
+                    self.voice.at = voices_at(m.get("at"));
+                    let at = &self.voice.at;
+                    self.voice.at_sent.retain(|slot, _| at.contains_key(slot));
                 }
                 if role != PageRole::Host {   // the person's world: where it has its friends at home in their own rooms (plots in it): [key, x, y, z]
                     self.voice.world = m.get("world").and_then(Value::as_array).into_iter().flatten().take(64).filter_map(|e| {
@@ -1437,6 +1448,9 @@ impl Core {
         }
         if let Some((to, audio)) = frames::audio_from_page(data) {   // this office's user's voice: this visit-client decides who hears it
             return self.voice_out(to, audio);
+        }
+        if let Some((slot, audio)) = frames::voice_at_from_page(data) {   // one of the room's own voices: to those near it
+            return self.voice_at_out(slot, audio);
         }
         if let Some((slot, gz)) = frames::possession_from_page(data) {   // a possession's model: to every host that asked for it
             let Some((p, kept)) = self.possessions.get_mut(slot as usize) else { return };
@@ -1844,6 +1858,24 @@ impl Core {
                 self.voice_to(&room, true, &head);
             }
         }
+    }
+
+    /// A packet of one of this room's own voices (8.7, `voice_at`), from its page: to everyone in the room within reach
+    /// of where it is, as a visitor's voice is passed on (`relay`, its id `at:<id>`), and to this office's page if its
+    /// user is that near. In person only: not to a call, nor a room voice. A slot the room has not placed, or one
+    /// sending more than VOICE_AT_PACKETS a second, is dropped.
+    fn voice_at_out(&mut self, slot: u16, voice: Bytes) {
+        let Some((id, at)) = self.voice.at.get(&slot).cloned() else { return };
+        if !at_counted(self.voice.at_sent.entry(slot).or_insert((Instant::now(), 0))) {
+            return;
+        }
+        let head = frames::relay_head(&format!("at:{id}"), "", &voice);
+        let reach = VOICE_RANGE + VOICE_MARGIN;
+        if self.voice.me.is_some_and(|me| flat(me, at) <= reach) {   // its owner: on their own room's channel (none: a page that is both)
+            let ch = self.visits.get(HOME_USER).filter(|v| v.up).map_or(0, |v| v.channel);
+            self.voice_to_page(ch, frames::ROUTE_NEAR, &head, true);
+        }
+        self.relay_to(&self.within(at, reach, None), head);
     }
 
     /// A packet of voice over a link (`relayed`: someone else's, passed on, with who spoke), heard one way only (8.7):
@@ -3145,7 +3177,7 @@ fn role_may(role: PageRole, t: &str) -> bool {
 /// and landscape are the host's; the person's avatar, possessions, voice and pictures are the user's.
 fn frame_may(role: PageRole, b: &[u8]) -> bool {
     let Some(flags) = b.get(2) else { return true };   // (malformed: refused later, as such)
-    let users = flags & (frames::AVATAR | frames::AUDIO | frames::POSSESSION | frames::MEDIA) != 0;
+    let users = *flags != frames::VOICE_AT && flags & (frames::AVATAR | frames::AUDIO | frames::POSSESSION | frames::MEDIA) != 0;   // the room's own voices: the room's
     match role {
         PageRole::Both => true,
         PageRole::Host => !users,
@@ -3268,6 +3300,32 @@ fn counted(w: &mut (Instant, u32)) -> bool {
     w.1 <= SAYS
 }
 
+/// One more packet from one of a room's own voices in its current second: false past VOICE_AT_PACKETS.
+fn at_counted(w: &mut (Instant, u32)) -> bool {
+    if w.0.elapsed() >= Duration::from_secs(1) {
+        *w = (Instant::now(), 0);
+    }
+    w.1 += 1;
+    w.1 <= VOICE_AT_PACKETS
+}
+
+/// The room's own voices, as its page places them (`voice_where`'s `at`: [[slot, id, x, y, z], ...], metres): by
+/// slot (below MAX_VOICES_AT), its id (as a possession's) and where it is. A bad entry is left out, and a slot or an
+/// id given twice keeps its first.
+fn voices_at(v: Option<&Value>) -> HashMap<u16, (String, [f64; 3])> {
+    let mut out: HashMap<u16, (String, [f64; 3])> = HashMap::new();
+    for e in v.and_then(Value::as_array).into_iter().flatten().take(2 * frames::MAX_VOICES_AT as usize) {
+        let Some(a) = e.as_array().filter(|a| a.len() == 5) else { continue };
+        let slot = a[0].as_u64().and_then(|s| u16::try_from(s).ok()).filter(|s| *s < frames::MAX_VOICES_AT);
+        let id = a[1].as_str().filter(|id| link::possession_id_ok(id));
+        let (Some(slot), Some(id), Some(at)) = (slot, id, spot(Some(&json!(a[2..])))) else { continue };
+        if !out.contains_key(&slot) && !out.values().any(|(i, _)| i == id) {
+            out.insert(slot, (id.to_string(), at));
+        }
+    }
+    out
+}
+
 /// A spot in a room, in metres: [x, y, z], each finite and within 100 km; null or anything else, none.
 fn spot(v: Option<&Value>) -> Option<[f64; 3]> {
     let a = v?.as_array().filter(|a| a.len() == 3)?;
@@ -3370,6 +3428,24 @@ mod tests {
     fn a_rooms_figures_are_the_rooms_to_say() {
         assert!(role_may(PageRole::Host, "say_as") && role_may(PageRole::Both, "say_as") && !role_may(PageRole::User, "say_as"));
         assert!(!role_may(PageRole::Host, "say") && role_may(PageRole::User, "say"));
+    }
+
+    #[test]
+    fn a_rooms_own_voices_are_the_rooms() {
+        let frame = |flags: u8| [0, 1, flags, 0, 0, 0, 0, 0, 0, 0, 0, 0xFC];
+        assert!(frame_may(PageRole::Host, &frame(frames::VOICE_AT)) && frame_may(PageRole::Both, &frame(frames::VOICE_AT)));
+        assert!(!frame_may(PageRole::User, &frame(frames::VOICE_AT)), "a person's page never sends one");
+        assert!(!frame_may(PageRole::Host, &frame(frames::AUDIO)) && frame_may(PageRole::User, &frame(frames::AUDIO)), "the microphone stays the person's");
+        let at = voices_at(Some(&json!([[0, "receptionist", 1, 1.6, -2], [1, "radio", 3, 0, 0], [2, "radio", 9, 9, 9], [0, "twice", 0, 0, 0],
+            [8, "out", 0, 0, 0], [3, "a b", 0, 0, 0], [4, "far", 1e6, 0, 0], [5, "short", 1, 2], "nothing"])));
+        assert_eq!(at.len(), 2, "a slot or an id given twice keeps its first; a bad one is left out");
+        assert_eq!(at.get(&0), Some(&("receptionist".to_string(), [1.0, 1.6, -2.0])));
+        assert_eq!(at.get(&1), Some(&("radio".to_string(), [3.0, 0.0, 0.0])));
+        assert!(voices_at(None).is_empty() && voices_at(Some(&json!("x"))).is_empty());
+        let many: Vec<Value> = (0..20).map(|i| json!([i % 8, format!("v{i}"), 0, 0, 0])).collect();
+        assert_eq!(voices_at(Some(&json!(many))).len(), frames::MAX_VOICES_AT as usize);
+        let mut w = (Instant::now(), 0);
+        assert_eq!((0..100).filter(|_| at_counted(&mut w)).count(), VOICE_AT_PACKETS as usize);
     }
 
     #[test]

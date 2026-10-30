@@ -168,6 +168,21 @@ pub const ROUTE_NEAR: u8 = 0;
 pub const ROUTE_CALL: u8 = 1;
 pub const ROUTE_VOICE: u8 = 2;
 
+/// From the room's page, AUDIO and RELAY together: a packet of one of the room's own voices (8.7, `voice_at`: a
+/// receptionist's, a radio's), its channel the slot `voice_where`'s `at` gives it. Never a person's.
+pub const VOICE_AT: u8 = AUDIO | RELAY;
+/// The most voices of its own a room has at once (their slots, 0 to 7).
+pub const MAX_VOICES_AT: u16 = 8;
+
+/// A packet of one of the room's own voices and its slot, if the frame is one, its slot in range, and not too big.
+pub fn voice_at_from_page(b: &[u8]) -> Option<(u16, Bytes)> {
+    if b.len() < 12 || b[2] != VOICE_AT || b.len() - 11 > MAX_AUDIO {
+        return None;
+    }
+    let slot = u16::from_be_bytes([b[0], b[1]]);
+    (slot < MAX_VOICES_AT).then(|| (slot, Bytes::copy_from_slice(&b[11..])))
+}
+
 /// A packet of the page's own user's voice and where it may go, if the frame is one and not too big.
 pub fn audio_from_page(b: &[u8]) -> Option<(u16, Bytes)> {
     if b.len() < 12 || b[2] != AUDIO || b.len() - 11 > MAX_AUDIO {
@@ -338,6 +353,15 @@ mod tests {
         assert_eq!((&page[..4], &page[11..]), (&[0, 7, AUDIO, ROUTE_CALL][..], &b"opus"[..]));   // how it came, first in the timestamp's place
         assert!(relay_parts(&[5, b'a']).is_none() && relay_parts(&[]).is_none());
         assert!(audio_from_page(&[0, 3, AUDIO, 0, 0, 0, 0, 0, 0, 0, 0, 0xFC]).is_some() && audio_from_page(&[0, 3, RELAY, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3]).is_none());
+    }
+
+    #[test]
+    fn a_rooms_own_voice_is_its_own_frame() {
+        let at = |slot: u16, flags: u8, n: usize| { let mut b = vec![(slot >> 8) as u8, slot as u8, flags, 0, 0, 0, 0, 0, 0, 0, 0]; b.extend(vec![0xFC; n]); b };
+        assert_eq!(voice_at_from_page(&at(7, VOICE_AT, 3)), Some((7, Bytes::from_static(&[0xFC, 0xFC, 0xFC]))));
+        assert!(voice_at_from_page(&at(MAX_VOICES_AT, VOICE_AT, 3)).is_none(), "a slot out of range");
+        assert!(voice_at_from_page(&at(0, VOICE_AT, 0)).is_none() && voice_at_from_page(&at(0, VOICE_AT, MAX_AUDIO + 1)).is_none());
+        assert!(voice_at_from_page(&at(0, AUDIO, 3)).is_none() && audio_from_page(&at(1, VOICE_AT, 3)).is_none(), "never taken for a user's voice, nor one for it");
     }
 
     #[test]
