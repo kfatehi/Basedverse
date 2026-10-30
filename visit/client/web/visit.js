@@ -13,7 +13,7 @@
 // visitor's page walks at once and the host corrects it), and a host renders and encodes nothing for anyone.
 "use strict";
 (function () {
-  const VERSION = "2.0.0", PROTO = "basedverse-visit-local/2";
+  const VERSION = "2.1.0", PROTO = "basedverse-visit-local/2";
   const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, LOOK = 0.0025;
   const POINT_MS = 200, AIM_MS = 125;   // a visitor's points, at most one this often; what it aims at, looked for this often
   // A visitor's up and down (SPEC 8.2: its input's `up`), as WoW flies: what they do is the room's (its move).
@@ -1699,7 +1699,7 @@
     // own work: draw (your room and its plots drawn, by world.render: your room's own drawing, in a world) and textures
     // (canvases encoded in the background: how many, and how long each took, off the page's main thread), with how much
     // it had to do. Shown in a corner of the page; nothing leaves
-    // it. v.perfReport(): the last two minutes, a row a second, to copy.
+    // it. v.perfReport(): the last two minutes, a row a second (each with this Visit's version), to copy.
     perf(on = true) {
       try { localStorage.setItem("visit:perf", on ? "on" : "off"); } catch (e) { /* not kept */ }
       if (!on) { if (this._perf) { this._perf.stop(); this._perf = null; } return this._changed(); }
@@ -1733,7 +1733,7 @@
       const p = this._perf, secs = (now - p.at) / 1000, r1 = x => Math.round(x * 10) / 10, sync = this._sync, w = this._world;
       const gaps = p.frames.splice(0).sort((a, b) => a - b), long = p.long.splice(0);
       const parts = Object.fromEntries(Object.entries(p.cur).map(([k, x]) => [k, { n: x.n, ms: r1(x.ms / secs), max: r1(x.max) }]));
-      const row = { t: Date.now(), fps: Math.round(gaps.length / secs), frame_p95_ms: gaps.length ? r1(gaps[Math.floor(gaps.length * 0.95)]) : null,
+      const row = { visit: VERSION, t: Date.now(), fps: Math.round(gaps.length / secs), frame_p95_ms: gaps.length ? r1(gaps[Math.floor(gaps.length * 0.95)]) : null,
         frame_max_ms: gaps.length ? r1(gaps[gaps.length - 1]) : null, long_tasks: long.length, long_max_ms: long.length ? r1(Math.max(...long)) : 0, parts,
         counts: { visitors: [...this._hosted.values()].filter(h => h.inside).length, watchers: [...this._hosted.values()].filter(h => h.watch && !h.inside).length,
           plots: w ? w.plots.filter(x => !x.home).length : 0, offline: w ? w.plots.filter(x => x.offline).length : 0, objects: sync ? sync.objs.size : 0,
@@ -1742,7 +1742,7 @@
       p.cur = {}; p.at = now;
       const own = ["scan", "send", "whole", "landscape", "world", "voice"], all = own.reduce((n, k) => n + (parts[k] ? parts[k].ms : 0), 0), c = row.counts;
       const line = k => parts[k] ? `${k} ${parts[k].ms}${parts[k].max >= 8 ? ` (slowest ${parts[k].max})` : ""}` : null;
-      p.el.innerHTML = `<b>⏱ ${row.fps} fps</b> · slowest frame ${row.frame_max_ms ?? "–"} ms · ${row.long_tasks ? `<span style="color:#f85149">${row.long_tasks} stall${row.long_tasks > 1 ? "s" : ""} (${row.long_max_ms} ms)</span>` : "no stalls"}\n`
+      p.el.innerHTML = `<b>⏱ ${row.fps} fps</b> <span style="color:#8b949e">(Visit ${VERSION})</span> · slowest frame ${row.frame_max_ms ?? "–"} ms · ${row.long_tasks ? `<span style="color:#f85149">${row.long_tasks} stall${row.long_tasks > 1 ? "s" : ""} (${row.long_max_ms} ms)</span>` : "no stalls"}\n`
         + `Visit ${r1(all)} ms a second: ${own.map(line).filter(Boolean).join(" · ") || "idle"}`
         + (parts.draw ? `\ndrawing your room${c.plots ? " and its plots" : ""}: ${parts.draw.ms} ms a second (${r1(parts.draw.ms / Math.max(1, parts.draw.n))} a frame)` : "")
         + (parts.textures ? `\npictures sent: ${parts.textures.n} (encoded in the background, off the page: ${parts.textures.max} ms at most)` : "")
@@ -4026,7 +4026,8 @@
 .visit-panel .sub .btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
 .visit-panel .seg { display: inline-flex; } .visit-panel .seg button { border-radius: 0; } .visit-panel .seg button + button { border-left: 0; }
 .visit-panel .seg button:first-child { border-radius: 6px 0 0 6px; } .visit-panel .seg button:last-child { border-radius: 0 6px 6px 0; }
-.visit-panel .seg button.on2 { background: #1f6feb; border-color: #1f6feb; color: #fff; }`;
+.visit-panel .seg button.on2 { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+.visit-panel .hd button.caret { padding: 0 2px 0 0; } .visit-panel .ver { padding-top: 3px; padding-bottom: 3px; font-size: 11px; }`;
 
   // Where a friend's world has put your room (8.4, `seen`), said plainly: which way from theirs (north is -z), and how
   // far apart the two plots' edges are.
@@ -4049,6 +4050,10 @@
     root.className = "visit-panel";
     element.appendChild(root);
     let composing = null, timer = null, drawn = "";
+    // Folded (the caret, first in its first line): that line alone, and what asks you for an answer; remembered in this
+    // browser. The element given gets visit-folded too, for a page's own rows beside the panel to fold with it.
+    let folded = false;
+    try { folded = localStorage.getItem("visit:panel") === "folded"; } catch (e) { /* not kept */ }
     const opened = new Set();   // the people (key, else office id) shown opened
     const cw = withChat ? chat(v) : null;   // the chat window (8.9), bottom left (chat: false, none: your page has its own)
     // M, anywhere but a box of the page's own: on your mount, or off (8.11).
@@ -4085,7 +4090,15 @@
     function draw() {
       if (root.contains(document.activeElement) && document.activeElement.tagName === "INPUT") return;   // never under a typing hand
       const me = v.office, rows = [];
-      rows.push(`<div class="row hd"><span class="dot ${v.state === "online" ? esc(v.status) : ""}"></span><span class="grow">Visit${me ? " · " + esc(me.name) : ""}</span><span class="muted">${esc(v.state)}</span><button data-v="perf" class="${v._perf ? "go" : ""}" title="how this page is doing: frames, stalls, and what Visit does (on or off)">⏱</button>${v.state === "online" ? `<button data-v="away" title="leave the lobby: nobody sees you or can link until you come back">Go offline</button>` : ""}</div>`);
+      root.classList.toggle("folded", folded); element.classList.toggle("visit-folded", folded);
+      rows.push(`<div class="row hd"><button class="caret" data-v="fold" title="${folded ? "open the panel" : "fold the panel: its first line, and what asks you (a knock, a call)"} · Visit ${VERSION}">${folded ? "▸" : "▾"}</button><span class="dot ${v.state === "online" ? esc(v.status) : ""}"></span><span class="grow">Visit${me ? " · " + esc(me.name) : ""}</span><span class="muted">${esc(v.state)}</span><button data-v="perf" class="${v._perf ? "go" : ""}" title="how this page is doing: frames, stalls, and what Visit does (on or off)">⏱</button>${v.state === "online" ? `<button data-v="away" title="leave the lobby: nobody sees you or can link until you come back">Go offline</button>` : ""}</div>`);
+      if (folded) {
+        for (const k of v.knocks) rows.push(`<div class="row knock"><b>${esc(k.from.name)}</b> ${k.link ? "wants to link" : "is knocking"}${k.message ? `: “${esc(k.message)}”` : ""}
+          <div class="btns"><button class="go" data-v="in" data-k="${esc(k.id)}">${k.link ? "Link" : "Let in"}</button><button data-v="out" data-k="${esc(k.id)}">Not now</button>
+          <span class="muted">${Math.max(0, Math.round((k.until - Date.now()) / 1000))}s</span></div></div>`);
+        for (const c of v.calls) if (c.state === "ringing") rows.push(`<div class="row lnk"><div>📞 <b>${esc(c.name)}</b> is calling</div><div class="btns"><button class="go" data-v="pick_up" data-key="${esc(c.key)}">Pick up</button><button data-v="hang_up" data-key="${esc(c.key)}">Not now</button></div></div>`);
+        return paint(rows);
+      }
       if (v.state === "away") rows.push(`<div class="row"><span class="grow muted">out of the lobby: nobody sees you or can link</span><button class="go" data-v="back">Go online</button></div>`);
       for (const n of notes) if (n.until > Date.now()) rows.push(`<div class="row note">${esc(n.text)}</div>`);
       if (v.state === "online") {
@@ -4197,7 +4210,10 @@
         if (composing === o.id) rows.push(`<form class="row" data-o="${esc(o.id)}"><input maxlength="280" placeholder="a message for ${esc(o.name)}"><button class="go">${word}</button></form>`);
       }
       if (v.state === "online" && v.offices.length < 2) rows.push(`<div class="row muted">nobody else is here yet</div>`);
-      if (cw && v.state === "online") rows.push(`<div class="row muted" title="Enter, or /: type a line. /s say (everyone who can see you), /w name (into a linked room), /1 the lobby, /r reply">Enter to chat</div>`);
+      if (!folded) rows.push(`<div class="row ver"><span class="grow"></span><span class="muted">Visit ${VERSION}</span></div>`);
+      paint(rows);
+    }
+    function paint(rows) {
       const html = rows.join("");
       if (html === drawn) return;   // nothing new: an open menu stays open, a click lands
       drawn = html;
@@ -4209,7 +4225,8 @@
       const b = e.target.closest("button[data-v]");
       if (!b) return;
       const act = b.dataset.v;
-      if (act === "knock") { composing = composing === b.dataset.o ? null : b.dataset.o; draw(); }
+      if (act === "fold") { folded = !folded; try { localStorage.setItem("visit:panel", folded ? "folded" : "open"); } catch (x) { /* not kept */ } draw(); }
+      else if (act === "knock") { composing = composing === b.dataset.o ? null : b.dataset.o; draw(); }
       else if (act === "more") { if (!opened.delete(b.dataset.p)) opened.add(b.dataset.p); draw(); }
       else if (act === "cut") {   // every link between you two, ended both ways; no longer a guest (their world would come back)
         const k = b.dataset.p, is = who => !!who && (who.key === k || who.id === k), ends = new Set();

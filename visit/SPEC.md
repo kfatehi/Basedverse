@@ -1258,7 +1258,8 @@ v.listener({ x, y, z, yaw })   // where your user is in your room, for a room th
 v.landscapeChanged()        // something marked userData.visitStatic (8.10) changed in itself: its landscape goes again
 v.perf(on); v.perfReport()  // telemetry (the panel's ⏱; remembered in this browser; ?visit-perf=1): a corner of the page,
                             //   each second, this page's frames and stalls (long tasks) and Visit's own work by part (ms);
-                            //   perfReport(): the last two minutes, a row a second. Nothing leaves the page
+                            //   perfReport(): the last two minutes, a row a second, each with this Visit's version
+                            //   (`visit`, as `Visit.version`). Nothing leaves the page
 v.setName(name); v.userName   // the name your user goes by (8.9), shown to others with what they say; null: your office's
 v.userOf(key)               // the name the user of a linked office goes by, or null (their office's)
 v.say(text, to, { media, links })   // with pictures (v.share's) or links (v.preview's) (8.12); a line may be them alone
@@ -1366,7 +1367,11 @@ Visit.panel(element, v)                          // an optional ready-made lobby
                                                  //   speaker / handset, Hang up), 📞 call (those linked with phones); the chat window (8.9);
                                                  //   notes a while (where a friend's world put your room, 8.4, once it
                                                  //   settles; a call that ended other than hung up); ⏱ telemetry on or
-                                                 //   off; stars, door, status, Go offline / online:
+                                                 //   off; stars, door, status, Go offline / online; Visit's version at
+                                                 //   its foot. Its caret (▾, first in its first line) folds it to that
+                                                 //   line and what asks you (a knock, a call ringing), remembered in
+                                                 //   this browser; `element` has the class visit-folded meanwhile, for
+                                                 //   a page's own rows beside the panel to fold with it:
                                                  //   { element, chat, release(), say() (the chat window open to type) }
 Visit.panel(element, v, { chat: false })         // the panel without the chat window (yours instead)
 Visit.chat(v, { element, fade })                 // the chat window (8.9) on its own, bottom left (--visit-chat-left,
