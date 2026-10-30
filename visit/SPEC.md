@@ -991,7 +991,9 @@ chat, everyone in it hears everyone else, wherever they are.
   of that spot, plus the margin, as it passes on a visitor's (`relay`, its id `at:<id>`, no name): each visitor
   near it, and its own user's page if they are (on their own room's channel, 3.2; 0 for a page that is both). Each
   page plays it from that object, by distance, as it plays a voice (an older page finds no such object, and plays
-  nothing). In person only: never to a call, a room voice, or across a plot's side. At most 8 at once in a room,
+  nothing). The room's page must be a
+  secure context (served over https, or from loopback: WebCodecs and AudioWorklet are a secure context's), as a
+  microphone's must. In person only: never to a call, a room voice, or across a plot's side. At most 8 at once in a room,
   each at most 75 packets a second (more are dropped), and none of a slot the room has not placed. They are not in
   `v.voices` (people), and their speaking has no 🔊.
 - **Hearing.** A page plays each voice from where the speaker is (Web Audio's HRTF panner, linear to nothing at 45

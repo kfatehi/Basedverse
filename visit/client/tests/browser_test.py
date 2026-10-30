@@ -1240,6 +1240,13 @@ async def main():
         await b.key("KeyW", "w", 87, False)
         await asyncio.sleep(0.5)
         check("into the desk ahead: the room stops them at it (0.3 short), and the page agrees", (round(await hc.js("v.visitors[0].pose.z"), 1), abs(await b.js("room.me.z") - await hc.js("v.visitors[0].pose.z")) < 0.2), (4.5, True))
+        # the room's own voice (voiceAt, #13) for its owner on the person's own page: the room's page makes it, 2 m from
+        # them; their page hears it from its mark in their home, as a voice (a room split by the engine, or a host tab)
+        await hc.js("(window.radio = new OscillatorNode(v._audio(), { frequency: 440 }), radio.start(), "
+                    "v.voiceAt('radio', { x: v.visitors[0].pose.x + 2, y: 1.5, z: v.visitors[0].pose.z }, radio).then(() => true))")
+        check("the room's own voice near its owner: the person's page hears it from its mark at home, not silent, near", await b.until(
+            "(s => !!s && s.frames > 50 && s.level > 0.01 && s.near)(v._voices.get('relay:at:radio'))", 20), True)
+        await hc.js("v.voiceAt('radio', null, null).then(() => (radio.stop(), true))")
         # The owner's wheel (SPEC 8.3): the spinner held east of them, clear of the desk, a type for the owner alone.
         await hc.js("room.frozen = true; room.spinner.position.set(7, 1.5, 4.5); v.interactions({ spin: { cosmetic: true, label: 'spin it', who: 'owner', wheel: true, "
                     "run: e => { window.spins.push({ type: e.type, owner: !!e.visitor.owner, wheel: e.wheel }); } } })")

@@ -422,7 +422,10 @@ visit.host({
   AudioContext (a buffer of speech your server made, played into it), and `visit.voiceAt(id, at, null)` ends it.
   Everyone in your room near it hears it from there, your own user included, as they hear each other: don't also
   play it yourself on your user's page, or they hear it twice. Visit plays it nowhere on the page that makes it.
-  Give it the same `id` as its figure's lines (`sayAs`), so its voice and its words are one.
+  Give it the same `id` as its figure's lines (`sayAs`), so its voice and its words are one. The room's page must be
+  a secure context (https, or loopback: `http://127.0.0.1:...`), for WebCodecs and AudioWorklet: on the engine, give
+  `ENGINE_ROOM_URL` a loopback or https address (a board reached by a container's name, `http://board:3001`, is not
+  one, and voiceAt then throws "this browser cannot encode voice").
 - **Your landscape** (recommended, the bigger your room the more): mark what never changes, its ground, walls,
   trees and furniture, with `obj.userData.visitStatic = true` (everything under it goes with it). Visit then sends
   it to each visitor once, who keeps it (by its hash: the same landscape is never sent twice, across visits and
