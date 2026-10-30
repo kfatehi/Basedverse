@@ -390,7 +390,9 @@ const v = await Visit.connect({ port, token, sim: { name, version } });
     as the page goes, for first person), and `world.render(camera)` draws it all. `world.point(target)` sends a
     click as a point aimed from the person's eyes at `target`, a point in the page's world (what its own ray
     met in the received scene): a camera behind the body does not look along the body's line; without `target`,
-    where the page looks. `world.atHome` says whether the person is in their own room. `world.room` is the home
+    where the page looks. `world.point(target, { wheel })` sends a turn of the wheel there the same way
+    (`wheel`: the notches the page counted, positive down; visit/SPEC.md 8.3), added up while a point waits its
+    turn. `world.atHome` says whether the person is in their own room. `world.room` is the home
     scene's root, read-only: for a camera to follow something, never to change (the host owns it); `world.plots`
     lists home too (`home: true`).
 - `v.visitors` is informational for a user (the panel's Kick, Unlink): `pose` and `look` as the host reports

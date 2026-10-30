@@ -364,7 +364,7 @@ async def main():
         keys = await b.js("(() => { const k = new Set(); v._viewer.scene.root.traverse(o => Object.keys(o.userData || {}).forEach(x => k.add(x))); return [...k].sort(); })()")
         check("B's copy of A's scene has none of A's own userData: only what Visit reads", keys, ["visitPoint", "visitor"])
         check("the cube A marked as one to click: an interaction A takes, spin, with its label", (await b.js("v._viewer.scene.root.getObjectByName('spinner').userData"),
-              await b.js("[...v._viewer.scene.interactions]")), ({"visitPoint": "spin"}, [["spin", {"label": "spin it", "cosmetic": True}]]))
+              await b.js("[...v._viewer.scene.interactions]")), ({"visitPoint": "spin"}, [["spin", {"label": "spin it", "cosmetic": True, "wheel": False}]]))
         check("an interaction that is not cosmetic is refused unless the user agreed to it", await a.js(
             "(() => { try { v.interactions({ wipe: { run() {} } }); return 'taken'; } catch (e) { v.interactions({ spin: { cosmetic: true, label: 'spin it', run: x => { x.object.rotation.y += 1; window.spins.push({ who: x.visitor.name, type: x.type }); } } }); return e.message.slice(0, 40); } })()"),
             'visit.interactions: "wipe" is not cosmet')
@@ -390,6 +390,33 @@ async def main():
         await b.js("for (let i = 0; i < 10; i++) v._pointNow()")
         await asyncio.sleep(0.6)
         check("ten points at once from B: its page sends one of them (one every 200 ms at most)", await a.js("window.points.length"), 2)
+
+        print("\nthe wheel")
+        await asyncio.sleep(0.25)
+        await b.js("v._wheelNow(2)")
+        await a.until("window.points.length === 3")
+        await asyncio.sleep(0.2)
+        check("B turns the wheel at the cube: A hears a point with its notches (a click's are 0), and spin, which does not take the wheel, does not run",
+              (await a.js("window.points[2].wheel"), await a.js("window.points[1].wheel"), await a.js("window.spins.length")), (2, 0, 2))
+        await a.js("v.interactions({ spin: { cosmetic: true, label: 'spin it', wheel: true, run: x => { x.object.rotation.y += 1; window.spins.push({ who: x.visitor.name, type: x.type, wheel: x.wheel }); } } })")
+        check("spin takes the wheel now: B's copy says so, and B's crosshair on it knows", await b.until("(i => !!i && i.wheel)(v._viewer.scene.interactions.get('spin')) && v._view.wheelOn"), True)
+        await asyncio.sleep(1.0)   # a second of points apart: A's visit-client takes 5 a second from B
+        await b.js("v._wheelNow(1); v._wheelNow(1); v._wheelNow(-1); v._wheelNow(1)")
+        check("four notches at once from B: one point, their sum, and spin runs with it", await a.until("window.spins.length === 3 && window.spins[2]"), {"who": "B", "type": "spin", "wheel": 2})
+        await asyncio.sleep(1.0)
+        n = await a.js("window.points.length")
+        await b.js("v._wheelNow(25)")
+        await asyncio.sleep(0.9)
+        check("25 notches at once: at most 10 a point, the rest in the next ones (one every 200 ms)", await a.js("window.points.slice(%d).map(p => p.wheel)" % n), [10, 10, 5])
+        await a.js("v.interactions({ spin: { cosmetic: true, label: 'spin it', who: 'owner', wheel: true, run: x => { window.spins.push({ who: x.visitor.name, type: x.type, wheel: x.wheel }); } } })")
+        check("a type for A's owner alone: never in a visitor's copy, so B's crosshair is not hot on it", await b.until("!v._viewer.scene.interactions.has('spin') && !v._view.cross.style.background && !v._view.wheelOn"), True)
+        await asyncio.sleep(1.0)
+        spun = await a.js("window.spins.length")
+        await b.js("v._pointNow(); v._wheelNow(1)")
+        await a.until("window.points.length === %d" % (n + 5))
+        await asyncio.sleep(0.2)
+        check("and B's click and wheel there (sent anyway) run nothing: A heard both points", await a.js("window.spins.length"), spun)
+        await a.js("v.interactions({ spin: { cosmetic: true, label: 'spin it', run: x => { x.object.rotation.y += 1; window.spins.push({ who: x.visitor.name, type: x.type }); } } })")
         await a.js("room.vault.position.set(%f, 1.4, %f)" % (a2["x"] + 1.5, a2["z"] - 1.5))   # in the cube's place: marked, but with a type A does not take
         await a.js("room.spinner.position.set(0.5, 0.2, 0.5)")
         await asyncio.sleep(0.5)
@@ -397,10 +424,11 @@ async def main():
         await b.js(look.replace("'spinner'", "'vault'") % "0")
         check("looking at a thing marked with a type A does not take: not hot", await b.until("!v._view.cross.style.background && !v._view.hint.textContent"), True)
         await asyncio.sleep(0.25)
+        np = await a.js("window.points.length")
         await b.js("v._pointNow()")
-        await a.until("window.points.length === 3")
+        await a.until("window.points.length === %d" % (np + 1))
         await asyncio.sleep(0.2)
-        check("and clicked, nothing runs (A heard the point, and took no interaction)", (await a.js("window.points[2].hit"), await a.js("window.spins.length")), ("vault", spun))
+        check("and clicked, nothing runs (A heard the point, and took no interaction)", (await a.js("window.points[%d].hit" % np), await a.js("window.spins.length")), ("vault", spun))
         await b.js("v._view.cross.style.display = 'none'")
         await a.js("room.frozen = false; room.vault.position.set(9, 1.2, 1.2)")
 
@@ -1198,6 +1226,16 @@ async def main():
         await b.key("KeyW", "w", 87, False)
         await asyncio.sleep(0.5)
         check("into the desk ahead: the room stops them at it (0.3 short), and the page agrees", (round(await hc.js("v.visitors[0].pose.z"), 1), abs(await b.js("room.me.z") - await hc.js("v.visitors[0].pose.z")) < 0.2), (4.5, True))
+        # The owner's wheel (SPEC 8.3): the spinner held east of them, clear of the desk, a type for the owner alone.
+        await hc.js("room.frozen = true; room.spinner.position.set(7, 1.5, 4.5); v.interactions({ spin: { cosmetic: true, label: 'spin it', who: 'owner', wheel: true, "
+                    "run: e => { window.spins.push({ type: e.type, owner: !!e.visitor.owner, wheel: e.wheel }); } } })")
+        at = await b.until("(o => !!o && Math.abs(o.position.x - 7) < 0.01 && [o.position.x, o.position.y, o.position.z])(v._homeScene().root.getObjectByName('spinner'))", 10)
+        n0 = await hc.js("window.spins.length")
+        await b.js("(t => { room.world.point(t, { wheel: 1 }); room.world.point(t, { wheel: 2 }); })({ x: %f, y: %f, z: %f })" % tuple(at))
+        check("the owner turns the wheel at it (world.point with wheel): the notches in one point, run for the owner, who alone may",
+              await hc.until("window.spins.length > %d && spins[spins.length - 1]" % n0, 10), {"type": "spin", "owner": True, "wheel": 3})
+        await hc.js("room.frozen = false; v.interactions({ spin: { cosmetic: true, label: 'spin it', run: e => { e.object.rotation.y += 1; "
+                    "window.spins.push({ who: e.visitor.name, type: e.type, owner: !!e.visitor.owner }); } } })")
         await a.js("v.addGuest(v.offices.find(o => o.name === 'C').key, 'C')")
         await b.js("v.addGuest(v.offices.find(o => o.name === 'A').key, 'A')")
         check("guests both ways: A's plot in the person's world, beside home", (await b.until("(p => p && p.name)(room.world.plots.find(p => !p.home))", 20)), "A")

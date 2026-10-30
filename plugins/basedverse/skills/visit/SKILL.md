@@ -118,6 +118,7 @@ feature in a workroom's code. If the changelog has something newer than the tabl
 | where friends put you | 0.10 | step 9 | `visit.seen`, the panel's notes |
 | avatars | 0.9 | step 5 | `visit.avatar(`, `entry.avatar` |
 | interactions | 0.9 | step 5 | `visit.interactions(`, `userData.visitPoint` |
+| the wheel on interactions (something to scroll); interactions for the owner alone | 2.1.1 | step 5 | `wheel: true` or `who: "owner"` in `visit.interactions(`; `world.point(…, { wheel` |
 | voice (same room, 45 m; across a plot's side, near in both worlds) | 0.9, 0.10, 0.20 | step 5 | `visit.setMic(`, `visit.listener(`, the panel's 🎙; a world (`visit.world(`) |
 | 🔊 over who is speaking | 0.13 | vanilla | `visit.world(` (unless `speaking: false`) |
 | phone | 0.9, 0.13 | step 5 | `visit.phone(` (`model: false`: their own) |

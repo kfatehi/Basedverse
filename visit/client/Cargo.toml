@@ -1,6 +1,6 @@
 [package]
 name = "visit"
-version = "2.1.0"
+version = "2.1.1"
 edition = "2021"
 license = "MIT"
 description = "Visit, the one program a workroom needs (../../V2.md): the lobby session, the links to other workrooms, the page connection, the sign-in API"
