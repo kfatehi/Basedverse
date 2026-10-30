@@ -10,6 +10,25 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v2.1.1 — 2026-10-30 — the wheel on interactions; interactions for the owner alone
+
+- **The wheel points** ([visit/SPEC.md](visit/SPEC.md) 8.3). An interaction type may take the mouse wheel too
+  (`wheel: true` in `visit.interactions`): turned over something marked with it, the wheel sends a point with
+  `wheel`, whole notches (positive turned down), and the type's `run` gets them (`wheel`, 0 for a click). A
+  visitor's page sends one while its crosshair is on such a thing (anywhere else the wheel is untouched); a user
+  page sends one with `world.point(target, { wheel })`. Notches turned while a point waits its turn (one every
+  200 ms) are added up, at most 10 a point, the rest in the next: none is lost to the 5 points a second a host
+  takes. A type without `wheel: true` never runs on the wheel. The `point` event has `wheel` too.
+- **Interactions for the owner alone**: `who: "owner"` runs only for the room's own user at home (engine/SPEC.md 4),
+  and a visitor never sees the type (its crosshair is not hot there; its points run nothing).
+- **What an integration does**: nothing, unless the room has something to scroll. Then:
+  1. Give its type `wheel: true`, and in `run`, act on `wheel` (`if (!wheel) return` if a click should do nothing
+     there).
+  2. If only the room's own user may scroll it, add `who: "owner"`.
+  3. On the person's page (a room split by the engine), where the wheel over the received scene meets the thing,
+     call `world.point(hit.point, { wheel })` with the notches the page counted (a mouse's click of the wheel is
+     one; add a trackpad's small deltas up to one).
+
 ## v2.1.0 — 2026-10-30 — the panel folds, and says its version
 
 - **The panel folds** ([visit/SPEC.md](visit/SPEC.md), `Visit.panel`). A caret (▾) first in its first line folds it

@@ -201,7 +201,7 @@ dependencies = [
 
 [[package]]
 name = "auth"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -878,7 +878,7 @@ checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
 name = "engine"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "anyhow",
  "axum",
@@ -4392,7 +4392,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "visit"
-version = "2.1.0"
+version = "2.1.1"
 dependencies = [
  "anyhow",
  "auth",
