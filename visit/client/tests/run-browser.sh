@@ -25,13 +25,11 @@ for p in 9351 9352; do
 done
 trap 'kill "${pids[@]}" 2>/dev/null || true' EXIT
 # The engine (V2.md 5) hosts the third office's room inside C's own visit, in the headless Chrome visit carries:
-# ENGINE_PORT tells the test to start C with it (its /health and test aid there). ENGINE=0 skips it: the test then
-# hosts C's room in a window of its own instead.
-engine=""
-[ "${ENGINE:-1}" != 0 ] && engine=7425
+# the test starts C with it (its /health and test aid on a port free then). ENGINE=0 skips it: the test then hosts
+# C's room in a window of its own instead.
 # Each visit's database is the Postgres inside it (V2.md 4), run as this machine's user (tests/as-user.sh).
 docker run --rm --network host -e AS_UID="$(id -u)" -e AS_GID="$(id -g)" \
-  ${engine:+-e ENGINE_PORT=$engine} \
+  -e ENGINE="${ENGINE:-1}" \
   -v visit-target:/target:ro -v "$repo":/repo:ro -v "$out":/out -w /repo \
   python:3.13-slim-bookworm sh visit/client/tests/as-user.sh sh -c 'pip install -q --user websockets==15.0.1 2>/dev/null && python3 -u visit/client/tests/browser_test.py /target/debug/visit 9351 9352 /out'
 echo "screenshots and logs: $out"
