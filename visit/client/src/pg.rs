@@ -75,8 +75,9 @@ fn url(user: &str, password: &str, port: u16, db: &str) -> String {
 
 /// The workroom in `data`: for a run (`want_mine`: it must be this process's, a second `visit` for the same
 /// workroom refused), or for a command (a running `visit`'s Postgres used, else one started for the command).
-/// Either way it is up, its roles made and its schemas up to date when this returns.
-pub async fn open(data: &Path, want_mine: bool) -> Result<(Pg, Hold)> {
+/// Either way it is up, its roles made and its schemas up to date when this returns. `port`: the one it listens on
+/// (VISIT_PG_PORT, for other programs of the workroom to share the cluster), refused if taken; none, a free one.
+pub async fn open(data: &Path, want_mine: bool, port: Option<u16>) -> Result<(Pg, Hold)> {
     let dir = data.join("postgres");
     fs::create_dir_all(&dir).with_context(|| format!("making {}", dir.display()))?;
     let bin = runtime::unpacked(&runtime::POSTGRES)?.join("bin");
@@ -100,7 +101,10 @@ pub async fn open(data: &Path, want_mine: bool) -> Result<(Pg, Hold)> {
     }
     let secrets_ = read_secrets(&dir)?;
     write_hba(&dir.join("data"))?;
-    let port = std::net::TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port();
+    let port = match port {
+        Some(p) => free(p)?,
+        None => std::net::TcpListener::bind(("127.0.0.1", 0))?.local_addr()?.port(),
+    };
     let mut settings = Settings::new();
     settings.installation_dir = bin.parent().unwrap().to_path_buf();
     settings.trust_installation_dir = true;
@@ -229,6 +233,20 @@ fn running_port(data: &Path) -> Option<u16> {
     fs::read_to_string(data.join("postmaster.pid")).ok()?.lines().nth(3)?.trim().parse().ok()
 }
 
+/// A fixed port, checked free on 127.0.0.1: nothing answers there (a program listening on every address included),
+/// and it can be had. Taken, the start is refused: never another port, which the workroom's other programs would
+/// not find.
+fn free(port: u16) -> Result<u16> {
+    let at = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let taken = |why: &str| anyhow!("VISIT_PG_PORT {port}: 127.0.0.1:{port} is {why}; stop what holds it, or give another port \
+                                     (visit never takes another one of its own: the workroom's programs would not find it)");
+    if std::net::TcpStream::connect_timeout(&at, Duration::from_millis(300)).is_ok() {
+        return Err(taken("taken (something answers there)"));
+    }
+    std::net::TcpListener::bind(at).map_err(|e| taken(&format!("not free ({e})")))?;
+    Ok(port)
+}
+
 fn secret() -> String {
     auth::secret::hex(&auth::secret::random(24))
 }
@@ -245,4 +263,19 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<()> {
 
 pub fn exe(name: &str) -> String {
     if cfg!(windows) { format!("{name}.exe") } else { name.to_string() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::free;
+
+    #[test]
+    fn a_fixed_port_is_taken_only_if_free() {
+        let held = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = held.local_addr().unwrap().port();
+        let e = free(port).unwrap_err().to_string();
+        assert!(e.contains(&format!("VISIT_PG_PORT {port}")) && e.contains("taken"), "{e}");
+        drop(held);
+        assert_eq!(free(port).unwrap(), port);
+    }
 }

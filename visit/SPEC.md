@@ -160,6 +160,7 @@ visit --lobby wss://lobby.example/ --name "Magic Room" --sim my-sim/1.0 \
 | `--relays` | `VISIT_RELAYS` | the lobby's | the relays for links: `none`, `default` (iroh's own), or URLs, comma-separated |
 | `--data-dir` | `VISIT_DATA_DIR` | `basedverse/<the name>` in the user's data folder (4.4) | where the workroom keeps everything (4.4): its database, its state file, friends' landscapes. A launcher SHOULD give one, so a renamed office keeps its data |
 | `--state-file` | `VISIT_STATE_FILE` | `state.json` in the data directory | a file where it keeps what outlasts a run: whether the office is away (`leave_lobby`, 5.2), so a restart stays away; its key (section 2), so it is the same office to its guests' hosts; its door and its guests; its world's layout (8.4); whose look its visitors have (8.6). Readable by its owner only (section 3, point 10) |
+| `--pg-port` | `VISIT_PG_PORT` | none: a port free at each start | the workroom's Postgres's port on 127.0.0.1 (4.4), for other programs of the workroom sharing the cluster; a start with it taken is refused, never moved to another port |
 | `--cache-dir` | `VISIT_CACHE_DIR` | `landscapes/` in the data directory | where it keeps friends' landscapes (8.10), each by its office's key and hash, at most 256 MiB (the oldest go first), and the plots it keeps to draw while their offices are away |
 | `--auth-token-file` | `AUTH_TOKEN_FILE` | none: no sign-in API | the sign-in API's service token (../auth/SPEC.md 3): given, `visit` serves the API |
 | `--auth-port`, `--auth-listen`, `--auth-idle`, `--auth-max-age` | `AUTH_PORT`, `AUTH_LISTEN`, `AUTH_IDLE`, `AUTH_MAX_AGE` | 7403, `127.0.0.1`, `7d`, `30d` | the sign-in API's (../auth/SPEC.md 8) |
@@ -272,12 +273,20 @@ starting at once each unpack into a directory of their own, and the first to mov
 - **The first start** makes it: `initdb` with the built-in `C.UTF-8` locale (the same on every platform) and
   SCRAM passwords, the superuser's (`postgres`) and the two roles' made at random and kept in `postgres/secrets`.
 - **Every start**: `pg_hba.conf` written (the roles, with their passwords, from 127.0.0.1 only); Postgres on
-  127.0.0.1, on a port free at that moment, with no Unix socket. Then, as the superuser, the database `visit` and
+  127.0.0.1, on a port free at that moment (or `VISIT_PG_PORT`'s, below), with no Unix socket. Then, as the superuser, the database `visit` and
   its two roles made right: `visit` (the visit-client's) and `auth` (the sign-in's, ../auth/SPEC.md 5), each a
   plain role owning a schema of its name, reading nobody else's. Then each schema brought up to date as its own
   role: each migration this `visit` knows that the database lacks, in order, once, each in a transaction of its
   own (recorded in `visit.visit_migrations` and `auth.migrations`). The migrations are built into the binary:
   whoever has a `visit` has its migrations. A Postgres left running by a `visit` that was killed is stopped first.
+- **Other programs of the workroom can share the cluster** (its server's own database, say): with
+  `VISIT_PG_PORT`, Postgres listens on that port at every start, so they have one address,
+  `127.0.0.1:<VISIT_PG_PORT>`. A start with that port taken (something answers there, or it cannot be had) is
+  refused, saying so: never another port, which they would not find. They reach it as roles and databases of
+  their own, made as its superuser (`visit psql`; its password is in `postgres/secrets`): `visit` makes right
+  its own database `visit` and its roles `visit` and `auth` at every start. Without it, the port is a new one
+  each start (`postgres/data/postmaster.pid` says which). A command that starts Postgres for itself (4.5) takes
+  the same port.
 - **Stopping**: last, after everything else (4.2).
 - **Its user.** Postgres won't run as root, and `initdb` asks the system for the user's name: `visit` runs as a
   user the machine knows.

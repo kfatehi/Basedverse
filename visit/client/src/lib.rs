@@ -87,6 +87,10 @@ pub struct Args {
     /// their plots to draw while they are away. Default: landscapes/ in the data directory.
     #[arg(long, env = "VISIT_CACHE_DIR")]
     pub cache_dir: Option<PathBuf>,
+    /// The port of the workroom's Postgres, on 127.0.0.1, for other programs of the workroom to share the cluster
+    /// (SPEC.md 4.4): a start with it taken is refused. Default: a port free at each start.
+    #[arg(long, env = "VISIT_PG_PORT", value_parser = clap::value_parser!(u16).range(1..))]
+    pub pg_port: Option<u16>,
     /// The sign-in API (auth/SPEC.md 3), served by this program for the workroom's server: on when given the
     /// service token's file (at least 32 characters, new each run, readable by the user only).
     #[arg(long, env = "AUTH_TOKEN_FILE")]
@@ -147,6 +151,9 @@ pub struct Which {
     /// The workroom's name, for its default data directory.
     #[arg(long, env = "VISIT_NAME")]
     pub name: Option<String>,
+    /// The port its Postgres listens on when a command starts it (VISIT_PG_PORT, as a run's).
+    #[arg(long, env = "VISIT_PG_PORT", value_parser = clap::value_parser!(u16).range(1..))]
+    pub pg_port: Option<u16>,
 }
 
 impl Which {
@@ -219,7 +226,12 @@ fn bad_flags(msg: &str) -> ExitCode {
 /// Which workroom: VISIT_DATA_DIR or VISIT_NAME, or `--data-dir`/`--name` right after `auth`.
 pub async fn auth_command() -> ExitCode {
     let mut rest: Vec<String> = std::env::args().skip(2).collect();
-    let mut which = Which { data_dir: std::env::var_os("VISIT_DATA_DIR").map(PathBuf::from), name: std::env::var("VISIT_NAME").ok() };
+    let pg_port = match std::env::var("VISIT_PG_PORT").ok().map(|p| p.parse::<u16>()) {
+        None => None,
+        Some(Ok(p)) if p > 0 => Some(p),
+        Some(_) => return bad_flags("VISIT_PG_PORT: a port, 1 to 65535"),
+    };
+    let mut which = Which { data_dir: std::env::var_os("VISIT_DATA_DIR").map(PathBuf::from), name: std::env::var("VISIT_NAME").ok(), pg_port };
     while let Some(flag) = rest.first().cloned() {
         let (k, v) = match flag.split_once('=') {
             Some((k, v)) => (k.to_string(), Some(v.to_string())),
@@ -252,7 +264,7 @@ where
         Ok(d) => d,
         Err(e) => return bad_flags(&format!("{e:#}")),
     };
-    let pg = match pg::open(&dir, false).await {
+    let pg = match pg::open(&dir, false, which.pg_port).await {
         Ok((pg, _)) => std::sync::Arc::new(pg),
         Err(e) => {
             eprintln!("visit: {e:#}");
@@ -289,7 +301,7 @@ pub async fn command(c: Command) -> ExitCode {
                 Ok(d) => d,
                 Err(e) => return bad_flags(&format!("{e:#}")),
             };
-            let pg = match pg::open(&dir, true).await {
+            let pg = match pg::open(&dir, true, which.pg_port).await {
                 Ok((pg, _)) => pg,
                 Err(e) => {
                     eprintln!("visit import: {e:#} (stop it first: a workroom is imported into before it runs)");
@@ -418,7 +430,7 @@ pub async fn run_with(a: Args, stop: impl std::future::Future<Output = ()> + Sen
     let (mut saved, fresh) = state::Saved::load(Some(&state_file));
     // The workroom's Postgres, started and made ready (its roles, its schemas up to date); then visit-client's
     // database, with bans an older state file kept moved into it.
-    let pg = match pg::open(&data, true).await {
+    let pg = match pg::open(&data, true, a.pg_port).await {
         Ok((pg, _)) => pg,
         Err(e) => {
             eprintln!("visit: {e:#}");
@@ -543,5 +555,20 @@ pub async fn asked_to_stop() {
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}
         _ = close.recv() => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Args;
+    use clap::Parser;
+
+    #[test]
+    fn the_postgres_port_is_a_port_or_none() {
+        let parse = |p: &[&str]| Args::try_parse_from([&["visit", "--name", "office"][..], p].concat());
+        assert_eq!(parse(&["--pg-port", "54321"]).unwrap().pg_port, Some(54321));
+        assert_eq!(parse(&[]).unwrap().pg_port, None);
+        assert!(parse(&["--pg-port", "0"]).is_err(), "0 is not a fixed port");
+        assert!(parse(&["--pg-port", "70000"]).is_err());
     }
 }

@@ -173,7 +173,9 @@ checked by its sha256 ([../deps/README.md](../deps/README.md)).
 **Its database is inside it.** `visit` keeps its user's chat, the pictures and links shared in it, and whom its
 room keeps out in a Postgres it carries and runs itself, its data in `VISIT_DATA_DIR`: made at its first start,
 brought up to date by every start after an upgrade (SPEC.md 4.4). There is nothing to install, start or migrate,
-and no database address to give it.
+and no database address to give it. Other programs of your workroom can share that cluster: set `VISIT_PG_PORT`,
+and it listens on 127.0.0.1 at that port at every start (on a new free port each start without it); a start with
+the port taken is refused. They use roles and databases of their own (SPEC.md 4.4).
 
 **Check:** `visit --version` prints the `version` of `client/Cargo.toml` in your checkout (the visit.js it serves
 and the protocols it speaks are that version's), and the Postgres and Chrome it carries; with your `.env` loaded,
