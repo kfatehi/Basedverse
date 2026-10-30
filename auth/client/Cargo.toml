@@ -1,6 +1,6 @@
 [package]
 name = "auth"
-version = "2.0.0"
+version = "2.1.0"
 edition = "2021"
 license = "MIT"
 description = "A workroom's sign-in, built into visit (../../V2.md): the owner's account, sessions and API keys, for its server on 127.0.0.1 (../SPEC.md)"

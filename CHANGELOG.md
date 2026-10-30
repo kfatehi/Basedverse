@@ -10,6 +10,17 @@ A release that changes a protocol's name (`basedverse-lobby/2`, `basedverse-visi
 `basedverse-visit/1`) says so at its top: then every workroom upgrades, and the lobby with them. Additions
 keep the names, so offices on different versions still meet and visit each other.
 
+## v2.1.0 — 2026-10-30 — the panel folds, and says its version
+
+- **The panel folds** ([visit/SPEC.md](visit/SPEC.md), `Visit.panel`). A caret (▾) first in its first line folds it
+  to that line, with what asks you for an answer (a knock, a call ringing) still shown under it; the browser
+  remembers it folded or open. While it is folded, the element the page gave `Visit.panel` has the class
+  `visit-folded`. **An integration** that puts rows of its own beside the panel, in the same element (a sign-out
+  row, say), hides them under `.visit-folded` if they should fold with it; nothing else to do.
+- **Visit's version** is at the panel's foot, and in every row of the ⏱ report (`visit`, in `v.perfReport()`) and
+  on its corner of the page. Nothing to do.
+- **The panel's "Enter to chat" line is gone**: the chat window says it when it opens. Nothing to do.
+
 ## v2.0.0 — 2026-10-29 — one program, `visit` ([#22](https://github.com/sarmiena/Basedverse/issues/22))
 
 **`visit` is everything a workroom runs.** visit-client, auth-client and the engine's driver are one Rust program,
