@@ -225,6 +225,8 @@ const MEDIA_RECENT: usize = 8;
 /// The most points a second taken from a visitor (a click at the middle of its view: 8.3); more are dropped.
 /// Its page sends at most one every 200 ms.
 const POINTS_PER_SECOND: u32 = 5;
+/// The most notches of the wheel one point carries, either way (8.3): its page adds up those between its points.
+const MAX_WHEEL: f64 = 10.0;
 /// How long a guest let in through the open door is waited for, to be agreed as a visit by the lobby.
 const ADMITTED_FOR: Duration = Duration::from_secs(120);
 /// The world (../WORLD.md): a knock to watch a guest's plot not yet answered is not made again for this long;
@@ -3159,10 +3161,16 @@ fn clamp_pose(m: &Value) -> Value {
 }
 
 /// A point (8.3): where the visitor looked as it clicked, `yaw` and `pitch` in the same terms as its input, each
-/// in its range; nothing else of what was sent passes.
+/// in its range, and for a turn of the wheel, `wheel`: whole notches, at most MAX_WHEEL either way (none: a click);
+/// nothing else of what was sent passes.
 fn clamp_point(m: &Value) -> Value {
     let angle = |k: &str, lim: f64| m.get(k).and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0.0, |x| x.clamp(-lim, lim));
-    json!({ "yaw": angle("yaw", 1e6), "pitch": angle("pitch", 1.4) })
+    let mut p = json!({ "yaw": angle("yaw", 1e6), "pitch": angle("pitch", 1.4) });
+    let wheel = m.get("wheel").and_then(Value::as_f64).filter(|x| x.is_finite()).map_or(0, |x| x.round().clamp(-MAX_WHEEL, MAX_WHEEL) as i64);
+    if wheel != 0 {
+        p["wheel"] = json!(wheel);
+    }
+    p
 }
 
 /// A call's state on a link, by what passed either way: on when answered, over when hung up.
@@ -3454,5 +3462,16 @@ mod tests {
         let p = clamp_point(&json!({ "type": "point", "yaw": 2.5, "pitch": 9, "target": "the front door", "channel": 3 }));
         assert_eq!(p, json!({ "yaw": 2.5, "pitch": 1.4 }));
         assert_eq!(clamp_point(&json!({ "yaw": "left", "pitch": null })), json!({ "yaw": 0.0, "pitch": 0.0 }));
+    }
+
+    #[test]
+    fn a_points_wheel_is_whole_notches_in_range() {
+        assert_eq!(clamp_point(&json!({ "yaw": 0, "pitch": 0, "wheel": 3 }))["wheel"], json!(3));
+        assert_eq!(clamp_point(&json!({ "yaw": 0, "pitch": 0, "wheel": -2.6 }))["wheel"], json!(-3));
+        assert_eq!(clamp_point(&json!({ "yaw": 0, "pitch": 0, "wheel": 500 }))["wheel"], json!(10));
+        assert_eq!(clamp_point(&json!({ "yaw": 0, "pitch": 0, "wheel": -1e300 }))["wheel"], json!(-10));
+        for w in [json!(0), json!(0.4), json!("down"), json!(null)] {
+            assert_eq!(clamp_point(&json!({ "yaw": 0, "pitch": 0, "wheel": w })).get("wheel"), None, "a click: no wheel");
+        }
     }
 }

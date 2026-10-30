@@ -402,7 +402,7 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `answer` | `knock`, `accept` (bool), `message`? | let a knocker in, or not |
 | `end` | `visit` | end a visit: yours as a visitor (leave), or a visitor's to you (kick) |
 | `input` | `forward`, `strafe`, `run`, `yaw`, `pitch`, `t` (8.2) | the visitor's input, whole: whenever it changes (at most every 8 ms) and every 33 ms regardless, while visiting |
-| `point` | `yaw`, `pitch` (8.3) | the visitor clicked at the middle of its view, looking there: at most one every 200 ms, while visiting |
+| `point` | `yaw`, `pitch`, `wheel`? (8.3) | the visitor clicked at the middle of its view, looking there, or turned the wheel there (`wheel`: whole notches, positive down, at most 10 either way): at most one every 200 ms, while visiting |
 | `keyframe` | `channel` | the visitor's page asks for a key delta (8.1): where everything that moves is |
 | `scene_resync` | `channel` | the visitor's page asks for the host's whole scene again (an edit was lost, or did not apply) |
 | `pose` | `channel`, `state` (≤ 2 KiB) | the host page's state for a visitor (where it stands), about 5 a second; kept by the visit-client and handed back in `ready` to a page that reloads |
@@ -451,7 +451,7 @@ followed by a `lobby` snapshot and any pending `knock`s.
 | `visit_ended` | `id`, `channel`, `reason` (6.5) | a visit ended |
 | `host_paused` / `host_resumed` | `channel` | the host's page went away / came back (visitor side) |
 | `input` | `channel`, `seq`, `forward`, `strafe`, `run`, `yaw`, `pitch`, `t` | a visitor's latest input (host side) |
-| `point` | `channel`, `yaw`, `pitch` | a visitor pointed (8.3), clamped, at most 5 a second each (host side) |
+| `point` | `channel`, `yaw`, `pitch`, `wheel`? | a visitor pointed (8.3), clamped, at most 5 a second each (host side); `wheel` only for a turn of the wheel |
 | `link_stats` | `channel`, `path` (`"direct"` \| `"relay"`), `rtt_ms` | the visit's link, about once a second, both sides: a relayed path is slower and rate-limited |
 | `keyframe` | `channel` | send a key delta on this visit soon (host side) |
 | `scene_resync` | `channel` | send this visitor the whole scene again (host side): it asked, or the link dropped edits it had not sent |
@@ -812,17 +812,27 @@ its eyes) toward where it looked, and the page decides what that does, if anythi
 from where it stands, in a direction it can look: never through the host's eyes, never at what the host has
 not put there.
 
+**The wheel** (Visit 2.1.1) points too. Turned while the crosshair is on something whose type takes it (below), it
+sends `point` with `wheel`: whole notches, positive turned down (as a page scrolls down), at most 10 either
+way; the page adds up the notches turned while a point waits its turn (one every 200
+ms), so none is lost. Anywhere else the wheel is the visitor's page's, as before. The visit-client clamps
+`wheel` with the rest (a whole number, at most 10 either way; none, or 0, is a click) and counts a wheel point
+among the 5 a second. A user page (engine/SPEC.md 7) sends one with `world.point(target, { wheel })`.
+
 **Interactions** (Visit 0.9) are what a point may do, by type, and only what the host takes. A host lists them
-(`v.interactions`): each type its own entry, `cosmetic` or not, with a `label`, who may (`"everyone"`, or its
-`"guests"`), how far (`reach`, in its units) and what it does (`run`). It marks what may be clicked with the
+(`v.interactions`): each type its own entry, `cosmetic` or not, with a `label`, who may (`"everyone"`, its
+`"guests"`, or, Visit 2.1.1, `"owner"`: its own user alone, at home), how far (`reach`, in its units), whether the
+wheel runs it too (`wheel: true`, Visit 2.1.1) and what it does (`run`). It marks what may be clicked with the
 type, `userData.visitPoint = "<type>"` (on an object, or a group it is part of). On a point the library casts the
 ray itself, from the visitor's eyes: the first thing it meets that is not a visitor's body (nor hidden), then the
-type on it or on what it is part of; if the host takes that type, this visitor may, and it is within reach, its
-`run` gets { visit id, visitor, type, object, point (where the ray met it), distance }. A type the host does not
-name does nothing. The whole scene (and an edit, when they change) says which types are taken, with their
-labels: the visitor's crosshair shows hot over something marked with one, its label beside it, and over nothing
-else. (`userData.visitPoint = true`, an older host's mark, shows hot without a label; the host's page hears the
-point, `point`, and decides by its own lights.)
+type on it or on what it is part of; if the host takes that type, this visitor may, it is within reach, and (for
+the wheel) the type takes the wheel, its `run` gets { visit id, visitor, type, object, point (where the ray met
+it), distance, wheel (the notches; 0 for a click) }. A type the host does not name does nothing, and a type
+without `wheel: true` nothing on the wheel. The whole scene (and an edit, when they change) says which types are
+taken, with their labels and whether each takes the wheel, an owner's own (`"owner"`) never among them: the
+visitor's crosshair shows hot over something marked with one, its label beside it, and over nothing else.
+(`userData.visitPoint = true`, an older host's mark, shows hot without a label; the host's page hears the point,
+`point`, and decides by its own lights.)
 
 **Cosmetic** means the interaction changes only how the room looks or sounds to the people in it: something
 moves, lights up, plays, spins. Anything else (an agent's work, a tool, a file, an account, a message to anyone,
@@ -1333,17 +1343,18 @@ const me = world.frame(dt, { x, y, z, yaw, pitch, air, facing }, { forward, stra
 world.render(camera);
 world.plots        // [{ key, name, at: { x, z, turn }, rect: [x0, z0, x1, z1], inside, offline }] (offline: a guest's plot
                    //   kept while its office is away, 8.10)
-world.inside; world.point(); world.leave(); world.release()
+world.inside; world.point(target, { wheel }); world.leave(); world.release()   // wheel: notches, a wheel point (8.3)
 v.place(key, { x, z, turn }); v.unplace(key)   // yours alone: each friend in it is told where it is, nothing more
 v.on("seen", ({ key, name, at }) => …)          // a friend's world has your room somewhere new (at), or not (null)
 
 // hosting: what visitors may click (8.3), by type: things marked userData.visitPoint = "<type>". A type not
 // named does nothing. One not cosmetic throws unless agreed: true (your user agreed to it, by name).
-v.interactions({ spin: { cosmetic: true, label: "spin it", who: "everyone", reach: 4,
-                         run({ id, visitor, type, object, point, distance }) { /* ... */ } } });
+v.interactions({ spin: { cosmetic: true, label: "spin it", who: "everyone", reach: 4,   // who: "everyone" | "guests" | "owner"
+                         wheel: false,   // true: the wheel runs it too (wheel: its notches; 0 for a click)
+                         run({ id, visitor, type, object, point, distance, wheel }) { /* ... */ } } });
 // every point, raw: { id (its visit), visitor: { id, name, sim }, from: [x, y, z] (its eyes, where this page has
-// it), dir: [x, y, z] (a unit vector, where it looked), yaw, pitch (in the room's terms) }; and each
-// interaction run: "interaction" { id, visitor, type, cosmetic, object }
+// it), dir: [x, y, z] (a unit vector, where it looked), yaw, pitch (in the room's terms), wheel (notches, positive
+// turned down; 0: a click) }; and each interaction run: "interaction" { id, visitor, type, cosmetic, object, wheel }
 v.on("point", ({ id, visitor, from, dir }) => { /* ... */ });
 
 // visiting: where to show the room you are in; the library draws its scene there and captures input; while the

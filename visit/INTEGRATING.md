@@ -384,8 +384,12 @@ visit.host({
   ```
 
   Visit casts the ray from where you have the visitor, finds what it hit, and runs that type's `run` with
-  `{ id, visitor, type, object, point, distance }`; the visitor's crosshair shows hot over it, with the label.
-  Options: `who: "guests"` (only your guests), `reach` (how far, in your units). A type not listed does nothing.
+  `{ id, visitor, type, object, point, distance, wheel }`; the visitor's crosshair shows hot over it, with the label.
+  Options: `who: "guests"` (only your guests) or `who: "owner"` (your user alone, at home: never shown to a
+  visitor), `reach` (how far, in your units), `wheel: true` (the mouse wheel runs it too: `wheel` is the notches
+  turned, positive down, and 0 for a click; without it the wheel never runs the type). A type not listed does
+  nothing. Something to scroll (a list, a deck of cards) takes the wheel; a click on it can still do something
+  else, or nothing (`if (!wheel) return`).
 
   **DON'T IMPLEMENT ANY INTERACTIONS OTHER THAN COSMETIC ONES UNLESS SPECIFICALLY AGREED UPON BY THE USER.**
   Cosmetic means it only changes how the room looks or sounds to the people in it: something moves, lights up,

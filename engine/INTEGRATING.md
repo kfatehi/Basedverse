@@ -498,6 +498,8 @@ change: a room on an older Visit visits you and is visited as before, so nobody 
 - Clicks: a visitor's point is a direction from their eyes, and a third-person camera's mouse ray is not. The
   person's page casts its own ray into the received scene and calls `world.point(hit.point)`, which aims from the
   eyes at it; the hand shows for `userData.visitPoint` there, with some slack for small things (a mosquito).
+  The wheel over something the room scrolls: `world.point(hit.point, { wheel })`, the notches your page counted
+  (positive down), for a type that takes it (`wheel: true`; `who: "owner"` for what only your user may scroll).
 - Your division of clicks (yours against a guest's): the owner's clicks arrive as a visitor's point. Keep the
   table: `visitor.owner` marks them yours, entries that open things on your screen never run from a point, and
   the typed path (Visit's interactions) passes `visitor` too.

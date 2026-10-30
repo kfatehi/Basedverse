@@ -16,6 +16,17 @@
   const VERSION = "2.1.0", PROTO = "basedverse-visit-local/2";
   const MOVE_MS = 1000 / 60, INPUT_MS = 1000 / 30, INPUT_MIN_MS = 8, STALE_MS = 300, LOOK = 0.0025;
   const POINT_MS = 200, AIM_MS = 125;   // a visitor's points, at most one this often; what it aims at, looked for this often
+  // A point's wheel (SPEC 8.3): whole notches, at most MAX_WHEEL either way. A notch is an event of WHEEL_NOTCH pixels or
+  // more (a mouse's click, whatever its browser calls one), or a trackpad's small deltas added up to WHEEL_PAD.
+  const MAX_WHEEL = 10, WHEEL_NOTCH = 50, WHEEL_PAD = 80;
+  function wheelNotch(e, s) {
+    const dy = e.deltaY * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1);
+    if (Math.abs(dy) >= WHEEL_NOTCH) { s.pad = 0; return Math.sign(dy); }
+    s.pad = (s.pad || 0) + dy;
+    if (Math.abs(s.pad) < WHEEL_PAD) return 0;
+    const n = Math.sign(s.pad); s.pad = 0; return n;
+  }
+  const wholeWheel = w => Number.isFinite(w) ? Math.max(-MAX_WHEEL, Math.min(MAX_WHEEL, Math.round(w))) : 0;
   // A visitor's up and down (SPEC 8.2: its input's `up`), as WoW flies: what they do is the room's (its move).
   const UP_KEYS = ["Space", "PageUp"], DOWN_KEYS = ["KeyX", "PageDown"];
   // Positions (SPEC 8.1, MODELS.md): where someone is, is where their feet are, on the ground, in the room's units: a
@@ -1050,8 +1061,10 @@
     // An entry is cosmetic (it changes only how the room looks or sounds: something moves, lights up, plays) or it
     // is not: it reaches further (your agents, tools, files, accounts, messages, anything beyond the room's looks),
     // and is taken only with agreed: true, which means your user agreed to that one, by name. Each:
-    // { cosmetic, agreed, label (what a visitor sees), who ("everyone" | "guests"), reach (scene units), run }, run
-    // getting { id, visitor, type, object, point, distance }. Called again, it replaces them all.
+    // { cosmetic, agreed, label (what a visitor sees), who ("everyone" | "guests" | "owner": your user's own page
+    // alone, never shown to a visitor), reach (scene units), wheel (true: it takes the wheel too), run }, run getting
+    // { id, visitor, type, object, point, distance, wheel } (wheel: notches, positive down; 0 for a click). A type
+    // without wheel: true is never run by the wheel. Called again, it replaces them all.
     interactions(types) {
       this._as("host", "interactions");
       const map = new Map();
@@ -1061,12 +1074,15 @@
         if (t.cosmetic !== true && t.agreed !== true) {
           throw new Error(`visit.interactions: "${type}" is not cosmetic: register it only once your user has agreed to it, by name (agreed: true)`);
         }
-        map.set(type, { cosmetic: t.cosmetic === true, label: String(t.label || type).slice(0, 60), who: t.who === "guests" ? "guests" : "everyone",
-          reach: Number(t.reach) > 0 ? Number(t.reach) : Infinity, run: t.run });
+        map.set(type, { cosmetic: t.cosmetic === true, label: String(t.label || type).slice(0, 60), who: t.who === "guests" || t.who === "owner" ? t.who : "everyone",
+          reach: Number(t.reach) > 0 ? Number(t.reach) : Infinity, wheel: t.wheel === true, run: t.run });
       }
       this._interactions = map;
     }
-    _interList() { return [...this._interactions].map(([type, t]) => ({ type, label: t.label, cosmetic: t.cosmetic })); }
+    // The types the scene says it takes (a visitor's crosshair shows them hot): not the owner's own.
+    _interList() {
+      return [...this._interactions].filter(([, t]) => t.who !== "owner").map(([type, t]) => Object.assign({ type, label: t.label, cosmetic: t.cosmetic }, t.wheel ? { wheel: true } : {}));
+    }
     // Avatars (8.6). Your own: a three.js object, its origin at its feet, facing -z, in your scene's units (`unit`
     // metres each, host()'s by default), with clips named "idle" and "walk" in its `animations` if it has them; a
     // room that would show you as yourself asks for it (null: none). And whose look your visitors have in your room:
@@ -2294,22 +2310,24 @@
       else if (m.type === "point") this._point(h, m);
     }
 
-    // A visitor pointed: clicked at the middle of its view (SPEC 8.3). The page hears "point" with where from
-    // (where this page has the visitor: its eyes) and which way (where it looked as it clicked, in the room's own
-    // terms: yaw 0 toward -z, positive turning left, pitch positive up), and decides what, if anything, that does.
+    // A visitor pointed: clicked at the middle of its view, or turned the wheel there (SPEC 8.3). The page hears
+    // "point" with where from (where this page has the visitor: its eyes), which way (where it looked, in the room's
+    // own terms: yaw 0 toward -z, positive turning left, pitch positive up) and `wheel` (notches, positive down; 0: a
+    // click), and decides what, if anything, that does.
     _point(h, m) {
       const p = h.pose;
       if (!p || !Number.isFinite(m.yaw) || !Number.isFinite(m.pitch)) return;
-      const yaw = h.yaw0 + m.yaw, pitch = Math.max(-1.4, Math.min(1.4, m.pitch)), c = Math.cos(pitch);
+      const yaw = h.yaw0 + m.yaw, pitch = Math.max(-1.4, Math.min(1.4, m.pitch)), c = Math.cos(pitch), wheel = wholeWheel(m.wheel);
       const from = [Number(p.x) || 0, (Number(p.y) || 0) + (h.eyes || 0), Number(p.z) || 0], dir = [-Math.sin(yaw) * c, Math.sin(pitch), -Math.cos(yaw) * c];   // from its eyes
-      this._emit("point", { id: h.id, visitor: h.visitor, from, dir, yaw, pitch });
-      if (this._interactions.size) this._interact(h, from, dir);
+      this._emit("point", { id: h.id, visitor: h.visitor, from, dir, yaw, pitch, wheel });
+      if (this._interactions.size) this._interact(h, from, dir, wheel);
     }
 
     // A point at something marked with a type of interaction this room takes (8.3): the first thing on the ray that
     // is not a visitor's body or hidden, then the type on it or on what it is part of. Its entry runs if the type is
-    // on, this visitor may (a guest, for who: "guests"), and it is within reach.
-    _interact(h, from, dir) {
+    // on, this visitor may (a guest, for who: "guests"; the owner, for who: "owner"), it is within reach, and, for the
+    // wheel, the type takes it.
+    _interact(h, from, dir, wheel = 0) {
       const hk = this._hooks;
       if (!hk) return;
       const T = hk.scene.three, ray = this._ray || (this._ray = new T.Raycaster());
@@ -2325,10 +2343,10 @@
       let object = hit.object, type = null;
       for (; object; object = object.parent) if (object.userData && typeof object.userData.visitPoint === "string") { type = object.userData.visitPoint; break; }
       const t = type && this._interactions.get(type);
-      if (!t || hit.distance > t.reach || (t.who === "guests" && !this.isGuest(h.visitor.key))) return;
-      const e = { id: h.id, visitor: h.visitor, type, object, point: hit.point.toArray(), distance: hit.distance };
+      if (!t || hit.distance > t.reach || (wheel && !t.wheel) || (t.who === "guests" && !this.isGuest(h.visitor.key)) || (t.who === "owner" && !h.owner)) return;
+      const e = { id: h.id, visitor: h.visitor, type, object, point: hit.point.toArray(), distance: hit.distance, wheel };
       try { t.run(e); } catch (x) { console.error(`visit: interaction "${type}" threw`, x); }
-      this._emit("interaction", { id: h.id, visitor: h.visitor, type, cosmetic: t.cosmetic, object });
+      this._emit("interaction", { id: h.id, visitor: h.visitor, type, cosmetic: t.cosmetic, object, wheel });
     }
 
     // Every SCENE_MS, for this room's visitors: what changed in its scene (one edit for them all), where its
@@ -3074,7 +3092,7 @@
       canvas.tabIndex = 0;
       element.appendChild(canvas);
       const view = { element, canvas, ctx: canvas.getContext("2d"), keys: new Set(), yaw: 0, pitch: 0, sentAt: 0, resizeAt: 0, active: true, pending: false, raf: 0,
-        gl: null, changedAt: 0, pointAt: 0, cross: null };   // gl: the canvas a scene is drawn on, in this one's place
+        gl: null, changedAt: 0, pointAt: 0, cross: null, wheelOn: false, wheel: 0, wheelTimer: null, pad: 0 };   // gl: the canvas a scene is drawn on, in this one's place
       // The crosshair: where a click points, shown while the mouse looks about (the pointer locked); hot over
       // something the host marked with userData.visitPoint.
       if (getComputedStyle(element).position === "static") element.style.position = "relative";
@@ -3101,6 +3119,12 @@
       const blur = () => { if (view.keys.size) { view.keys.clear(); changed(); } };
       const click = e => { if (view.active && this._inRoom() && e.currentTarget.requestPointerLock) e.currentTarget.requestPointerLock(); };
       const press = e => { if (e.button === 0 && locked() && view.active && this._inRoom()) this._pointNow(); };
+      // The wheel, while the crosshair is on something whose type takes it (_aim): the room's; anywhere else, untouched.
+      const turn = e => {
+        if (!locked() || !view.active || !view.wheelOn || !this._inRoom()) return;
+        e.preventDefault();
+        this._wheelNow(wheelNotch(e, view));
+      };
       const lock = () => { cross.style.display = locked() && view.active ? "block" : "none"; if (cross.style.display === "none") hint.style.display = "none"; };
       const look = e => {
         if (!locked()) return;
@@ -3111,6 +3135,7 @@
       addEventListener("keydown", down); addEventListener("keyup", up); addEventListener("blur", blur);
       canvas.addEventListener("click", click); document.addEventListener("mousemove", look);
       canvas.addEventListener("mousedown", press); document.addEventListener("pointerlockchange", lock);
+      document.addEventListener("wheel", turn, { passive: false });
       const resize = new ResizeObserver(() => { view.resizeAt = performance.now() + 250; });
       resize.observe(element);
       view.attach = gl => {
@@ -3133,6 +3158,8 @@
         removeEventListener("keydown", down); removeEventListener("keyup", up); removeEventListener("blur", blur);
         canvas.removeEventListener("click", click); document.removeEventListener("mousemove", look);
         canvas.removeEventListener("mousedown", press); document.removeEventListener("pointerlockchange", lock);
+        document.removeEventListener("wheel", turn);
+        clearTimeout(view.wheelTimer); view.wheelTimer = null;
         cross.remove(); hint.remove();
         resize.disconnect();
         if (locked()) document.exitPointerLock();
@@ -3183,6 +3210,23 @@
       this._send({ type: "point", yaw: v.yaw, pitch: v.pitch });
       if (v.cross) { v.cross.style.transform = "scale(1.6)"; setTimeout(() => { v.cross.style.transform = ""; }, 120); }
     }
+    // A turn of the wheel there (SPEC 8.3): its notches added up while a point waits its turn (one every POINT_MS),
+    // then sent where the visitor looks then, at most MAX_WHEEL at once (the rest in the next).
+    _wheelNow(n) {
+      const v = this._view;
+      if (!v || !n) return;
+      v.wheel = (v.wheel || 0) + n;
+      if (v.wheelTimer) return;
+      const send = () => {
+        v.wheelTimer = null;
+        const w = wholeWheel(v.wheel);
+        if (!w || this._view !== v || !this._inRoom()) { v.wheel = 0; return; }
+        v.wheel -= w; v.pointAt = performance.now();
+        this._send({ type: "point", yaw: v.yaw, pitch: v.pitch, wheel: w });
+        if (v.wheel) v.wheelTimer = setTimeout(send, POINT_MS);
+      };
+      v.wheelTimer = setTimeout(send, Math.max(0, v.pointAt + POINT_MS - performance.now()));
+    }
 
     // What the crosshair is on, in the room visited: hot when the first thing there, or what it is part of, is
     // marked userData.visitPoint with a type the host takes (with its label beside it), or true (an older host's
@@ -3195,16 +3239,17 @@
       s.ray.setFromCamera(s.mid, s.camera);
       s.ray.camera = s.camera;
       const shown = o => { for (; o; o = o.parent) if (!o.visible || s.own.includes(o) || (s.ownMount || []).includes(o)) return false; return true; };
-      let hot = false, label = "";
+      let hot = false, label = "", wheel = false;
       for (const h of s.ray.intersectObject(s.root, true)) {
         if (!shown(h.object)) continue;
         for (let o = h.object; o; o = o.parent) {
           const p = o.userData && o.userData.visitPoint;
           if (p === true) { hot = true; break; }
-          if (typeof p === "string") { const i = s.interactions.get(p); if (i) { hot = true; label = i.label; } break; }
+          if (typeof p === "string") { const i = s.interactions.get(p); if (i) { hot = true; label = i.label; wheel = i.wheel; } break; }
         }
         break;
       }
+      v.wheelOn = wheel;   // the wheel there is the room's (its type takes it), else nobody's
       v.cross.style.background = hot ? "rgba(255,255,255,.95)" : "";
       if (v.hint && v.hint.textContent !== label) { v.hint.textContent = label; v.hint.style.display = label ? "block" : "none"; }
     }
@@ -3538,7 +3583,7 @@
 
   // The interactions a host takes, as its scene says them: type -> { label, cosmetic }.
   const interMap = list => new Map((Array.isArray(list) ? list : []).filter(i => isObj(i) && typeof i.type === "string")
-    .map(i => [i.type, { label: String(i.label || i.type).slice(0, 60), cosmetic: i.cosmetic === true }]));
+    .map(i => [i.type, { label: String(i.label || i.type).slice(0, 60), cosmetic: i.cosmetic === true, wheel: i.wheel === true }]));
 
   const hashKey = k => { let h = 2166136261; for (let i = 0; i < k.length; i++) h = Math.imul(h ^ k.charCodeAt(i), 16777619); return h >>> 0; };
   // A rectangle on the floor, [x0, z0, x1, z1]; plots are only ever turned by quarter turns, so it is one.
@@ -3866,10 +3911,34 @@
     // While in a plot: point where you look (SPEC 8.3). Home: out of the plot you are in.
     // A click, as a visitor's point (SPEC 8.3): where this page looks, or, given `target` (a point in this page's world,
     // what its own ray from its camera met in the plot), the way to it from where the host has this page's eyes: a
-    // camera behind you looks along another line than your eyes do (a user page's, engine/SPEC.md 7).
-    point(target) {
+    // camera behind you looks along another line than your eyes do (a user page's, engine/SPEC.md 7). With `wheel`
+    // (notches, positive down: a turn of the wheel there, the page's own to count), a wheel point: notches added up
+    // while a point waits its turn (one every POINT_MS, as a visitor's), then sent at most MAX_WHEEL at once.
+    point(target, { wheel = 0 } = {}) {
+      const a = this._aimAt(target);
+      if (!a) return false;
+      if (!wheel) {
+        this._pointAt = performance.now();
+        this.v._send({ type: "point", yaw: a.yaw, pitch: a.pitch });
+        return true;
+      }
+      this._wheel = (this._wheel || 0) + (Number(wheel) || 0); this._wheelTarget = target;
+      if (this._wheelTimer) return true;
+      const send = () => {
+        this._wheelTimer = null;
+        const w = wholeWheel(this._wheel), a = w && this._aimAt(this._wheelTarget);
+        if (!a) { this._wheel = 0; return; }   // nothing whole, or out of the plot meanwhile
+        this._wheel -= w; this._pointAt = performance.now();
+        this.v._send({ type: "point", yaw: a.yaw, pitch: a.pitch, wheel: w });
+        if (wholeWheel(this._wheel)) this._wheelTimer = setTimeout(send, POINT_MS);
+      };
+      this._wheelTimer = setTimeout(send, Math.max(0, (this._pointAt || 0) + POINT_MS - performance.now()));
+      return true;
+    }
+    // Where a point goes, in the plot you are in: { yaw, pitch } (point's), or null when you are in none.
+    _aimAt(target) {
       const x = this.in != null && this.list.find(y => y.w && y.w.channel === this.in);
-      if (!x) return false;
+      if (!x) return null;
       let yaw = this.look.yaw - x.at.turn * Math.PI / 2, pitch = this.look.pitch;
       if (target && this.me) {
         const T = this.T, h = this._holder(x), eyes = ((this.v._bodies.get(x.w.channel) || {}).eyes) || EYES;
@@ -3878,8 +3947,7 @@
         to.sub(from);
         if (to.lengthSq() > 1e-6) { yaw = Math.atan2(-to.x, -to.z); pitch = Math.max(-1.4, Math.min(1.4, Math.asin(to.y / to.length()))); }
       }
-      this.v._send({ type: "point", yaw, pitch });
-      return true;
+      return { yaw, pitch };
     }
     leave() { const w = this.in != null && this.v._watches.get(this.in); if (w) this._exit(w); }
 
