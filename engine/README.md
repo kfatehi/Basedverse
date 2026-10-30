@@ -7,7 +7,7 @@ from 2.0 it is a library built into `visit` ([../visit/client/](../visit/client/
 
 **What it is:** `src/lib.rs` loads the room's server page in the headless Chrome `visit` carries and keeps it
 hosting (its key on the room's own requests, reloads with backoff, the memory ceiling, `/health`); `src/cdp.rs`
-speaks the devtools protocol to that Chrome (over its pipe; on Windows, a port on 127.0.0.1); `src/shim.js` is what
+speaks the devtools protocol to that Chrome (over its pipe); `src/shim.js` is what
 the page gets before its own scripts: `window.VISIT_ENGINE`, draw calls made no-ops, visible and focused, no
 microphone, frames at 60 or `ENGINE_TICK_IDLE` a second. The Chrome is Chrome for Testing's headless shell, built
 and pinned in [../deps/](../deps/) (its README says how `visit` starts it).

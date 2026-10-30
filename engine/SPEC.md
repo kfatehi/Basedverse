@@ -268,10 +268,10 @@ so a bare machine draws the same text as any other; on macOS and Windows, the sy
 --window-size=<ENGINE_WINDOW>` and a profile of its own (`engine/profile/` in the workroom's data directory, made
 new at each start of the browser), the page's metrics set to `ENGINE_WINDOW` through the devtools protocol.
 
-**The devtools protocol** goes over Chrome's pipe on Linux and macOS (`--remote-debugging-pipe`, its fds 3 and 4),
-which nothing else on the machine can reach; on Windows, over a port on `127.0.0.1` that Chrome picks itself
-(`--remote-debugging-port=0`, read back from its `DevToolsActivePort`). On Linux the browser dies with `visit`,
-however `visit` ends.
+**The devtools protocol** goes over Chrome's pipe (`--remote-debugging-pipe`), which nothing else on the machine
+can reach: on Linux and macOS its fds 3 and 4; on Windows two pipe handles it inherits, named to it by
+`--remote-debugging-io-pipes=<in>,<out>`. On Linux the browser dies with `visit`, however `visit` ends; elsewhere
+it shuts itself down once its pipe closes, which `visit` ending does.
 
 **Its sandbox.** Chrome's own, where the machine allows one. Where it does not (a container; Ubuntu 23.10 and later,
 which keep unprivileged user namespaces from it), Chrome dies at start saying so, and the engine starts it again
