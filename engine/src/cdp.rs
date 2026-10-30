@@ -1,17 +1,22 @@
-//! One headless Chrome, spoken to over its devtools protocol: on Unix its pipe (`--remote-debugging-pipe`: commands
-//! in on its fd 3, answers and events out on its fd 4, each JSON ended by a NUL), so nothing else on the machine can
-//! reach it; on Windows a port on 127.0.0.1 it picks (`--remote-debugging-port=0`, read back from its
-//! `DevToolsActivePort`). Commands may carry a sessionId (a page attached flat); events go to the channel given.
+//! One headless Chrome, spoken to over its devtools protocol on its pipe (`--remote-debugging-pipe`: commands in,
+//! answers and events out, each JSON ended by a NUL), so nothing else on the machine can reach it. On Unix the pipe's
+//! ends are its fds 3 and 4; on Windows two inherited handles, named to it by `--remote-debugging-io-pipes=<in>,<out>`.
+//! Commands may carry a sessionId (a page attached flat); events go to the channel given.
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
+#[cfg(unix)]
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
+#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, BufReader};
+#[cfg(unix)]
 use tokio::process::{Child, Command};
+#[cfg(windows)]
+use win::Child;
 use tokio::sync::{mpsc, oneshot};
 use tracing::debug;
 
@@ -54,14 +59,15 @@ impl Browser {
     /// Starts `exe` with `args` (and `env` for its process alone) and its devtools connection; events to `events`.
     pub async fn start(exe: &Path, args: &[String], env: &[(String, String)], profile: &Path,
                        events: mpsc::UnboundedSender<Value>) -> anyhow::Result<Browser> {
-        let mut cmd = Command::new(exe);
-        cmd.args(args).envs(env.iter().map(|(k, v)| (k, v))).arg(format!("--user-data-dir={}", profile.display()))
-            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).kill_on_drop(true);
         let (out_tx, out_rx) = mpsc::unbounded_channel::<String>();
         let pending: Pending = Arc::default();
         let gone = Arc::new(AtomicBool::new(false));
+        let stderr: Arc<Mutex<VecDeque<String>>> = Arc::default();
         #[cfg(unix)]
-        let (mut child, reader, writer) = {
+        let (child, reader, writer) = {
+            let mut cmd = Command::new(exe);
+            cmd.args(args).envs(env.iter().map(|(k, v)| (k, v))).arg(format!("--user-data-dir={}", profile.display()))
+                .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped()).kill_on_drop(true);
             let (to_r, to_w) = std::io::pipe()?;
             let (from_r, from_w) = std::io::pipe()?;
             use std::os::fd::{AsRawFd, OwnedFd};
@@ -80,52 +86,60 @@ impl Browser {
                     Ok(())
                 });
             }
-            let child = cmd.spawn()?;
+            let mut child = cmd.spawn()?;
             drop(to_r);
             drop(from_w);
+            if let Some(err) = child.stderr.take() {
+                let keep = stderr.clone();
+                tokio::spawn(async move {
+                    let mut lines = BufReader::new(err).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        keep_line(&keep, line);
+                    }
+                });
+            }
             let reader = tokio::net::unix::pipe::Receiver::from_owned_fd(OwnedFd::from(from_r))?;
             let writer = tokio::net::unix::pipe::Sender::from_owned_fd(OwnedFd::from(to_w))?;
             (child, reader, writer)
         };
+        // Chrome takes the pipe's ends as two handles it inherits, named by their values (an inherited handle keeps
+        // its value) in --remote-debugging-io-pipes; it adopts each only if it is a pipe. It is started by hand
+        // (win::spawn) so that it inherits those, its stderr's and NUL, and nothing else this process holds.
         #[cfg(windows)]
-        let mut child = {
-            let _ = std::fs::remove_file(profile.join("DevToolsActivePort"));
-            cmd.arg("--remote-debugging-port=0").arg("--remote-debugging-address=127.0.0.1");
-            cmd.spawn()?
+        let (child, reader, writer) = {
+            anyhow::ensure!(env.is_empty(), "no environment of its own for Chrome on Windows");
+            let (to_r, to_w) = std::io::pipe()?;
+            let (from_r, from_w) = std::io::pipe()?;
+            let (err_r, err_w) = std::io::pipe()?;
+            let null = std::fs::OpenOptions::new().read(true).write(true).open("NUL")?;
+            let mut argv = args.to_vec();
+            argv.push(format!("--user-data-dir={}", profile.display()));
+            argv.push("--remote-debugging-pipe".into());
+            argv.push(format!("--remote-debugging-io-pipes={},{}", win::value(&to_r)?, win::value(&from_w)?));
+            let child = win::spawn(exe, &argv, &null, &err_w, &[&to_r, &from_w])?;
+            drop((to_r, from_w, err_w, null));
+            let keep = stderr.clone();
+            std::thread::Builder::new().name("chrome-stderr".into()).spawn(move || {
+                use std::io::BufRead;
+                for line in std::io::BufReader::new(err_r).lines() {
+                    let Ok(line) = line else { break };
+                    keep_line(&keep, line);
+                }
+            })?;
+            (child, from_r, to_w)
         };
         let pid = child.id().unwrap_or(0);
-        let stderr: Arc<Mutex<VecDeque<String>>> = Arc::default();
-        if let Some(err) = child.stderr.take() {
-            let keep = stderr.clone();
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(err).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    debug!(target: "engine", "chrome: {line}");
-                    let mut k = keep.lock().unwrap();
-                    if k.len() == 40 {
-                        k.pop_front();
-                    }
-                    k.push_back(line);
-                }
-            });
-        }
         #[cfg(unix)]
         {
             tokio::spawn(write_pipe(writer, out_rx));
             tokio::spawn(read_pipe(reader, pending.clone(), gone.clone(), events));
         }
+        // An anonymous pipe on Windows has no overlapped I/O for tokio to wait on: a thread each way, blocking.
         #[cfg(windows)]
         {
-            let ws = match connect_port(profile, &mut child).await {
-                Ok(ws) => ws,
-                Err(e) => {
-                    let _ = child.kill().await;
-                    return Err(e);
-                }
-            };
-            let (sink, stream) = futures_util::StreamExt::split(ws);
-            tokio::spawn(write_ws(sink, out_rx));
-            tokio::spawn(read_ws(stream, pending.clone(), gone.clone(), events));
+            let (p, g) = (pending.clone(), gone.clone());
+            std::thread::Builder::new().name("cdp-write".into()).spawn(move || write_blocking(writer, out_rx))?;
+            std::thread::Builder::new().name("cdp-read".into()).spawn(move || read_blocking(reader, p, g, events))?;
         }
         Ok(Browser { child: Mutex::new(Some(child)), pid, out: out_tx, pending, next: AtomicU64::new(0), gone, stderr })
     }
@@ -177,8 +191,11 @@ impl Browser {
         }
     }
 
-    /// Stops it: asked first (SIGTERM on Unix), killed after 5 s.
+    /// Stops it: asked first (SIGTERM on Unix, Browser.close over its pipe on Windows, which has no SIGTERM), killed
+    /// after 5 s.
     pub async fn stop(&self) {
+        #[cfg(windows)]
+        let _ = self.post("Browser.close", json!({}), None);
         self.gone.store(true, Ordering::Relaxed);
         let Some(mut child) = self.child.lock().unwrap().take() else { return };
         #[cfg(unix)]
@@ -190,6 +207,16 @@ impl Browser {
             let _ = child.kill().await;
         }
     }
+}
+
+/// A line Chrome wrote on stderr: logged, and the last 40 kept.
+fn keep_line(keep: &Mutex<VecDeque<String>>, line: String) {
+    debug!(target: "engine", "chrome: {line}");
+    let mut k = keep.lock().unwrap();
+    if k.len() == 40 {
+        k.pop_front();
+    }
+    k.push_back(line);
 }
 
 /// A message from the browser: an answer to its command, or an event.
@@ -235,55 +262,263 @@ async fn read_pipe(mut r: tokio::net::unix::pipe::Receiver, pending: Pending, go
             Ok(0) | Err(_) => break,
             Ok(n) => n,
         };
-        buf.extend_from_slice(&chunk[..n]);
-        while let Some(i) = buf.iter().position(|&b| b == 0) {
-            deliver(&buf[..i], &pending, &events);
-            buf.drain(..=i);
-        }
+        frames(&mut buf, &chunk[..n], &pending, &events);
     }
     closed(&pending, &gone);
 }
 
-#[cfg(windows)]
-type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+/// Bytes read from the pipe: each whole message (up to its NUL) delivered, the rest kept for the next read.
+fn frames(buf: &mut Vec<u8>, read: &[u8], pending: &Pending, events: &mpsc::UnboundedSender<Value>) {
+    buf.extend_from_slice(read);
+    while let Some(i) = buf.iter().position(|&b| b == 0) {
+        deliver(&buf[..i], pending, events);
+        buf.drain(..=i);
+    }
+}
 
-/// Chrome's port and path from its profile's `DevToolsActivePort` (written once it listens), connected to.
+/// Chrome started on Windows with CreateProcessW, which std's Command can't do: PROC_THREAD_ATTRIBUTE_HANDLE_LIST, so
+/// Chrome inherits the handles listed and nothing else this process holds as inheritable (another spawn's in flight).
+/// The listed ones are inheritable from just before the spawn until the caller drops them right after it; a child
+/// spawned by another thread in that moment, without a list of its own, could still take them.
 #[cfg(windows)]
-async fn connect_port(profile: &Path, child: &mut Child) -> anyhow::Result<Ws> {
-    let file = profile.join("DevToolsActivePort");
-    for _ in 0..300 {
-        if let Ok(Some(_)) = child.try_wait() {
-            anyhow::bail!("it exited at start");
+mod win {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::os::windows::process::ExitStatusExt;
+    use std::path::Path;
+    use std::process::ExitStatus;
+    use std::time::Duration;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, SetHandleInformation, HANDLE, HANDLE_FLAG_INHERIT, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess, InitializeProcThreadAttributeList, TerminateProcess,
+        UpdateProcThreadAttribute, WaitForSingleObject, CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT,
+        PROCESS_INFORMATION, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW,
+    };
+
+    /// A handle's value, as Chrome parses it (a u32: Windows handles hold 32 significant bits).
+    pub fn value(h: &impl AsRawHandle) -> std::io::Result<u32> {
+        u32::try_from(h.as_raw_handle() as usize).map_err(|_| std::io::Error::other("a handle's value over 32 bits"))
+    }
+
+    /// The child: what the engine asks of tokio's Child (its pid, whether it ended, waited for, killed), and killed
+    /// when dropped, as tokio's with kill_on_drop.
+    pub struct Child {
+        process: OwnedHandle,
+        pid: u32,
+    }
+
+    impl Child {
+        pub fn id(&self) -> Option<u32> {
+            Some(self.pid)
         }
-        if let Ok(s) = std::fs::read_to_string(&file) {
-            let mut lines = s.lines();
-            if let (Some(port), Some(path)) = (lines.next(), lines.next()) {
-                let (ws, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{}{}", port.trim(), path.trim())).await?;
-                return Ok(ws);
+
+        pub fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+            let h = self.process.as_raw_handle();
+            // SAFETY: the process's own handle, open while self is.
+            match unsafe { WaitForSingleObject(h, 0) } {
+                WAIT_TIMEOUT => Ok(None),
+                WAIT_OBJECT_0 => {
+                    let mut code = 0u32;
+                    // SAFETY: as above; code is ours to write.
+                    if unsafe { GetExitCodeProcess(h, &mut code) } == 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(Some(ExitStatus::from_raw(code)))
+                }
+                _ => Err(std::io::Error::last_os_error()),
             }
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        pub async fn wait(&mut self) -> std::io::Result<ExitStatus> {
+            loop {
+                if let Some(status) = self.try_wait()? {
+                    return Ok(status);
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        }
+
+        pub async fn kill(&mut self) -> std::io::Result<()> {
+            self.terminate();
+            self.wait().await.map(|_| ())
+        }
+
+        fn terminate(&mut self) {
+            if let Ok(None) = self.try_wait() {
+                // SAFETY: the process's own handle, open while self is.
+                unsafe { TerminateProcess(self.process.as_raw_handle(), 1) };
+            }
+        }
     }
-    anyhow::bail!("its devtools port never came")
+
+    impl Drop for Child {
+        fn drop(&mut self) {
+            self.terminate();
+        }
+    }
+
+    /// `"…"` around an argument where Windows' command line needs it (the rules CommandLineToArgvW reads by).
+    fn quote(arg: &str, line: &mut String) {
+        if !arg.is_empty() && !arg.contains([' ', '\t', '\n', '\x0b', '"']) {
+            line.push_str(arg);
+            return;
+        }
+        line.push('"');
+        let mut slashes = 0;
+        for c in arg.chars() {
+            match c {
+                '\\' => slashes += 1,
+                // backslashes before a quote are doubled, and one more escapes the quote
+                '"' => {
+                    line.extend(std::iter::repeat_n('\\', slashes + 1));
+                    slashes = 0;
+                }
+                _ => slashes = 0,
+            }
+            line.push(c);
+        }
+        // and before the closing quote, doubled
+        line.extend(std::iter::repeat_n('\\', slashes));
+        line.push('"');
+    }
+
+    /// Starts `exe` with `args`, its stdin and stdout `null`, its stderr `err`, inheriting `inherit` (and those) only.
+    pub fn spawn(exe: &Path, args: &[String], null: &impl AsRawHandle, err: &impl AsRawHandle,
+                 inherit: &[&dyn AsRawHandle]) -> std::io::Result<Child> {
+        let mut line = String::new();
+        quote(&exe.to_string_lossy(), &mut line);
+        for a in args {
+            line.push(' ');
+            quote(a, &mut line);
+        }
+        let mut line: Vec<u16> = line.encode_utf16().chain([0]).collect();
+        let exe: Vec<u16> = exe.as_os_str().encode_wide().chain([0]).collect();
+        let mut handles: Vec<HANDLE> = vec![null.as_raw_handle(), err.as_raw_handle()];
+        handles.extend(inherit.iter().map(|h| h.as_raw_handle()));
+        for &h in &handles {
+            // SAFETY: handles the caller holds open for the call; only their inherit flag changes.
+            if unsafe { SetHandleInformation(h, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) } == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+        }
+        // The attribute list, sized as Windows asks (a first call that fails by design), then holding the handles.
+        let mut size = 0usize;
+        // SAFETY: a null list with a size to fill is the documented way to ask the size.
+        unsafe { InitializeProcThreadAttributeList(std::ptr::null_mut(), 1, 0, &mut size) };
+        let mut list = vec![0u64; size.div_ceil(8)];
+        let attrs = list.as_mut_ptr().cast();
+        // SAFETY: attrs is `size` bytes, 8-aligned; handles outlives the list, deleted below before either goes.
+        unsafe {
+            if InitializeProcThreadAttributeList(attrs, 1, 0, &mut size) == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST as usize, handles.as_ptr().cast(),
+                                         std::mem::size_of_val(handles.as_slice()), std::ptr::null_mut(), std::ptr::null()) == 0 {
+                let e = std::io::Error::last_os_error();
+                DeleteProcThreadAttributeList(attrs);
+                return Err(e);
+            }
+        }
+        // SAFETY: plain C structs, zero a valid start for both.
+        let mut si: STARTUPINFOEXW = unsafe { std::mem::zeroed() };
+        si.StartupInfo.cb = std::mem::size_of::<STARTUPINFOEXW>() as u32;
+        si.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+        si.StartupInfo.hStdInput = null.as_raw_handle();
+        si.StartupInfo.hStdOutput = null.as_raw_handle();
+        si.StartupInfo.hStdError = err.as_raw_handle();
+        si.lpAttributeList = attrs;
+        let mut pi: PROCESS_INFORMATION = unsafe { std::mem::zeroed() };
+        // SAFETY: exe and line NUL-ended UTF-16 (line writable, as CreateProcessW wants), si and its list alive for
+        // the call; no environment (Chrome gets this process's) and no directory (this process's).
+        let ok = unsafe {
+            let ok = CreateProcessW(exe.as_ptr(), line.as_mut_ptr(), std::ptr::null(), std::ptr::null(), 1,
+                                    CREATE_UNICODE_ENVIRONMENT | EXTENDED_STARTUPINFO_PRESENT, std::ptr::null(),
+                                    std::ptr::null(), &si.StartupInfo, &mut pi);
+            DeleteProcThreadAttributeList(attrs);
+            ok
+        };
+        if ok == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: both handles CreateProcessW just gave this process, each owned once.
+        unsafe { CloseHandle(pi.hThread) };
+        Ok(Child { process: unsafe { OwnedHandle::from_raw_handle(pi.hProcess) }, pid: pi.dwProcessId })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn quote_as_windows_reads_it() {
+            let q = |a: &str| {
+                let mut l = String::new();
+                super::quote(a, &mut l);
+                l
+            };
+            assert_eq!(q("--no-sandbox"), "--no-sandbox");
+            assert_eq!(q(r"--user-data-dir=C:\a b\profile"), r#""--user-data-dir=C:\a b\profile""#);
+            assert_eq!(q(r"C:\a b\"), r#""C:\a b\\""#);
+            assert_eq!(q(r#"say "hi""#), r#""say \"hi\"""#);
+            assert_eq!(q(r#"a\"b"#), r#""a\\\"b""#);
+            assert_eq!(q(""), r#""""#);
+        }
+
+        /// What Chrome does with --remote-debugging-io-pipes, done by a PowerShell: write to a pipe handle by its
+        /// value. The listed pipe gets its bytes; an inheritable handle not on the list never reaches the child.
+        #[test]
+        fn a_child_inherits_the_listed_handles_and_no_other() {
+            use std::io::Read;
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::Foundation::{SetHandleInformation, HANDLE_FLAG_INHERIT};
+            let (mut r, w) = std::io::pipe().unwrap();
+            let (mut stray_r, stray_w) = std::io::pipe().unwrap();
+            // SAFETY: a handle this test holds; only its inherit flag changes.
+            assert_ne!(unsafe { SetHandleInformation(stray_w.as_raw_handle(), HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) }, 0);
+            let (_err_r, err_w) = std::io::pipe().unwrap();
+            let null = std::fs::OpenOptions::new().read(true).write(true).open("NUL").unwrap();
+            let script = format!(
+                "$h = [Microsoft.Win32.SafeHandles.SafeFileHandle]::new([IntPtr]::new({}), $false); \
+                 $f = [IO.FileStream]::new($h, 'Write'); $f.Write([byte[]](111, 107), 0, 2); $f.Flush(); Start-Sleep 20",
+                super::value(&w).unwrap());
+            let args = ["-NoProfile", "-NonInteractive", "-Command", &script].map(String::from);
+            let child = super::spawn(std::path::Path::new(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
+                                         &args, &null, &err_w, &[&w]).unwrap();
+            drop((w, err_w, null));
+            let mut got = [0u8; 2];
+            r.read_exact(&mut got).unwrap();
+            assert_eq!(&got, b"ok");
+            // The stray pipe's only writer is this test's: dropped, its reader ends at once, while the child lives.
+            // (A child holding a copy keeps it open until it ends, 20 s on: well past the 10 s allowed.)
+            let t = std::time::Instant::now();
+            drop(stray_w);
+            assert_eq!(stray_r.read(&mut [0u8; 1]).unwrap(), 0);
+            assert!(t.elapsed() < std::time::Duration::from_secs(10), "the child held the stray handle");
+            drop(child);
+        }
+    }
 }
 
 #[cfg(windows)]
-async fn write_ws(mut sink: futures_util::stream::SplitSink<Ws, tokio_tungstenite::tungstenite::Message>, mut rx: mpsc::UnboundedReceiver<String>) {
-    use futures_util::SinkExt;
-    while let Some(m) = rx.recv().await {
-        if sink.send(tokio_tungstenite::tungstenite::Message::Text(m.into())).await.is_err() {
+fn write_blocking(mut w: std::io::PipeWriter, mut rx: mpsc::UnboundedReceiver<String>) {
+    use std::io::Write;
+    while let Some(m) = rx.blocking_recv() {
+        if w.write_all(m.as_bytes()).is_err() || w.write_all(b"\0").is_err() {
             return;
         }
     }
 }
 
 #[cfg(windows)]
-async fn read_ws(mut stream: futures_util::stream::SplitStream<Ws>, pending: Pending, gone: Arc<AtomicBool>, events: mpsc::UnboundedSender<Value>) {
-    use futures_util::StreamExt;
-    while let Some(Ok(m)) = stream.next().await {
-        if let tokio_tungstenite::tungstenite::Message::Text(t) = m {
-            deliver(t.as_bytes(), &pending, &events);
-        }
+fn read_blocking(mut r: std::io::PipeReader, pending: Pending, gone: Arc<AtomicBool>, events: mpsc::UnboundedSender<Value>) {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    let mut chunk = vec![0u8; 1 << 16];
+    loop {
+        let n = match r.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        frames(&mut buf, &chunk[..n], &pending, &events);
     }
     closed(&pending, &gone);
 }
@@ -291,4 +526,24 @@ async fn read_ws(mut stream: futures_util::stream::SplitStream<Ws>, pending: Pen
 /// The browser's executable in the Chrome unpacked at `top` (deps/README.md).
 pub fn executable(top: &Path) -> PathBuf {
     top.join(if cfg!(windows) { "chrome-headless-shell.exe" } else { "chrome-headless-shell" })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frames_deliver_whole_messages_across_reads() {
+        let pending: Pending = Arc::default();
+        let (tx, mut rx) = oneshot::channel();
+        pending.lock().unwrap().insert(1, tx);
+        let (events, mut got) = mpsc::unbounded_channel();
+        let mut buf = Vec::new();
+        frames(&mut buf, br#"{"method":"A"}"#, &pending, &events);
+        assert!(got.try_recv().is_err(), "no NUL yet: nothing delivered");
+        frames(&mut buf, b"\0{\"id\":1,\"result\":{}}\0{\"meth", &pending, &events);
+        assert_eq!(got.try_recv().unwrap()["method"], "A");
+        assert_eq!(rx.try_recv().unwrap()["id"], 1);
+        assert_eq!(buf, br#"{"meth"#);
+    }
 }
