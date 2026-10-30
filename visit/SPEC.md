@@ -779,8 +779,8 @@ data.
 
 | field | type | meaning |
 |---|---|---|
-| `forward` | −1, 0 or 1 | W/↑ is 1, S/↓ is −1 |
-| `strafe` | −1, 0 or 1 | D/→ is 1 (right), A/← is −1 |
+| `forward` | −1 to 1 | W/↑ is 1, S/↓ is −1; an analog stick's push between (hundredths) |
+| `strafe` | −1 to 1 | D/→ is 1 (right), A/← is −1; an analog stick's push between (hundredths) |
 | `up` | −1, 0 or 1 | Space or Page Up is 1 (up), X or Page Down is −1 (down), as in WoW: what it does is the room's (its `move`) |
 | `run` | boolean | Shift held |
 | `riding` | string or null | the mount the visitor rides (8.11): one of its possessions' ids; the host decides |
@@ -792,6 +792,11 @@ data.
 the mouse moves and sends where it is looking; the host applies it as is. Where the visitor stands is the
 host's to decide (`move`), against its own walls and furniture; the visitor's page walks at once by the
 host's `walk` and takes the host's answer (8.1). The host clamps every field to its range.
+
+**A stick is analog.** A page driven by a controller's left stick sends how far it is pushed, `forward` and
+`strafe` each between −1 and 1, and a user page's world passes them on as they are (`world.frame`'s input).
+`Visit.walk` goes the push's own way, as fast as it is pushed: a whole push, a key, or two keys' diagonal at its
+`speed`. A room's `move` that takes only the sign still works as before.
 
 **Physics are the room's.** Visit has none of its own: it carries what the room needs to decide, and the room's
 `spawn` and `move` say where a visitor is, its height included. A visitor's `up` (−1, 0, 1) reaches `move`, which
